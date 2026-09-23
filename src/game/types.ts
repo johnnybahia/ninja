@@ -133,6 +133,7 @@ export interface ProjectileInstance {
   sp?: boolean;
   ptMult?: number;
   bomb?: boolean;
+  aoeR?: number;
   kb?: number;
   noSolid?: boolean;
 }

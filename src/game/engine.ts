@@ -1030,9 +1030,9 @@ export class GameEngine {
     }
   }
 
-  private spawnBloodRing(x: number, y: number, z: number, maxR: number) {
+  private spawnBloodRing(x: number, y: number, z: number, maxR: number, color = 0x9b111e, dur = 0.28) {
     const ringMat = new THREE.MeshBasicMaterial({
-      color: 0x9b111e,
+      color,
       transparent: true,
       opacity: 0.85,
       side: THREE.DoubleSide,
@@ -1042,7 +1042,25 @@ export class GameEngine {
     m.position.set(x, Math.max(0.08, y * 0.4), z);
     m.scale.set(0.1, 0.1, 0.1);
     this.scene.add(m);
-    this.rings.push({ m, t: 0, dur: 0.28, maxR, startR: 0.2 });
+    this.rings.push({ m, t: 0, dur, maxR, startR: 0.2 });
+  }
+
+  // AoE burst for bomb-flagged projectiles (grenades, bazooka rockets). Damage falls
+  // off with distance from the blast center; the player's own explosives never hurt them.
+  private explodeAt(x: number, y: number, z: number, radius: number, dmg: number, kb: number) {
+    for (const e of this.enemies) {
+      if (e.dead) continue;
+      const dx = e.pos.x - x;
+      const dz = e.pos.z - z;
+      const d = Math.hypot(dx, dz) || 0.001;
+      if (d > radius + e.r) continue;
+      const falloff = 1 - Math.min(1, d / (radius + e.r));
+      this.hitEnemy(e, Math.round(dmg * (0.5 + 0.5 * falloff)), dx / d, dz / d, kb, true);
+    }
+    this.emitParticles(x, y + 0.4, z, 26, 0xffb04a, 6, 3, 5, 0.55);
+    this.spawnBloodRing(x, y, z, radius, 0xffa030, 0.4);
+    this.shake = Math.max(this.shake, 0.4);
+    sfx.boom();
   }
 
   private updateParticles(dt: number) {
@@ -1461,6 +1479,156 @@ export class GameEngine {
       case 'karate':
         this.player.rush = { t: 0, hits: 0, kicked: false };
         break;
+      case 'bomb': {
+        // Chuva de Fogo: a scatter of grenades arcing down across an area instead of one throw
+        const n = 5;
+        for (let i = 0; i < n; i++) {
+          const a = this.player.yaw + (i - (n - 1) / 2) * 0.3 + rand(-0.05, 0.05);
+          this.spawnProj({
+            type: 'bomb',
+            friendly: true,
+            sp: true,
+            bomb: true,
+            pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y + 0.2, this.tmpH.z),
+            vel: new THREE.Vector3(Math.sin(a) * 13, 7 + rand(-1, 2), Math.cos(a) * 13),
+            grav: 16,
+            dmg: 42,
+            aoeR: 3.2,
+            kb: 8,
+            life: 2.5
+          });
+        }
+        sfx.throw();
+        break;
+      }
+      case 'knife':
+        // Retalho Relâmpago: one wide, hard slash rather than the default gunfire
+        this.player.anim = { kind: 'slash', t: 0, dur: 0.22, side: 0 };
+        this.slash.geometry = this.slashGeos.katana;
+        this.slashT = 0;
+        this.slashDur = 0.18;
+        this.spHit = true;
+        this.meleeHit(2.6, 2.6, 42, 7, true);
+        this.spHit = false;
+        sfx.heavy();
+        break;
+      case 'pistol':
+        // Duplo Cano: two precise, piercing high-damage shots instead of a weak spread
+        for (let i = 0; i < 2; i++) {
+          this.spawnProj({
+            type: 'tracer',
+            gun: true,
+            sp: true,
+            friendly: true,
+            pierce: true,
+            pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
+            vel: new THREE.Vector3(fx * 60, 0, fz * 60),
+            dmg: 38,
+            life: 0.9
+          });
+        }
+        this.player.recoil = 0.16;
+        sfx.pistol();
+        break;
+      case 'shotgun':
+        // Rajada Dupla: two full pellet blasts back to back
+        for (let blast = 0; blast < 2; blast++) {
+          for (let i = 0; i < (w.count || 7); i++) {
+            const a =
+              this.player.yaw + (i - ((w.count || 7) - 1) / 2) * (w.spread || 0.32) + rand(-0.02, 0.02);
+            this.spawnProj({
+              type: 'tracer',
+              gun: true,
+              sp: true,
+              friendly: true,
+              pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
+              vel: new THREE.Vector3(Math.sin(a) * (w.speed || 40), 0, Math.cos(a) * (w.speed || 40)),
+              dmg: Math.round((w.dmg[0] || 8) * 1.4),
+              life: w.life || 0.22
+            });
+          }
+        }
+        this.player.recoil = 0.22;
+        sfx.shotgun();
+        break;
+      case 'rifle':
+        // Fogo Supressivo: a big rapid burst, not the same 5 shots every other gun gets
+        for (let i = 0; i < 14; i++) {
+          const a = this.player.yaw + rand(-0.05, 0.05);
+          this.spawnProj({
+            type: 'tracer',
+            gun: true,
+            sp: true,
+            friendly: true,
+            pierce: true,
+            pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
+            vel: new THREE.Vector3(Math.sin(a) * 58, 0, Math.cos(a) * 58),
+            dmg: 10,
+            life: 1.1
+          });
+        }
+        this.player.recoil = 0.15;
+        sfx.rifle();
+        break;
+      case 'flame':
+        // Parede de Fogo: a wide fire AoE — the default gunfire made zero sense on a flamethrower
+        this.meleeHit((w.range || 4.6) * 1.5, TAU * 0.6, 16, 2, false);
+        for (let i = 0; i < 16; i++) {
+          const a = this.player.yaw + rand(-1.0, 1.0);
+          const d = rand(1, (w.range || 4.6) * 1.4);
+          this.emitParticles(
+            this.tmpH.x + Math.sin(a) * d,
+            this.tmpH.y,
+            this.tmpH.z + Math.cos(a) * d,
+            3,
+            0xff7a2e,
+            2,
+            1.5,
+            4,
+            0.4
+          );
+        }
+        sfx.flame();
+        break;
+      case 'minigun':
+        // Chuva de Chumbo: a much wider, denser spray than the generic burst
+        for (let i = 0; i < 22; i++) {
+          const a = this.player.yaw + rand(-0.22, 0.22);
+          this.spawnProj({
+            type: 'tracer',
+            gun: true,
+            sp: true,
+            friendly: true,
+            pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
+            vel: new THREE.Vector3(Math.sin(a) * 62, 0, Math.cos(a) * 62),
+            dmg: 8,
+            life: 1.0
+          });
+        }
+        this.player.recoil = 0.18;
+        sfx.minigun();
+        break;
+      case 'bazooka':
+        // Bombardeio Aéreo: a volley of explosive rockets instead of a handful of bullets
+        for (let i = 0; i < 3; i++) {
+          const a = this.player.yaw + (i - 1) * 0.18;
+          this.spawnProj({
+            type: 'tracer',
+            gun: true,
+            sp: true,
+            friendly: true,
+            bomb: true,
+            pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
+            vel: new THREE.Vector3(Math.sin(a) * 26, 0, Math.cos(a) * 26),
+            dmg: 70,
+            aoeR: 4.5,
+            kb: 10,
+            life: 2.2
+          });
+        }
+        this.player.recoil = 0.3;
+        sfx.bazooka();
+        break;
       default:
         // Firearms default burst
         for (let i = -2; i <= 2; i++) {
@@ -1743,8 +1911,10 @@ export class GameEngine {
       sp: o.sp,
       ptMult: o.ptMult,
       bomb: o.bomb,
+      aoeR: o.aoeR,
       kb: o.kb,
-      noSolid: o.noSolid
+      noSolid: o.noSolid,
+      grav: o.grav
     };
     if (p.pierce) p.hit = new Set();
     this.projectiles.push(p);
@@ -2140,14 +2310,26 @@ export class GameEngine {
     for (let i = this.projectiles.length - 1; i >= 0; i--) {
       const p = this.projectiles[i];
       p.life -= dt;
+      if (p.grav) p.vel.y -= p.grav * dt;
       p.pos.addScaledVector(p.vel, dt);
       p.mesh.position.copy(p.pos);
 
       let dead = p.life <= 0 || Math.hypot(p.pos.x, p.pos.z) > 55;
+      let exploded = false;
+      if (!dead && p.grav && p.pos.y <= 0.05) {
+        p.pos.y = 0.05;
+        dead = true;
+      }
       if (!dead && p.friendly) {
         for (const e of this.enemies) {
           if (e.dead || (p.hit && p.hit.has(e))) continue;
           if (Math.hypot(p.pos.x - e.pos.x, p.pos.z - e.pos.z) < e.r + 0.45) {
+            if (p.bomb) {
+              this.explodeAt(p.pos.x, p.pos.y, p.pos.z, p.aoeR || 3.2, p.dmg, p.kb || 8);
+              dead = true;
+              exploded = true;
+              break;
+            }
             this.hitEnemy(e, p.dmg, p.vel.x, p.vel.z, p.kb || 3, false);
             if (p.pierce) p.hit?.add(e);
             else {
@@ -2164,6 +2346,9 @@ export class GameEngine {
       }
 
       if (dead) {
+        if (p.bomb && !exploded) {
+          this.explodeAt(p.pos.x, p.pos.y, p.pos.z, p.aoeR || 3.2, p.dmg, p.kb || 8);
+        }
         this.killProj(i);
       }
     }
