@@ -1,19 +1,23 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { GameEngine } from './game/engine';
 import { CharacterId, WeaponDef } from './game/types';
-import { WEAPONS_KAGE, WEAPONS_BRAVO } from './game/constants';
+import { WEAPONS_KAGE, WEAPONS_BRAVO, WEAPON_INFO, KARATE } from './game/constants';
 import { ICON_URLS } from './game/icons';
 import { initAudio } from './game/audio';
-import { Settings, RotateCcw, Shield, Compass, Swords } from 'lucide-react';
+import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft } from 'lucide-react';
 
-const SLOT_COUNT = 4;
+const SLOT_COUNT = 2;
+const SLOT_LABELS = ['Principal', 'Secundária'];
+// Defaults pair a close-range weapon with a ranged one: Katana + Shuriken, Fuzil + M45.
+const DEFAULT_SLOTS: Record<CharacterId, number[]> = { kage: [0, 3], bravo: [3, 6] };
 
-// Saved per character; falls back to the first SLOT_COUNT weapons if missing or invalid.
+// Loadout picked on the Arsenal screen, saved per character; falls back to the default
+// pair if missing or invalid (e.g. an older 4-button save).
 function loadSlots(id: CharacterId): number[] {
   const total = (id === 'kage' ? WEAPONS_KAGE : WEAPONS_BRAVO).length;
-  const fallback = Array.from({ length: SLOT_COUNT }, (_, i) => i);
+  const fallback = DEFAULT_SLOTS[id];
   try {
-    const raw = localStorage.getItem(`${id}_weapon_slots`);
+    const raw = localStorage.getItem(`${id}_loadout`);
     if (!raw) return fallback;
     const arr: unknown = JSON.parse(raw);
     const valid =
@@ -27,13 +31,25 @@ function loadSlots(id: CharacterId): number[] {
   }
 }
 
+const fmtNum = (n: number, minFrac = 0) =>
+  n.toLocaleString('pt-BR', { minimumFractionDigits: minFrac, maximumFractionDigits: 2 });
+
+// Base damage shown on the Arsenal card: range across combo hits, "×N" for multi-shot.
+function dmgText(w: WeaponDef) {
+  const d = w.kind === 'karate' ? KARATE.map((m) => m.dmg) : w.dmg;
+  const lo = Math.min(...d);
+  const hi = Math.max(...d);
+  const base = lo === hi ? `${lo}` : `${lo}–${hi}`;
+  return w.count && w.count > 1 ? `${base}×${w.count}` : base;
+}
+
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const minimapRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<GameEngine | null>(null);
 
   // UI State
-  const [gameState, setGameState] = useState<'menu' | 'play' | 'over'>('menu');
+  const [gameState, setGameState] = useState<'menu' | 'arsenal' | 'play' | 'over'>('menu');
   const [charId, setCharId] = useState<CharacterId>('kage');
   const [hp, setHp] = useState(60);
   const [maxHp, setMaxHp] = useState(60);
@@ -56,35 +72,56 @@ export default function App() {
     }
   });
 
-  // Action buttons: SLOT_COUNT slots, each bound to one of the character's weapons
-  // via the "Armas" menu. Pressing a slot selects its weapon and attacks right away;
-  // holding keeps firing.
+  // Action buttons: SLOT_COUNT slots, each bound to a weapon picked on the Arsenal screen
+  // before the run (locked during play). Pressing a slot selects its weapon and attacks
+  // right away; holding keeps firing.
   const weaponList = charId === 'kage' ? WEAPONS_KAGE : WEAPONS_BRAVO;
-  const [slots, setSlots] = useState<number[]>(() => loadSlots('kage'));
+  const [loadouts, setLoadouts] = useState<Record<CharacterId, number[]>>(() => ({
+    kage: loadSlots('kage'),
+    bravo: loadSlots('bravo')
+  }));
+  const slots = loadouts[charId];
   const slotsRef = useRef(slots);
   const heldSlotRef = useRef<number | null>(null);
-  const [showLoadout, setShowLoadout] = useState(false);
   const [editSlot, setEditSlot] = useState(0);
-
-  useEffect(() => {
-    setSlots(loadSlots(charId));
-  }, [charId]);
+  const [inspectIdx, setInspectIdx] = useState(slots[0]);
 
   useEffect(() => {
     slotsRef.current = slots;
     if (engineRef.current) engineRef.current.loadout = slots;
   }, [slots]);
 
-  // Assigning a weapon that's already on another button swaps the two buttons.
+  // Assigning a weapon that's already on the other slot swaps the two slots.
   const assignSlot = (slot: number, weaponIdx: number) => {
     const next = [...slots];
     const other = next.indexOf(weaponIdx);
     if (other !== -1 && other !== slot) next[other] = next[slot];
     next[slot] = weaponIdx;
-    setSlots(next);
+    setLoadouts((prev) => ({ ...prev, [charId]: next }));
     try {
-      localStorage.setItem(`${charId}_weapon_slots`, JSON.stringify(next));
+      localStorage.setItem(`${charId}_loadout`, JSON.stringify(next));
     } catch {}
+  };
+
+  const handleArsenalPick = (weaponIdx: number) => {
+    setInspectIdx(weaponIdx);
+    assignSlot(editSlot, weaponIdx);
+    // Axelay-style cursor: after filling the primary, move on to the secondary slot
+    if (editSlot < SLOT_COUNT - 1) setEditSlot(editSlot + 1);
+    engineRef.current?.setWeapon(weaponIdx);
+  };
+
+  const openArsenal = (id: CharacterId) => {
+    const eng = engineRef.current;
+    if (eng) {
+      if (eng.state !== 'menu') eng.backToMenu();
+      eng.setCharacter(id);
+      eng.setWeapon(loadouts[id][0]);
+    }
+    setShowSettings(false);
+    setEditSlot(0);
+    setInspectIdx(loadouts[id][0]);
+    setGameState('arsenal');
   };
 
   const handleSlotDown = (slot: number) => {
@@ -174,12 +211,12 @@ export default function App() {
 
   // Freeze the game while a menu is open so enemies can't hit you mid-configuration
   useEffect(() => {
-    if (engineRef.current) engineRef.current.paused = showSettings || showLoadout;
-    if (showSettings || showLoadout) {
+    if (engineRef.current) engineRef.current.paused = showSettings;
+    if (showSettings) {
       heldSlotRef.current = null;
       if (engineRef.current) engineRef.current.input.attackHeld = false;
     }
-  }, [showSettings, showLoadout]);
+  }, [showSettings]);
 
   // Update Settings in Engine
   useEffect(() => {
@@ -194,6 +231,7 @@ export default function App() {
     initAudio();
     if (engineRef.current) {
       engineRef.current.setCharacter(charId);
+      engineRef.current.loadout = slots;
       engineRef.current.start();
     }
     setGameState('play');
@@ -202,12 +240,7 @@ export default function App() {
   const handleCharSelect = (id: CharacterId) => {
     setCharId(id);
     initAudio();
-    if (engineRef.current) {
-      engineRef.current.setCharacter(id);
-      engineRef.current.loadout = loadSlots(id);
-      engineRef.current.start();
-    }
-    setGameState('play');
+    openArsenal(id);
   };
 
   const handleBackToMenu = () => {
@@ -319,9 +352,9 @@ export default function App() {
       if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
         engineRef.current.dash();
       }
-      // Desktop: 1-4 pick the weapon on that action button, Q/E cycle through the buttons
+      // Desktop: 1/2 pick the weapon on that action button, Q/E swap between the buttons
       const loadout = slotsRef.current;
-      if (/^Digit[1-4]$/.test(e.code)) {
+      if (/^Digit[1-2]$/.test(e.code)) {
         engineRef.current.setWeapon(loadout[Number(e.code.slice(5)) - 1]);
       }
       if (e.code === 'KeyQ' || e.code === 'KeyE') {
@@ -460,17 +493,6 @@ export default function App() {
             >
               <Settings className="w-5 h-5 text-[var(--paper)]" />
             </button>
-            <button
-              onClick={() => {
-                setEditSlot(0);
-                setShowLoadout(true);
-              }}
-              className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(242,166,90,0.55)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform"
-              title="Escolher armas dos botões"
-              aria-label="Armas"
-            >
-              <Swords className="w-5 h-5 text-[var(--ember)]" />
-            </button>
           </div>
 
           {/* Aim Reticle: only for ranged weapons (melee already hits via arc, no aim needed) */}
@@ -518,29 +540,24 @@ export default function App() {
           )}
 
           {/* Touch Movement Guidance Tip */}
-          <div className="absolute left-[calc(var(--sal)+24px)] bottom-[calc(var(--sab)+64px)] max-w-[calc(100vw-270px)] text-xs leading-snug text-[var(--paper)]/60 pointer-events-none">
+          <div className="absolute left-[calc(var(--sal)+24px)] bottom-[calc(var(--sab)+64px)] max-w-[calc(100vw-230px)] text-xs leading-snug text-[var(--paper)]/60 pointer-events-none">
             Arraste na esquerda para mover e girar a câmera
           </div>
 
-          {/* Bottom Right Controls: 4 configurable weapon action buttons + dash */}
+          {/* Bottom Right Controls: the 2 Arsenal weapon action buttons + dash */}
           <div className="absolute right-[calc(var(--sar)+14px)] bottom-[calc(var(--sab)+14px)] flex flex-col items-end gap-2 pointer-events-none">
             {/* Active weapon name */}
             <div className="text-xs font-bold text-[var(--ember)] drop-shadow-md pr-1">
               {activeWeapon?.name || 'Arma'}
             </div>
 
-            <div className="relative w-56 h-40">
+            <div className="relative w-40 h-36">
               {slots.map((weaponIdx, s) => {
                 const w = weaponList[weaponIdx];
                 const isActive = activeWeaponIdx === weaponIdx;
                 const hasSpecial = specials[weaponIdx] > 0;
-                // Slot 1 is the big primary button; the others fan out around it.
-                const pos = [
-                  'right-0 bottom-0 w-20 h-20',
-                  'right-[92px] bottom-1 w-15 h-15',
-                  'right-[76px] bottom-[78px] w-15 h-15',
-                  'right-1 bottom-[92px] w-15 h-15'
-                ][s];
+                // Big primary in the corner, secondary above-left of it within thumb reach.
+                const pos = ['right-0 bottom-0 w-20 h-20', 'right-[78px] bottom-[72px] w-16 h-16'][s];
                 return (
                   <button
                     key={s}
@@ -563,7 +580,7 @@ export default function App() {
                       <img
                         src={ICON_URLS[w.id]}
                         alt={w.name}
-                        className={`${s === 0 ? 'w-12 h-12' : 'w-9 h-9'} object-contain pointer-events-none drop-shadow-md`}
+                        className={`${s === 0 ? 'w-12 h-12' : 'w-10 h-10'} object-contain pointer-events-none drop-shadow-md`}
                       />
                     ) : (
                       <Swords className="w-8 h-8 text-[var(--ember)] pointer-events-none" />
@@ -583,7 +600,7 @@ export default function App() {
                   e.stopPropagation();
                   engineRef.current?.dash();
                 }}
-                className="absolute right-[150px] bottom-[70px] w-14 h-14 rounded-full border border-[rgba(239,230,210,0.4)] bg-[rgba(22,18,31,0.65)] text-[11px] font-bold text-[var(--paper)] pointer-events-auto active:bg-[rgba(242,166,90,0.4)] shadow-md transition-transform active:scale-95"
+                className="absolute right-[96px] bottom-0 w-14 h-14 rounded-full border border-[rgba(239,230,210,0.4)] bg-[rgba(22,18,31,0.65)] text-[11px] font-bold text-[var(--paper)] pointer-events-auto active:bg-[rgba(242,166,90,0.4)] shadow-md transition-transform active:scale-95"
               >
                 Esquiva
               </button>
@@ -630,7 +647,9 @@ export default function App() {
                   className="w-14 h-14 rounded-full border-2 border-[var(--torii)] object-cover shadow-md"
                 />
                 <span className="text-xs font-bold text-[var(--paper)]">Kage (Ninja)</span>
-                <span className="text-[10px] text-[var(--ember)] font-medium">Katana & Shuriken</span>
+                <span className="text-[10px] text-[var(--ember)] font-medium">
+                  {loadouts.kage.map((i) => WEAPONS_KAGE[i].name).join(' & ')}
+                </span>
               </button>
               <button
                 onClick={() => handleCharSelect('bravo')}
@@ -647,7 +666,9 @@ export default function App() {
                   className="w-14 h-14 rounded-full border-2 border-[#5a7848] object-cover shadow-md"
                 />
                 <span className="text-xs font-bold text-[var(--paper)]">Bravo (Soldier)</span>
-                <span className="text-[10px] text-[#8ab870] font-medium">Fuzil & Bazuca</span>
+                <span className="text-[10px] text-[#8ab870] font-medium">
+                  {loadouts.bravo.map((i) => WEAPONS_BRAVO[i].name).join(' & ')}
+                </span>
               </button>
             </div>
 
@@ -656,12 +677,146 @@ export default function App() {
               <div className="text-[var(--ember)] font-bold mb-1">🎮 Controles & Rotação Automática:</div>
               <div>• <b>Mover:</b> arraste no analógico esquerdo. O personagem vira para onde você apontar e a câmera acompanha o trajeto.</div>
               <div>• <b>Câmera:</b> gira junto automaticamente ao mover, ou arraste com o polegar direito para ajuste livre.</div>
-              <div>• <b>Atacar:</b> toque no botão da arma (segure para disparo contínuo). Escolha as armas de cada botão no ícone ⚔ durante o jogo.</div>
+              <div>• <b>Armas:</b> antes de entrar você escolhe 2 armas no Arsenal. Elas ficam fixas até morrer.</div>
+              <div>• <b>Atacar:</b> toque no botão da arma (segure para disparo contínuo).</div>
               <div>• <b>Recentralizar:</b> toque no ícone da bússola para virar a câmera para frente.</div>
-              <div>• <b>No PC:</b> WASD para mover, Mouse para câmera, Clique para atacar, 1-4 ou Q/E para trocar entre os botões de arma, Shift para esquiva.</div>
+              <div>• <b>No PC:</b> WASD para mover, Mouse para câmera, Clique para atacar, 1/2 ou Q/E para alternar as armas, Shift para esquiva.</div>
             </div>
 
-            <p className="text-xs text-[var(--paper)]/60">Toque em um personagem acima para começar</p>
+            <p className="text-xs text-[var(--paper)]/60">Toque em um personagem acima para escolher as armas</p>
+          </div>
+        </div>
+      )}
+
+      {/* Arsenal: pick the 2 weapons for the run (Axelay-style pre-mission loadout) */}
+      {gameState === 'arsenal' && (
+        <div id="menu-overlay" className="fixed inset-0 flex justify-center bg-[rgba(22,18,31,0.88)] backdrop-blur-md p-4 z-30 overflow-y-auto">
+          <div className="max-w-md w-full my-auto py-2">
+            <div className="flex items-center justify-between mb-2">
+              <button
+                onClick={() => setGameState('menu')}
+                className="flex items-center gap-0.5 py-1.5 pr-3 text-xs font-bold text-[var(--paper)]/70 cursor-pointer active:scale-95"
+              >
+                <ChevronLeft className="w-4 h-4" /> Voltar
+              </button>
+              <span className="text-xs font-bold text-[var(--paper)]/60">{charId === 'kage' ? 'Kage (Ninja)' : 'Bravo (Soldier)'}</span>
+            </div>
+
+            <div className="text-center mb-4">
+              <div className="kanji-title font-serif text-5xl font-bold text-[var(--torii)] leading-none mb-1">武</div>
+              <h2 className="font-serif text-2xl font-extrabold text-[var(--paper)]">Arsenal</h2>
+              <p className="text-[11px] text-[var(--paper)]/60 mt-1">
+                Escolha 2 armas. Elas ficam fixas até o fim da partida.
+              </p>
+            </div>
+
+            {/* The 2 slots */}
+            <div className="grid grid-cols-2 gap-3 mb-4">
+              {slots.map((weaponIdx, s) => {
+                const w = weaponList[weaponIdx];
+                const selected = editSlot === s;
+                return (
+                  <button
+                    key={s}
+                    onClick={() => {
+                      setEditSlot(s);
+                      setInspectIdx(weaponIdx);
+                    }}
+                    className={`flex flex-col items-center gap-1 py-3 px-2 rounded-xl border-2 transition-all cursor-pointer ${
+                      selected
+                        ? 'border-[var(--ember)] bg-[rgba(242,166,90,0.2)] shadow-[0_0_14px_rgba(242,166,90,0.35)]'
+                        : 'border-[rgba(239,230,210,0.2)] bg-[rgba(22,18,31,0.6)]'
+                    }`}
+                  >
+                    <span className={`text-[10px] font-bold uppercase tracking-wider ${selected ? 'text-[var(--ember)]' : 'text-[var(--paper)]/60'}`}>
+                      {SLOT_LABELS[s]}
+                    </span>
+                    <div className={`w-14 h-14 rounded-full border flex items-center justify-center bg-black/30 ${selected ? 'border-[var(--ember)]' : 'border-[rgba(239,230,210,0.35)]'}`}>
+                      {w && ICON_URLS[w.id] && (
+                        <img src={ICON_URLS[w.id]} alt={w.name} className="w-10 h-10 object-contain pointer-events-none" />
+                      )}
+                    </div>
+                    <span className="text-sm font-bold text-[var(--paper)] leading-tight">{w?.name}</span>
+                    <span className="text-[10px] text-[var(--paper)]/60 leading-tight">{w && WEAPON_INFO[w.id]?.tag}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Weapon grid for the selected slot */}
+            <div className="text-xs font-bold text-[var(--paper)] mb-2">
+              Escolha a arma {editSlot === 0 ? 'principal' : 'secundária'}:
+            </div>
+            <div className="grid grid-cols-2 gap-1.5 mb-3">
+              {weaponList.map((w: WeaponDef, idx: number) => {
+                const onSlot = slots.indexOf(idx);
+                const inspected = inspectIdx === idx;
+                return (
+                  <button
+                    key={w.id}
+                    onClick={() => handleArsenalPick(idx)}
+                    className={`flex items-center gap-2 px-2 py-1.5 rounded-md border text-left transition-all cursor-pointer ${
+                      onSlot !== -1
+                        ? 'border-[var(--ember)] bg-[rgba(242,166,90,0.18)]'
+                        : 'border-[rgba(239,230,210,0.15)] bg-[rgba(22,18,31,0.6)] active:bg-[rgba(242,166,90,0.15)]'
+                    } ${inspected ? 'ring-1 ring-[var(--paper)]/50' : ''}`}
+                  >
+                    <div className="w-8 h-8 shrink-0 rounded-full bg-black/30 flex items-center justify-center">
+                      {ICON_URLS[w.id] && (
+                        <img src={ICON_URLS[w.id]} alt={w.name} className="w-6 h-6 object-contain pointer-events-none" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[11px] font-bold text-[var(--paper)] leading-tight truncate">{w.name}</div>
+                      <div className="text-[9px] text-[var(--paper)]/55 leading-normal truncate">{WEAPON_INFO[w.id]?.tag}</div>
+                    </div>
+                    {onSlot !== -1 && (
+                      <span className="text-[9px] font-bold rounded px-1 bg-[var(--ember)] text-[var(--ink)]">
+                        {onSlot === 0 ? 'P' : 'S'}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Details of the last touched weapon */}
+            {weaponList[inspectIdx] && (() => {
+              const w = weaponList[inspectIdx];
+              const mult = w.pointMult ?? 1;
+              return (
+                <div className="rounded-lg border border-[rgba(239,230,210,0.15)] bg-[rgba(22,18,31,0.6)] p-3 mb-4 text-left">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-sm font-bold text-[var(--ember)]">{w.name}</span>
+                    <span className="text-[9px] font-bold rounded px-1.5 py-0.5 bg-[rgba(239,230,210,0.12)] text-[var(--paper)]/80">
+                      {WEAPON_INFO[w.id]?.tag}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-[var(--paper)]/80 leading-snug">{WEAPON_INFO[w.id]?.desc}</p>
+                  <div className="flex gap-4 text-[10px] text-[var(--paper)]/60 mt-2">
+                    <span>
+                      Dano <b className="text-[var(--paper)]">{dmgText(w)}</b>
+                    </span>
+                    <span>
+                      Recarga <b className="text-[var(--paper)]">{fmtNum(w.cd)}s</b>
+                    </span>
+                    <span>
+                      Pontos{' '}
+                      <b className={mult > 1 ? 'text-[var(--jade)]' : mult < 1 ? 'text-[#ff8a7a]' : 'text-[var(--paper)]'}>
+                        ×{fmtNum(mult, 1)}
+                      </b>
+                    </span>
+                  </div>
+                </div>
+              );
+            })()}
+
+            <button
+              onClick={handleStartGame}
+              className="go-btn w-full font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] py-3.5 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer"
+            >
+              Entrar em combate
+            </button>
           </div>
         </div>
       )}
@@ -682,6 +837,12 @@ export default function App() {
               className="font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] px-10 py-3.5 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer"
             >
               Recomeçar
+            </button>
+            <button
+              onClick={() => openArsenal(charId)}
+              className="mt-3 mx-auto flex items-center justify-center gap-1.5 font-bold text-sm border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-8 py-2.5 rounded-md active:scale-95 transition-all cursor-pointer"
+            >
+              <Swords className="w-4 h-4 text-[var(--ember)]" /> Trocar armas
             </button>
           </div>
         </div>
@@ -749,97 +910,6 @@ export default function App() {
               className="mt-2 w-full py-2.5 rounded-md border border-[rgba(239,230,210,0.3)] font-bold text-sm text-[var(--paper)] flex items-center justify-center gap-1.5 cursor-pointer active:scale-98"
             >
               <RotateCcw className="w-4 h-4" /> Voltar para Seleção de Personagem
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Loadout Menu: pick which weapon sits on each action button */}
-      {showLoadout && (
-        <div className="fixed inset-0 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 z-40">
-          <div className="bg-[var(--ink)] border border-[rgba(239,230,210,0.3)] rounded-xl max-w-sm w-full p-5 shadow-2xl max-h-[92vh] overflow-y-auto">
-            <h3 className="font-serif text-lg font-bold text-[var(--ember)] mb-1 flex items-center gap-2">
-              <Swords className="w-5 h-5" /> Armas nos Botões
-            </h3>
-            <p className="text-[11px] text-[var(--paper)]/60 mb-4">
-              Toque em um botão e depois na arma. Jogo pausado enquanto este menu estiver aberto.
-            </p>
-
-            {/* The 4 action buttons */}
-            <div className="grid grid-cols-4 gap-2 mb-4">
-              {slots.map((weaponIdx, s) => {
-                const w = weaponList[weaponIdx];
-                const selected = editSlot === s;
-                return (
-                  <button
-                    key={s}
-                    onClick={() => setEditSlot(s)}
-                    className={`flex flex-col items-center gap-1 py-2 rounded-lg border transition-all cursor-pointer ${
-                      selected
-                        ? 'border-[var(--ember)] bg-[rgba(242,166,90,0.2)]'
-                        : 'border-[rgba(239,230,210,0.2)] bg-[rgba(22,18,31,0.6)]'
-                    }`}
-                  >
-                    <div
-                      className={`rounded-full border flex items-center justify-center ${
-                        s === 0 ? 'w-12 h-12' : 'w-10 h-10'
-                      } ${selected ? 'border-[var(--ember)]' : 'border-[rgba(239,230,210,0.35)]'}`}
-                    >
-                      {w && ICON_URLS[w.id] && (
-                        <img src={ICON_URLS[w.id]} alt={w.name} className="w-3/4 h-3/4 object-contain pointer-events-none" />
-                      )}
-                    </div>
-                    <span className="text-[10px] font-bold text-[var(--paper)]">
-                      {s === 0 ? 'Principal' : `Botão ${s + 1}`}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Weapon list for the selected button */}
-            <div className="text-xs font-bold text-[var(--paper)] mb-2">
-              Arma do {editSlot === 0 ? 'botão principal' : `botão ${editSlot + 1}`}:
-            </div>
-            <div className="grid grid-cols-2 gap-1.5">
-              {weaponList.map((w: WeaponDef, idx: number) => {
-                const onSlot = slots.indexOf(idx);
-                const isHere = onSlot === editSlot;
-                return (
-                  <button
-                    key={w.id}
-                    onClick={() => assignSlot(editSlot, idx)}
-                    className={`flex items-center gap-2 px-2 py-1.5 rounded-md border text-left transition-all cursor-pointer ${
-                      isHere
-                        ? 'border-[var(--ember)] bg-[rgba(242,166,90,0.25)]'
-                        : 'border-[rgba(239,230,210,0.15)] bg-[rgba(22,18,31,0.6)] active:bg-[rgba(242,166,90,0.15)]'
-                    }`}
-                  >
-                    <div className="w-8 h-8 shrink-0 rounded-full bg-black/30 flex items-center justify-center">
-                      {ICON_URLS[w.id] && (
-                        <img src={ICON_URLS[w.id]} alt={w.name} className="w-6 h-6 object-contain pointer-events-none" />
-                      )}
-                    </div>
-                    <span className="flex-1 text-[11px] font-bold text-[var(--paper)] leading-tight">{w.name}</span>
-                    {onSlot !== -1 && (
-                      <span
-                        className={`text-[9px] font-bold rounded px-1 ${
-                          isHere ? 'bg-[var(--ember)] text-[var(--ink)]' : 'bg-[rgba(239,230,210,0.15)] text-[var(--paper)]/70'
-                        }`}
-                      >
-                        {onSlot === 0 ? 'P' : `B${onSlot + 1}`}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-
-            <button
-              onClick={() => setShowLoadout(false)}
-              className="mt-5 w-full py-2.5 rounded-md bg-[var(--torii)] font-bold text-sm text-[var(--paper)] cursor-pointer active:scale-98"
-            >
-              Pronto
             </button>
           </div>
         </div>
