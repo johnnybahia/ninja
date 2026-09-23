@@ -174,6 +174,7 @@ export class GameEngine {
   private lastHS = 0;
   private lastMove = new THREE.Vector3(0, 0, -1);
   private slowmoT = 0;
+  private attackQueueT = 0;
   private slowmoScale = 1;
   private labels: { sprite: THREE.Sprite; t: number; life: number; vy: number }[] = [];
 
@@ -188,6 +189,8 @@ export class GameEngine {
   public joyTouch = { id: null as number | null, ox: 0, oy: 0 };
 
   public state: 'menu' | 'play' | 'over' = 'menu';
+  public paused = false;
+  public loadout: number[] | null = null;
   public wave = 0;
   private waveTimer = 0;
   private clearedShown = false;
@@ -677,6 +680,7 @@ export class GameEngine {
 
   public start() {
     this.reset();
+    this.paused = false;
     this.state = 'play';
     this.nextWave();
     if (!this.isRunning) {
@@ -728,6 +732,8 @@ export class GameEngine {
     this.player.suppress = 0;
     this.player.dash = 0;
     this.player.dashInv = false;
+    this.attackQueueT = 0;
+    this.input.attackHeld = false;
     this.player.pos.set(0, 0, 5);
     this.player.vel.set(0, 0, 0);
     this.player.kb.set(0, 0, 0);
@@ -744,7 +750,7 @@ export class GameEngine {
     this.callbacks.onScoreChange(0);
     this.callbacks.onComboChange(0);
     this.callbacks.onSpecialsUpdate({});
-    this.setWeapon(0);
+    this.setWeapon(this.loadout?.[0] ?? 0);
   }
 
   public nextWave() {
@@ -1249,6 +1255,14 @@ export class GameEngine {
     }
     this.player.yaw = Math.atan2(this.player.dashDir.x, this.player.dashDir.z);
     sfx.dash();
+  }
+
+  // Attack from a button press: fires now if possible, otherwise buffers the press
+  // briefly so a quick tap during another weapon's cooldown isn't silently dropped.
+  public pressAttack() {
+    const before = this.player.atkCd;
+    this.tryAttack();
+    this.attackQueueT = this.player.atkCd > before ? 0 : 0.3;
   }
 
   public tryAttack() {
@@ -1782,7 +1796,10 @@ export class GameEngine {
   }
 
   private dropScroll(x: number, z: number) {
-    const wIdx = Math.floor(Math.random() * this.weapons.length);
+    // Only grant specials to weapons bound to an action button — a charge on an
+    // unbound weapon would be unusable.
+    const pool = this.loadout && this.loadout.length ? this.loadout : this.weapons.map((_, i) => i);
+    const wIdx = pool[Math.floor(Math.random() * pool.length)];
     const g = new THREE.Group();
     g.add(
       new THREE.Mesh(
@@ -2118,8 +2135,11 @@ export class GameEngine {
       }
     }
 
-    if (this.input.attackHeld) {
+    if (this.attackQueueT > 0) this.attackQueueT -= dt;
+    if (this.input.attackHeld || this.attackQueueT > 0) {
+      const before = this.player.atkCd;
       this.tryAttack();
+      if (this.player.atkCd > before) this.attackQueueT = 0;
     }
 
     // Advance and update attack animation timer
@@ -2453,6 +2473,10 @@ export class GameEngine {
   public loop = () => {
     this.reqId = requestAnimationFrame(this.loop);
     const real = Math.min(this.clock.getDelta(), 0.05);
+    if (this.paused && this.state === 'play') {
+      this.renderer.render(this.scene, this.camera);
+      return;
+    }
     let dt = real;
     if (this.hitstop > 0) {
       this.hitstop -= real;
