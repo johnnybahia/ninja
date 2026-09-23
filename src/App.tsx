@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { GameEngine } from './game/engine';
 import { CharacterId, WeaponDef } from './game/types';
-import { WEAPONS_KAGE, WEAPONS_BRAVO, WEAPON_INFO, KARATE } from './game/constants';
+import { WEAPONS_KAGE, WEAPONS_BRAVO, WEAPON_INFO, KARATE, SPECIALS } from './game/constants';
 import { ICON_URLS } from './game/icons';
 import { initAudio } from './game/audio';
 import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft } from 'lucide-react';
@@ -793,6 +793,11 @@ export default function App() {
                     </span>
                   </div>
                   <p className="text-[11px] text-[var(--paper)]/80 leading-snug">{WEAPON_INFO[w.id]?.desc}</p>
+                  {SPECIALS[w.id] && (
+                    <p className="text-[11px] text-[#ffd166] mt-1">
+                      Especial: <b>{SPECIALS[w.id].name}</b>
+                    </p>
+                  )}
                   <div className="flex gap-4 text-[10px] text-[var(--paper)]/60 mt-2">
                     <span>
                       Dano <b className="text-[var(--paper)]">{dmgText(w)}</b>

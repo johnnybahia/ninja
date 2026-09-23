@@ -52,10 +52,12 @@ export const WEAPON_INFO: Record<string, { tag: string; desc: string }> = {
   bazooka: { tag: 'Explosivo · Área', desc: 'Foguete com dano enorme em área. Recarga lenta e poucos pontos.' }
 };
 
+// Special damage is tuned to roughly 2x the weapon's own normal DPS (about 1.5x when a
+// single-target weapon's special becomes an area attack), so every pick is worth a scroll.
 export const SPECIALS: Record<string, SpecialDef> = {
   katana: { name: 'Corte do Vento', cd: 0.5 },
   bo: { name: 'Tornado', cd: 1.8 },
-  kama: { name: 'Ceifa', cd: 0.75 },
+  kama: { name: 'Ceifa', cd: 0.7 },
   shuriken: { name: 'Chuva de Estrelas', cd: 0.7 },
   kunai: { name: 'Relâmpago', cd: 0.8 },
   bomb: { name: 'Chuva de Fogo', cd: 1.4 },
@@ -63,9 +65,9 @@ export const SPECIALS: Record<string, SpecialDef> = {
   knife: { name: 'Retalho Relâmpago', cd: 0.6 },
   pistol: { name: 'Duplo Cano', cd: 0.5 },
   shotgun: { name: 'Rajada Dupla', cd: 0.9 },
-  rifle: { name: 'Fogo Supressivo', cd: 1.8 },
-  flame: { name: 'Parede de Fogo', cd: 1.2 },
-  minigun: { name: 'Chuva de Chumbo', cd: 1.0 },
+  rifle: { name: 'Fogo Supressivo', cd: 0.9 },
+  flame: { name: 'Parede de Fogo', cd: 0.45 },
+  minigun: { name: 'Chuva de Chumbo', cd: 0.9 },
   bazooka: { name: 'Bombardeio Aéreo', cd: 1.6 }
 };
 
