@@ -737,6 +737,7 @@ export class GameEngine {
     this.callbacks.onXpChange(this.player.xp, this.player.xpNext, this.player.level);
     this.callbacks.onScoreChange(0);
     this.callbacks.onComboChange(0);
+    this.callbacks.onSpecialsUpdate({});
     this.setWeapon(0);
   }
 
@@ -1758,9 +1759,12 @@ export class GameEngine {
     let specialsChanged = false;
     for (const k in this.player.special) {
       const idx = +k;
+      const prevShown = Math.ceil(this.player.special[idx]);
       this.player.special[idx] -= dt;
       if (this.player.special[idx] <= 0) {
         delete this.player.special[idx];
+        specialsChanged = true;
+      } else if (Math.ceil(this.player.special[idx]) !== prevShown) {
         specialsChanged = true;
       }
     }

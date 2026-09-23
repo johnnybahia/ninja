@@ -393,11 +393,11 @@ export default function App() {
 
           {/* Banner message */}
           {banner && (
-            <div className="absolute left-0 right-0 top-1/4 text-center pointer-events-none drop-shadow-lg transition-opacity duration-300">
-              <span className="block font-serif text-4xl sm:text-5xl font-extrabold tracking-wide text-[var(--paper)]">
+            <div className="absolute left-0 right-0 top-[calc(var(--sat)+64px)] text-center pointer-events-none drop-shadow-lg transition-opacity duration-300">
+              <span className="block font-serif text-2xl sm:text-3xl font-extrabold tracking-wide text-[var(--paper)]">
                 {banner.main}
               </span>
-              <span className="block text-sm sm:text-base text-[var(--ember)] font-medium mt-1">
+              <span className="block text-xs sm:text-sm text-[var(--ember)] font-medium mt-1">
                 {banner.sub}
               </span>
             </div>
@@ -405,11 +405,11 @@ export default function App() {
 
           {/* Combo indicator com feedback de sangue e impacto */}
           {combo > 1 && (
-            <div className="absolute left-1/2 top-[33%] -translate-x-1/2 text-center pointer-events-none drop-shadow-2xl transition-all">
-              <div className="font-serif text-3xl sm:text-4xl font-black tracking-wider bg-linear-to-r from-[#ff4d4d] via-[#ffd166] to-[#ff2a45] bg-clip-text text-transparent drop-shadow-[0_0_16px_rgba(230,0,38,0.7)] animate-pulse">
+            <div className="absolute left-1/2 top-[calc(var(--sat)+130px)] -translate-x-1/2 text-center pointer-events-none drop-shadow-2xl transition-all">
+              <div className="font-serif text-xl sm:text-2xl font-black tracking-wider bg-linear-to-r from-[#ff4d4d] via-[#ffd166] to-[#ff2a45] bg-clip-text text-transparent drop-shadow-[0_0_16px_rgba(230,0,38,0.7)] animate-pulse">
                 {combo}× GOLPES!
               </div>
-              <div className="text-xs sm:text-sm font-extrabold text-[#ffd166] tracking-widest uppercase mt-0.5 drop-shadow-md">
+              <div className="text-[10px] sm:text-xs font-extrabold text-[#ffd166] tracking-widest uppercase mt-0.5 drop-shadow-md">
                 {combo >= 7
                   ? '⚔️ Massacre Sangrento!'
                   : combo >= 5
@@ -441,7 +441,10 @@ export default function App() {
                 return (
                   <button
                     key={w.id}
-                    onClick={() => handleWeaponSelect(idx)}
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                      handleWeaponSelect(idx);
+                    }}
                     className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-full border border-[rgba(239,230,210,0.35)] flex items-center justify-center p-1 transition-all ${
                       isSelected
                         ? 'border-[var(--ember)] bg-[rgba(242,166,90,0.28)] scale-105'
