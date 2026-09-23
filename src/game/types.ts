@@ -105,6 +105,7 @@ export interface EnemyInstance {
   bar: THREE.Group;
   barFg: THREE.Mesh;
   tele?: THREE.Mesh;
+  windup?: number;
   _risky?: boolean;
   _special?: boolean;
   _ptMult?: number;
