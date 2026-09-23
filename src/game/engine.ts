@@ -1162,11 +1162,6 @@ export class GameEngine {
       this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
     }
 
-    const t = this.findTarget(w.kind === 'karate' ? 4 : w.kind === 'flame' ? 5 : w.kind === 'melee' ? 6 : 26);
-    if (t) {
-      this.player.yaw = Math.atan2(t.pos.x - this.player.pos.x, t.pos.z - this.player.pos.z);
-    }
-
     if (w.kind === 'karate') {
       const st =
         this.player.comboT > 0 && this.player.comboW === this.activeWeaponIdx ? (this.player.combo + 1) % 4 : 0;
@@ -1229,18 +1224,13 @@ export class GameEngine {
       const n = w.count || 1;
       for (let i = 0; i < n; i++) {
         const a = this.player.yaw + (i - (n - 1) / 2) * (w.spread || 0) + (w.gun ? rand(-0.03, 0.03) : 0);
-        let vy = 0;
-        if (t && !w.gun) {
-          const d = Math.hypot(t.pos.x - this.player.pos.x, t.pos.z - this.player.pos.z);
-          vy = (t.pos.y + (t.type === 'boss' ? 2.4 : 1.2) - (this.player.pos.y + 1.4)) / Math.max(0.2, d / (w.speed || 30));
-        }
         this.spawnProj({
           type: w.gun ? 'tracer' : w.id,
           friendly: true,
           gun: !!w.gun,
           ptMult: w.pointMult || 1,
           pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-          vel: new THREE.Vector3(Math.sin(a) * (w.speed || 30), vy, Math.cos(a) * (w.speed || 30)),
+          vel: new THREE.Vector3(Math.sin(a) * (w.speed || 30), 0, Math.cos(a) * (w.speed || 30)),
           dmg: w.dmg[0],
           pierce: !!w.pierce,
           life: w.life || 1.2
