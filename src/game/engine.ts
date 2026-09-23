@@ -122,6 +122,7 @@ export class GameEngine {
     dash: 0,
     dashDir: new THREE.Vector3(),
     inv: 0,
+    dashInv: false,
     atkCd: 0,
     combo: 0,
     comboT: 0,
@@ -172,6 +173,9 @@ export class GameEngine {
   private ptMult = 1;
   private lastHS = 0;
   private lastMove = new THREE.Vector3(0, 0, -1);
+  private slowmoT = 0;
+  private slowmoScale = 1;
+  private labels: { sprite: THREE.Sprite; t: number; life: number; vy: number }[] = [];
 
   public input = {
     jx: 0,
@@ -722,6 +726,8 @@ export class GameEngine {
     this.player.tornado = 0;
     this.player.rush = null;
     this.player.suppress = 0;
+    this.player.dash = 0;
+    this.player.dashInv = false;
     this.player.pos.set(0, 0, 5);
     this.player.vel.set(0, 0, 0);
     this.player.kb.set(0, 0, 0);
@@ -875,12 +881,18 @@ export class GameEngine {
       barFg: fg
     };
 
-    if (type === 'boss') {
+    if (type === 'boss' || type === 'samurai') {
       enemy.tele = new THREE.Mesh(
         new THREE.CircleGeometry(1, 36).rotateX(-Math.PI / 2),
-        new THREE.MeshBasicMaterial({ color: 0xff3030, transparent: true, opacity: 0.3, depthWrite: false })
+        new THREE.MeshBasicMaterial({
+          color: type === 'boss' ? 0xff3030 : 0xff8a30,
+          transparent: true,
+          opacity: 0.3,
+          depthWrite: false
+        })
       );
       enemy.tele.visible = false;
+      enemy.tele.scale.setScalar(type === 'boss' ? 1.6 : 1.1);
       this.scene.add(enemy.tele);
     }
 
@@ -1117,6 +1129,80 @@ export class GameEngine {
     }
   }
 
+  // ----------------------------------------------------
+  // FLOATING COMBAT LABELS (damage numbers, dodge callouts)
+  // ----------------------------------------------------
+  private spawnLabel(x: number, y: number, z: number, text: string, color: string, scale = 1) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 192;
+    canvas.height = 72;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.font = 'bold 42px "Zen Kaku Gothic New", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = 7;
+      ctx.strokeStyle = 'rgba(10,6,4,0.8)';
+      ctx.strokeText(text, 96, 38);
+      ctx.fillStyle = color;
+      ctx.fillText(text, 96, 38);
+    }
+    const tex = new THREE.CanvasTexture(canvas);
+    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: false });
+    const spr = new THREE.Sprite(mat);
+    spr.position.set(x, y, z);
+    spr.scale.set(1.7 * scale, 0.64 * scale, 1);
+    spr.renderOrder = 30;
+    this.scene.add(spr);
+    this.labels.push({ sprite: spr, t: 0, life: 0.85, vy: 1.15 });
+
+    if (this.labels.length > 24) {
+      const old = this.labels.shift();
+      if (old) {
+        this.scene.remove(old.sprite);
+        old.sprite.material.map?.dispose();
+        old.sprite.material.dispose();
+      }
+    }
+  }
+
+  private updateLabels(dt: number) {
+    for (let i = this.labels.length - 1; i >= 0; i--) {
+      const L = this.labels[i];
+      L.t += dt;
+      L.sprite.position.y += L.vy * dt;
+      L.sprite.material.opacity = Math.max(0, 1 - L.t / L.life);
+      if (L.t >= L.life) {
+        this.scene.remove(L.sprite);
+        L.sprite.material.map?.dispose();
+        L.sprite.material.dispose();
+        this.labels.splice(i, 1);
+      }
+    }
+  }
+
+  // Rolls damage variance (±18%): weak/normal/critical. Hit/miss stays fully
+  // deterministic (arc/range already decided the hit landed) — only the
+  // number and its flavor are randomized.
+  private rollDamage(base: number, allowCrit: boolean): { dmg: number; tier: 'weak' | 'normal' | 'crit' } {
+    const roll = rand(0.82, 1.18);
+    let mult = roll;
+    let tier: 'weak' | 'normal' | 'crit' = 'normal';
+    if (roll >= 1.1) {
+      tier = 'crit';
+      if (allowCrit) mult *= 1.35;
+    } else if (roll <= 0.9) {
+      tier = 'weak';
+    }
+    return { dmg: Math.max(1, Math.round(base * mult)), tier };
+  }
+
+  private triggerSlowmo(duration: number, scale: number) {
+    this.slowmoT = duration;
+    this.slowmoScale = scale;
+  }
+
   public jump() {
     if (this.state !== 'play' || this.player.jumps >= 2) return;
     this.player.vy = this.player.jumps === 0 ? 10.5 : 9.5;
@@ -1132,6 +1218,7 @@ export class GameEngine {
     this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
     this.player.dash = 0.2;
     this.player.inv = Math.max(this.player.inv, 0.3);
+    this.player.dashInv = true;
     this.player.comboT = 0;
     this.player.tornado = 0;
     this.player.rush = null;
@@ -1430,9 +1517,21 @@ export class GameEngine {
 
   public hitEnemy(e: EnemyInstance, dmg: number, nx: number, nz: number, kb: number, heavy: boolean) {
     if (e.dead) return;
-    dmg *= this.player.dmgMult;
+    const rolled = this.rollDamage(dmg * this.player.dmgMult, true);
+    dmg = rolled.dmg;
     e.hp -= dmg;
     e.flash = 0.14;
+
+    const labelY = e.pos.y + (e.type === 'boss' ? 5.6 : 2.9);
+    const labelColor = rolled.tier === 'crit' ? '#ffd166' : rolled.tier === 'weak' ? '#b9b0c8' : '#efe6d2';
+    this.spawnLabel(
+      e.pos.x + rand(-0.25, 0.25),
+      labelY,
+      e.pos.z + rand(-0.25, 0.25),
+      rolled.tier === 'crit' ? `${dmg}!` : `${dmg}`,
+      labelColor,
+      rolled.tier === 'crit' ? 1.4 : rolled.tier === 'weak' ? 0.85 : 1
+    );
     const res = e.type === 'boss' ? 0.2 : 1;
     e.kb.x += nx * kb * res;
     e.kb.z += nz * kb * res;
@@ -1555,8 +1654,11 @@ export class GameEngine {
 
   public damagePlayer(dmg: number, nx: number, nz: number) {
     if (this.player.inv > 0 || this.state !== 'play') return;
+    const rolled = this.rollDamage(dmg, false); // incoming damage: variance + label only, no crit bonus
+    dmg = rolled.dmg;
     this.player.hp = Math.max(0, this.player.hp - dmg);
     this.player.inv = 0.6;
+    this.player.dashInv = false;
     this.player.killCombo = 0;
     this.player.hitCombo = 0;
     this.player.hitComboT = 0;
@@ -1567,6 +1669,14 @@ export class GameEngine {
     this.shake = Math.max(this.shake, 0.35);
     // Emissão de sangue do jogador ao sofrer golpe
     this.emitBlood(this.player.pos.x, this.player.pos.y + 1.1, this.player.pos.z, -nx, -nz, 18, false, true);
+    this.spawnLabel(
+      this.player.pos.x,
+      this.player.pos.y + 2.3,
+      this.player.pos.z,
+      `-${dmg}`,
+      rolled.tier === 'weak' ? '#d99a9a' : '#ff5a5a',
+      rolled.tier === 'weak' ? 0.85 : 1
+    );
     sfx.hurt();
     this.callbacks.onHpChange(this.player.hp, this.player.maxHp);
 
@@ -1580,6 +1690,34 @@ export class GameEngine {
         this.player.bestCombo
       );
     }
+  }
+
+  // Resolves a telegraphed melee attack (samurai/boss) at the moment its windup ends.
+  // A dash active right then is rewarded as a "perfect" dodge (tight timing); a dash
+  // whose movement already ended but whose i-frames are still running counts as a
+  // normal dodge. Either way the hit never lands. Otherwise damage applies as usual.
+  private resolveEnemyMeleeHit(dmg: number, nx: number, nz: number) {
+    if (this.player.inv > 0) {
+      if (this.player.dashInv) {
+        const perfect = this.player.dash > 0;
+        this.spawnLabel(
+          this.player.pos.x,
+          this.player.pos.y + 2.5,
+          this.player.pos.z,
+          perfect ? 'PERFEITO!' : 'ESQUIVOU!',
+          perfect ? '#ffd166' : '#8fe0c8',
+          perfect ? 1.55 : 1.1
+        );
+        this.triggerSlowmo(perfect ? 0.5 : 0.22, perfect ? 0.22 : 0.42);
+        if (perfect) {
+          this.player.st = Math.min(this.player.maxSt, this.player.st + 18);
+          this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
+        }
+        sfx.dash();
+      }
+      return;
+    }
+    this.damagePlayer(dmg, nx, nz);
   }
 
   private spawnProj(o: Partial<ProjectileInstance> & { type: string; pos: THREE.Vector3; vel: THREE.Vector3; dmg: number; life: number }) {
@@ -1890,13 +2028,33 @@ export class GameEngine {
 
       if (e.type === 'samurai') {
         e.yaw = turnTo(e.yaw, toP, dt * 7);
-        if (d > 1.8) {
+        if (e.windup && e.windup > 0) {
+          e.windup -= dt;
+          if (e.tele) {
+            e.tele.position.set(e.pos.x, 0.05, e.pos.z);
+            const k = 1 - Math.max(0, e.windup) / 0.42;
+            (e.tele.material as THREE.MeshBasicMaterial).opacity = 0.18 + 0.4 * k;
+          }
+          if (e.windup <= 0) {
+            e.windup = 0;
+            if (e.tele) e.tele.visible = false;
+            e.cd = 1.4;
+            const dNow = Math.hypot(this.player.pos.x - e.pos.x, this.player.pos.z - e.pos.z);
+            if (dNow <= 2.1) this.resolveEnemyMeleeHit(12, nx, nz);
+          }
+        } else if (d > 1.8) {
           mvx = nx;
           mvz = nz;
           spd = e.speed;
         } else if (e.cd <= 0) {
-          e.cd = 1.4;
-          this.damagePlayer(12, nx, nz);
+          e.cd = 999;
+          e.windup = 0.42;
+          if (e.tele) {
+            e.tele.visible = true;
+            e.tele.position.set(e.pos.x, 0.05, e.pos.z);
+            e.tele.scale.setScalar(1.1);
+            (e.tele.material as THREE.MeshBasicMaterial).opacity = 0.18;
+          }
         }
       } else if (e.type === 'archer') {
         e.yaw = turnTo(e.yaw, toP, dt * 6);
@@ -1923,14 +2081,37 @@ export class GameEngine {
       } else {
         // Boss
         e.yaw = turnTo(e.yaw, toP, dt * 4);
-        if (d > 3.2) {
+        if (e.windup && e.windup > 0) {
+          e.windup -= dt;
+          if (e.tele) {
+            e.tele.position.set(e.pos.x, 0.05, e.pos.z);
+            const k = 1 - Math.max(0, e.windup) / 0.55;
+            e.tele.scale.setScalar(1.6 + k * 0.7);
+            (e.tele.material as THREE.MeshBasicMaterial).opacity = 0.2 + 0.35 * k;
+          }
+          if (e.windup <= 0) {
+            e.windup = 0;
+            if (e.tele) e.tele.visible = false;
+            e.cd = 2.0;
+            const dNow = Math.hypot(this.player.pos.x - e.pos.x, this.player.pos.z - e.pos.z);
+            if (dNow <= 3.6) {
+              this.resolveEnemyMeleeHit(24, nx, nz);
+              sfx.boom();
+            }
+          }
+        } else if (d > 3.2) {
           mvx = nx;
           mvz = nz;
           spd = e.speed;
         } else if (e.cd <= 0) {
-          e.cd = 2.0;
-          this.damagePlayer(24, nx, nz);
-          sfx.boom();
+          e.cd = 999;
+          e.windup = 0.55;
+          if (e.tele) {
+            e.tele.visible = true;
+            e.tele.position.set(e.pos.x, 0.05, e.pos.z);
+            e.tele.scale.setScalar(1.6);
+            (e.tele.material as THREE.MeshBasicMaterial).opacity = 0.2;
+          }
         }
       }
 
@@ -2091,6 +2272,9 @@ export class GameEngine {
     if (this.hitstop > 0) {
       this.hitstop -= real;
       dt = real * 0.08;
+    } else if (this.slowmoT > 0) {
+      this.slowmoT -= real;
+      dt = real * this.slowmoScale;
     }
     this.time += dt;
 
@@ -2124,6 +2308,7 @@ export class GameEngine {
     }
 
     this.updateParticles(dt);
+    this.updateLabels(dt);
     this.updateCamera(real);
 
     this.sun.position.set(this.player.pos.x - 30, 40, this.player.pos.z - 25);
