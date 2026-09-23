@@ -35,9 +35,11 @@ export default function App() {
     }
   });
 
-  // Secondary weapon (bound to the old jump button, which had no defensive use)
+  // Secondary weapon (bound to the old jump button, which had no defensive use).
+  // The button always selects this exact weapon — no toggle-back — so a double-fired
+  // tap (a known touch/mouse-compat quirk) can't cancel itself out by flipping twice.
+  // Getting back to whatever you were using before is just a normal carousel tap.
   const [secondaryWeaponIdx, setSecondaryWeaponIdxState] = useState(1);
-  const lastPrimaryWeaponRef = useRef(0);
 
   useEffect(() => {
     try {
@@ -46,7 +48,6 @@ export default function App() {
     } catch {
       setSecondaryWeaponIdxState(1);
     }
-    lastPrimaryWeaponRef.current = 0;
   }, [charId]);
 
   const setSecondaryWeaponIdx = (idx: number) => {
@@ -57,13 +58,7 @@ export default function App() {
   };
 
   const handleWeaponSwap = () => {
-    if (!engineRef.current) return;
-    if (activeWeaponIdx === secondaryWeaponIdx) {
-      engineRef.current.setWeapon(lastPrimaryWeaponRef.current);
-    } else {
-      lastPrimaryWeaponRef.current = activeWeaponIdx;
-      engineRef.current.setWeapon(secondaryWeaponIdx);
-    }
+    engineRef.current?.setWeapon(secondaryWeaponIdx);
   };
 
   // Settings Modal
