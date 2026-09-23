@@ -35,6 +35,37 @@ export default function App() {
     }
   });
 
+  // Secondary weapon (bound to the old jump button, which had no defensive use)
+  const [secondaryWeaponIdx, setSecondaryWeaponIdxState] = useState(1);
+  const lastPrimaryWeaponRef = useRef(0);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(`${charId}_secondary_weapon`);
+      setSecondaryWeaponIdxState(saved !== null ? Number(saved) : 1);
+    } catch {
+      setSecondaryWeaponIdxState(1);
+    }
+    lastPrimaryWeaponRef.current = 0;
+  }, [charId]);
+
+  const setSecondaryWeaponIdx = (idx: number) => {
+    setSecondaryWeaponIdxState(idx);
+    try {
+      localStorage.setItem(`${charId}_secondary_weapon`, String(idx));
+    } catch {}
+  };
+
+  const handleWeaponSwap = () => {
+    if (!engineRef.current) return;
+    if (activeWeaponIdx === secondaryWeaponIdx) {
+      engineRef.current.setWeapon(lastPrimaryWeaponRef.current);
+    } else {
+      lastPrimaryWeaponRef.current = activeWeaponIdx;
+      engineRef.current.setWeapon(secondaryWeaponIdx);
+    }
+  };
+
   // Settings Modal
   const [showSettings, setShowSettings] = useState(false);
   const [sensitivity, setSensitivity] = useState(1.0);
@@ -478,15 +509,29 @@ export default function App() {
                 Esquiva
               </button>
 
-              {/* Jump button */}
+              {/* Weapon swap button (replaces the old jump button, which had no defensive use) */}
               <button
                 onPointerDown={(e) => {
                   e.stopPropagation();
-                  engineRef.current?.jump();
+                  handleWeaponSwap();
                 }}
-                className="absolute right-24 bottom-1 w-15 h-15 rounded-full border border-[rgba(239,230,210,0.4)] bg-[rgba(22,18,31,0.65)] text-xs font-bold text-[var(--paper)] active:bg-[rgba(242,166,90,0.4)] shadow-md transition-transform active:scale-95"
+                className={`absolute right-24 bottom-1 w-15 h-15 rounded-full border flex flex-col items-center justify-center gap-0.5 shadow-md transition-transform active:scale-95 ${
+                  activeWeaponIdx === secondaryWeaponIdx
+                    ? 'border-[var(--ember)] bg-[rgba(242,166,90,0.28)]'
+                    : 'border-[rgba(239,230,210,0.4)] bg-[rgba(22,18,31,0.65)] active:bg-[rgba(242,166,90,0.4)]'
+                }`}
+                title="Trocar para arma secundária"
               >
-                Pular
+                {(() => {
+                  const list = engineRef.current?.weapons || (charId === 'kage' ? WEAPONS_KAGE : WEAPONS_BRAVO);
+                  const secW = list[secondaryWeaponIdx];
+                  return secW && ICON_URLS[secW.id] ? (
+                    <img src={ICON_URLS[secW.id]} alt={secW.name} className="w-7 h-7 object-contain pointer-events-none" />
+                  ) : (
+                    <Swords className="w-6 h-6 text-[var(--paper)] pointer-events-none" />
+                  );
+                })()}
+                <span className="text-[9px] font-bold text-[var(--paper)] leading-none">Trocar</span>
               </button>
 
               {/* Main Attack button */}
@@ -663,6 +708,32 @@ export default function App() {
                   onChange={(e) => setAutoCamera(e.target.checked)}
                   className="w-4 h-4 accent-[var(--ember)]"
                 />
+              </div>
+
+              <div className="pt-1 border-t border-[rgba(239,230,210,0.1)]">
+                <label className="block mb-2 font-bold">
+                  Arma Secundária <span className="font-normal text-[var(--paper)]/60">(botão onde era Pular)</span>
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  {(engineRef.current?.weapons || (charId === 'kage' ? WEAPONS_KAGE : WEAPONS_BRAVO)).map(
+                    (w: WeaponDef, idx: number) => (
+                      <button
+                        key={w.id}
+                        onClick={() => setSecondaryWeaponIdx(idx)}
+                        className={`w-9 h-9 rounded-full border flex items-center justify-center p-1 transition-all cursor-pointer ${
+                          secondaryWeaponIdx === idx
+                            ? 'border-[var(--ember)] bg-[rgba(242,166,90,0.28)] scale-105'
+                            : 'border-[rgba(239,230,210,0.25)] bg-[rgba(22,18,31,0.6)]'
+                        }`}
+                        title={w.name}
+                      >
+                        {ICON_URLS[w.id] && (
+                          <img src={ICON_URLS[w.id]} alt={w.name} className="w-full h-full object-contain pointer-events-none" />
+                        )}
+                      </button>
+                    )
+                  )}
+                </div>
               </div>
             </div>
 
