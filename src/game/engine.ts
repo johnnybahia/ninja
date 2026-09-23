@@ -1162,11 +1162,6 @@ export class GameEngine {
       this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
     }
 
-    const t = this.findTarget(w.kind === 'karate' ? 4 : w.kind === 'flame' ? 5 : w.kind === 'melee' ? 6 : 26);
-    if (t) {
-      this.player.yaw = Math.atan2(t.pos.x - this.player.pos.x, t.pos.z - this.player.pos.z);
-    }
-
     if (w.kind === 'karate') {
       const st =
         this.player.comboT > 0 && this.player.comboW === this.activeWeaponIdx ? (this.player.combo + 1) % 4 : 0;
@@ -1229,18 +1224,13 @@ export class GameEngine {
       const n = w.count || 1;
       for (let i = 0; i < n; i++) {
         const a = this.player.yaw + (i - (n - 1) / 2) * (w.spread || 0) + (w.gun ? rand(-0.03, 0.03) : 0);
-        let vy = 0;
-        if (t && !w.gun) {
-          const d = Math.hypot(t.pos.x - this.player.pos.x, t.pos.z - this.player.pos.z);
-          vy = (t.pos.y + (t.type === 'boss' ? 2.4 : 1.2) - (this.player.pos.y + 1.4)) / Math.max(0.2, d / (w.speed || 30));
-        }
         this.spawnProj({
           type: w.gun ? 'tracer' : w.id,
           friendly: true,
           gun: !!w.gun,
           ptMult: w.pointMult || 1,
           pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-          vel: new THREE.Vector3(Math.sin(a) * (w.speed || 30), vy, Math.cos(a) * (w.speed || 30)),
+          vel: new THREE.Vector3(Math.sin(a) * (w.speed || 30), 0, Math.cos(a) * (w.speed || 30)),
           dmg: w.dmg[0],
           pierce: !!w.pierce,
           life: w.life || 1.2
@@ -1331,6 +1321,7 @@ export class GameEngine {
       case 'bo':
         this.player.tornado = 1.5;
         this.player.torTick = 0;
+        this.player.anim = { kind: 'spin', t: 0, dur: 1.5, side: 0 };
         sfx.dash();
         break;
       case 'kama':
@@ -1774,6 +1765,50 @@ export class GameEngine {
 
     this.player.st = Math.min(this.player.maxSt, this.player.st + 22 * dt);
     this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
+
+    // Bō special: spinning AoE tick for its duration, then releases the attack button
+    if (this.player.tornado > 0) {
+      this.player.torTick += dt;
+      if (this.player.torTick >= 0.2) {
+        this.player.torTick -= 0.2;
+        this.meleeHit(3.4, TAU, 12, 5, false);
+      }
+      this.player.tornado -= dt;
+      if (this.player.tornado <= 0) {
+        this.player.tornado = 0;
+        this.player.torTick = 0;
+      }
+    }
+
+    // Karatê special: timed flurry on the nearest target, then releases the attack button
+    if (this.player.rush) {
+      const r = this.player.rush;
+      r.t += dt;
+      if (!r.kicked && r.hits < 3 && r.t >= (r.hits + 1) * 0.16) {
+        r.hits++;
+        const tg = this.findTarget(3);
+        if (tg) {
+          const dx = tg.pos.x - this.player.pos.x;
+          const dz = tg.pos.z - this.player.pos.z;
+          const d = Math.hypot(dx, dz) || 0.001;
+          this.hitEnemy(tg, 16, dx / d, dz / d, 2, false);
+          this.player.anim = { kind: r.hits % 2 ? 'punchR' : 'punchL', t: 0, dur: 0.14, side: 0 };
+        }
+      } else if (!r.kicked && r.hits >= 3 && r.t >= 0.58) {
+        r.kicked = true;
+        const tg = this.findTarget(3.2);
+        if (tg) {
+          const dx = tg.pos.x - this.player.pos.x;
+          const dz = tg.pos.z - this.player.pos.z;
+          const d = Math.hypot(dx, dz) || 0.001;
+          this.hitEnemy(tg, 34, dx / d, dz / d, 10, true);
+          this.player.anim = { kind: 'roundKick', t: 0, dur: 0.3, side: 0 };
+        }
+      }
+      if (r.t >= 1.0) {
+        this.player.rush = null;
+      }
+    }
 
     if (this.input.attackHeld) {
       this.tryAttack();

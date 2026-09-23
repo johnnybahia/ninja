@@ -66,9 +66,13 @@ export const WORLD_PAL = {
     hemiSky: 0xffd6b0, hemiGround: 0x2a2040
   },
   doom: {
-    sky: 0x1c0d0a, fogFar: 62, ground: 0x2a231d, stone: 0x4a4038, stoneDark: 0x2e2823,
-    wood: 0x4a3226, roof: 0x140f0d, torii: 0x6b2318, trunk: 0x36281e, pine: 0x2a2822,
+    // Obstacles (stone, stoneDark, trunk, pine) are pulled noticeably lighter than
+    // `ground` here — they were nearly the same tone as the floor, so rocks and trees
+    // vanished into the dark. hemiGround is also a touch brighter to lift their
+    // lower/underside faces without changing the overall mood (sky/fog/sun untouched).
+    sky: 0x1c0d0a, fogFar: 62, ground: 0x2a231d, stone: 0x5c5044, stoneDark: 0x483f37,
+    wood: 0x4a3226, roof: 0x140f0d, torii: 0x6b2318, trunk: 0x453224, pine: 0x384334,
     sakura: 0x59403a, glow: 0xff5a20, sun: 0xff5a30, sunI: 0.65, sunDisc: 0xff3a18,
-    hemiSky: 0xff6a3a, hemiGround: 0x140806
+    hemiSky: 0xff6a3a, hemiGround: 0x2e1c12
   }
 };
