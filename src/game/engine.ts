@@ -1808,7 +1808,7 @@ export class GameEngine {
       Math.cos(this.camYaw) * cp
     );
 
-    let want = this.camera.aspect < 1 ? 8.6 : 7.2;
+    let want = this.camera.aspect < 1 ? 10.5 : 7.2;
     this.camDist += (want - this.camDist) * Math.min(1, dt * 8);
 
     this.camera.position.copy(camTarget).addScaledVector(camDir, this.camDist);
