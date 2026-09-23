@@ -615,13 +615,15 @@ export function buildPlayerRig(charId: 'kage' | 'bravo'): RigInstance {
     add(B(0.84, 0.09, 0.5), strapMat, 0, 1.0, 0);
     add(B(0.15, 0.1, 0.06), metal, 0, 1.0, 0.28);
 
+    // Bandolier: anchored at the shoulder and hanging down to the opposite hip
+    // (was centered on its pivot, which poked the strap up through the neck/head)
     const bando = new THREE.Group();
-    bando.position.set(0, 1.6, 0.05);
+    bando.position.set(0, 1.78, 0.05);
     bando.rotation.z = 0.55;
     body.add(bando);
-    add(B(0.16, 1.0, 0.05), strapMat, 0, 0, 0.2, bando);
+    add(B(0.16, 1.0, 0.05), strapMat, 0, -0.5, 0.2, bando);
     for (let i = -2; i <= 2; i++) {
-      add(B(0.09, 0.16, 0.09), metal, 0, i * 0.18, 0.26, bando);
+      add(B(0.09, 0.16, 0.09), metal, 0, i * 0.18 - 0.5, 0.26, bando);
     }
 
     const tails = new THREE.Group();
