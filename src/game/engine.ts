@@ -1331,6 +1331,7 @@ export class GameEngine {
       case 'bo':
         this.player.tornado = 1.5;
         this.player.torTick = 0;
+        this.player.anim = { kind: 'spin', t: 0, dur: 1.5, side: 0 };
         sfx.dash();
         break;
       case 'kama':
@@ -1774,6 +1775,50 @@ export class GameEngine {
 
     this.player.st = Math.min(this.player.maxSt, this.player.st + 22 * dt);
     this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
+
+    // Bō special: spinning AoE tick for its duration, then releases the attack button
+    if (this.player.tornado > 0) {
+      this.player.torTick += dt;
+      if (this.player.torTick >= 0.2) {
+        this.player.torTick -= 0.2;
+        this.meleeHit(3.4, TAU, 12, 5, false);
+      }
+      this.player.tornado -= dt;
+      if (this.player.tornado <= 0) {
+        this.player.tornado = 0;
+        this.player.torTick = 0;
+      }
+    }
+
+    // Karatê special: timed flurry on the nearest target, then releases the attack button
+    if (this.player.rush) {
+      const r = this.player.rush;
+      r.t += dt;
+      if (!r.kicked && r.hits < 3 && r.t >= (r.hits + 1) * 0.16) {
+        r.hits++;
+        const tg = this.findTarget(3);
+        if (tg) {
+          const dx = tg.pos.x - this.player.pos.x;
+          const dz = tg.pos.z - this.player.pos.z;
+          const d = Math.hypot(dx, dz) || 0.001;
+          this.hitEnemy(tg, 16, dx / d, dz / d, 2, false);
+          this.player.anim = { kind: r.hits % 2 ? 'punchR' : 'punchL', t: 0, dur: 0.14, side: 0 };
+        }
+      } else if (!r.kicked && r.hits >= 3 && r.t >= 0.58) {
+        r.kicked = true;
+        const tg = this.findTarget(3.2);
+        if (tg) {
+          const dx = tg.pos.x - this.player.pos.x;
+          const dz = tg.pos.z - this.player.pos.z;
+          const d = Math.hypot(dx, dz) || 0.001;
+          this.hitEnemy(tg, 34, dx / d, dz / d, 10, true);
+          this.player.anim = { kind: 'roundKick', t: 0, dur: 0.3, side: 0 };
+        }
+      }
+      if (r.t >= 1.0) {
+        this.player.rush = null;
+      }
+    }
 
     if (this.input.attackHeld) {
       this.tryAttack();
