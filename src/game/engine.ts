@@ -24,6 +24,37 @@ import {
 import { sfx } from './audio';
 import { MAT, GEO, buildRig, buildZombieRig, buildPlayerRig, animateRig, makeWeapon, mesh } from './rigs';
 
+// Scroll drop chance per kill for each loaded weapon (2 weapons -> 7.5% per kill).
+const SCROLL_RATE_PER_WEAPON = 0.0375;
+const SPECIAL_DURATION = 20;
+
+// Pseudo-random distribution: the chance on the n-th kill since the last scroll is C·n.
+// Solves for C so the long-run rate still averages `p`, but without long droughts or streaks.
+const prdCache = new Map<number, number>();
+function prdConstant(p: number): number {
+  const cached = prdCache.get(p);
+  if (cached !== undefined) return cached;
+  const rateFor = (c: number) => {
+    let mean = 0;
+    let alive = 1;
+    for (let n = 1; alive > 1e-9; n++) {
+      const pn = Math.min(1, c * n);
+      mean += n * alive * pn;
+      alive *= 1 - pn;
+    }
+    return 1 / mean;
+  };
+  let lo = 0;
+  let hi = p;
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2;
+    if (rateFor(mid) < p) lo = mid;
+    else hi = mid;
+  }
+  prdCache.set(p, hi);
+  return hi;
+}
+
 export interface GameEngineCallbacks {
   onHpChange: (hp: number, maxHp: number) => void;
   onStaminaChange: (st: number, maxSt: number) => void;
@@ -159,7 +190,10 @@ export class GameEngine {
   private enemies: EnemyInstance[] = [];
   private projectiles: ProjectileInstance[] = [];
   private pickups: { m: THREE.Mesh; x: number; z: number; t: number }[] = [];
-  private scrolls: { g: THREE.Group; ring: THREE.Mesh; glyph: THREE.Mesh; x: number; z: number; t: number; w: number }[] = [];
+  private scrolls: { g: THREE.Group; ring: THREE.Mesh; glyph: THREE.Sprite; x: number; z: number; t: number; w: number }[] = [];
+  private glyphTex = new Map<string, THREE.CanvasTexture>();
+  private killsSinceScroll = 0;
+  private scrollsGiven: Record<number, number> = {};
 
   private projPools: Record<string, THREE.Group[]> = {};
 
@@ -174,6 +208,7 @@ export class GameEngine {
   private lastHS = 0;
   private lastMove = new THREE.Vector3(0, 0, -1);
   private slowmoT = 0;
+  private attackQueueT = 0;
   private slowmoScale = 1;
   private labels: { sprite: THREE.Sprite; t: number; life: number; vy: number }[] = [];
 
@@ -188,6 +223,8 @@ export class GameEngine {
   public joyTouch = { id: null as number | null, ox: 0, oy: 0 };
 
   public state: 'menu' | 'play' | 'over' = 'menu';
+  public paused = false;
+  public loadout: number[] | null = null;
   public wave = 0;
   private waveTimer = 0;
   private clearedShown = false;
@@ -677,6 +714,7 @@ export class GameEngine {
 
   public start() {
     this.reset();
+    this.paused = false;
     this.state = 'play';
     this.nextWave();
     if (!this.isRunning) {
@@ -728,6 +766,10 @@ export class GameEngine {
     this.player.suppress = 0;
     this.player.dash = 0;
     this.player.dashInv = false;
+    this.attackQueueT = 0;
+    this.input.attackHeld = false;
+    this.killsSinceScroll = 0;
+    this.scrollsGiven = {};
     this.player.pos.set(0, 0, 5);
     this.player.vel.set(0, 0, 0);
     this.player.kb.set(0, 0, 0);
@@ -744,7 +786,7 @@ export class GameEngine {
     this.callbacks.onScoreChange(0);
     this.callbacks.onComboChange(0);
     this.callbacks.onSpecialsUpdate({});
-    this.setWeapon(0);
+    this.setWeapon(this.loadout?.[0] ?? 0);
   }
 
   public nextWave() {
@@ -1251,6 +1293,14 @@ export class GameEngine {
     sfx.dash();
   }
 
+  // Attack from a button press: fires now if possible, otherwise buffers the press
+  // briefly so a quick tap during another weapon's cooldown isn't silently dropped.
+  public pressAttack() {
+    const before = this.player.atkCd;
+    this.tryAttack();
+    this.attackQueueT = this.player.atkCd > before ? 0 : 0.3;
+  }
+
   public tryAttack() {
     if (this.player.atkCd > 0 || this.state !== 'play') return;
     const w = this.weapons[this.activeWeaponIdx];
@@ -1406,7 +1456,7 @@ export class GameEngine {
         this.slashT = 0;
         this.slashDur = 0.2;
         this.spHit = true;
-        this.meleeHit(2.9, 2.1, 28, 6, true);
+        this.meleeHit(2.9, 2.1, 40, 6, true);
         this.spHit = false;
         this.spawnProj({
           type: 'wave',
@@ -1414,7 +1464,7 @@ export class GameEngine {
           sp: true,
           pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y - 0.3, this.tmpH.z),
           vel: new THREE.Vector3(fx * 22, 0, fz * 22),
-          dmg: 35,
+          dmg: 45,
           pierce: true,
           life: 0.8,
           r: 1.5,
@@ -1438,7 +1488,7 @@ export class GameEngine {
           const dx = e.pos.x - this.player.pos.x;
           const dz = e.pos.z - this.player.pos.z;
           const d = Math.hypot(dx, dz) || 0.001;
-          if (d < 7 + e.r) this.hitEnemy(e, 30, -dx / d, -dz / d, 6, true);
+          if (d < 7 + e.r) this.hitEnemy(e, 48, -dx / d, -dz / d, 6, true);
         }
         this.spHit = false;
         sfx.heavy();
@@ -1454,7 +1504,7 @@ export class GameEngine {
             speed: 18,
             pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
             vel: new THREE.Vector3(Math.sin(a) * 18, 0, Math.cos(a) * 18),
-            dmg: 16,
+            dmg: 11,
             life: 2.2
           });
         }
@@ -1470,7 +1520,7 @@ export class GameEngine {
           this.player.pos.z = tg.pos.z + (dz / d) * (tg.r + 0.9);
           this.player.yaw = Math.atan2(-dx, -dz);
           this.spHit = true;
-          this.hitEnemy(tg, 60, -dx / d, -dz / d, 8, true);
+          this.hitEnemy(tg, 130, -dx / d, -dz / d, 8, true);
           this.spHit = false;
           sfx.dash();
         }
@@ -1492,7 +1542,7 @@ export class GameEngine {
             pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y + 0.2, this.tmpH.z),
             vel: new THREE.Vector3(Math.sin(a) * 13, 7 + rand(-1, 2), Math.cos(a) * 13),
             grav: 16,
-            dmg: 42,
+            dmg: 36,
             aoeR: 3.2,
             kb: 8,
             life: 2.5
@@ -1508,7 +1558,7 @@ export class GameEngine {
         this.slashT = 0;
         this.slashDur = 0.18;
         this.spHit = true;
-        this.meleeHit(2.6, 2.6, 42, 7, true);
+        this.meleeHit(2.6, 2.6, 64, 7, true);
         this.spHit = false;
         sfx.heavy();
         break;
@@ -1523,7 +1573,7 @@ export class GameEngine {
             pierce: true,
             pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
             vel: new THREE.Vector3(fx * 60, 0, fz * 60),
-            dmg: 38,
+            dmg: 31,
             life: 0.9
           });
         }
@@ -1543,7 +1593,7 @@ export class GameEngine {
               friendly: true,
               pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
               vel: new THREE.Vector3(Math.sin(a) * (w.speed || 40), 0, Math.cos(a) * (w.speed || 40)),
-              dmg: Math.round((w.dmg[0] || 8) * 1.4),
+              dmg: w.dmg[0] || 8,
               life: w.life || 0.22
             });
           }
@@ -1563,7 +1613,7 @@ export class GameEngine {
             pierce: true,
             pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
             vel: new THREE.Vector3(Math.sin(a) * 58, 0, Math.cos(a) * 58),
-            dmg: 10,
+            dmg: 11,
             life: 1.1
           });
         }
@@ -1572,7 +1622,7 @@ export class GameEngine {
         break;
       case 'flame':
         // Parede de Fogo: a wide fire AoE — the default gunfire made zero sense on a flamethrower
-        this.meleeHit((w.range || 4.6) * 1.5, TAU * 0.6, 16, 2, false);
+        this.meleeHit((w.range || 4.6) * 1.5, TAU * 0.6, 52, 2, false);
         for (let i = 0; i < 16; i++) {
           const a = this.player.yaw + rand(-1.0, 1.0);
           const d = rand(1, (w.range || 4.6) * 1.4);
@@ -1592,8 +1642,8 @@ export class GameEngine {
         break;
       case 'minigun':
         // Chuva de Chumbo: a much wider, denser spray than the generic burst
-        for (let i = 0; i < 22; i++) {
-          const a = this.player.yaw + rand(-0.22, 0.22);
+        for (let i = 0; i < 28; i++) {
+          const a = this.player.yaw + rand(-0.12, 0.12);
           this.spawnProj({
             type: 'tracer',
             gun: true,
@@ -1601,7 +1651,7 @@ export class GameEngine {
             friendly: true,
             pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
             vel: new THREE.Vector3(Math.sin(a) * 62, 0, Math.cos(a) * 62),
-            dmg: 8,
+            dmg: 10,
             life: 1.0
           });
         }
@@ -1762,7 +1812,8 @@ export class GameEngine {
     this.emitBlood(e.pos.x, e.pos.y + 1.2, e.pos.z, 0, 0, e.type === 'boss' ? 65 : 42, true, true);
     this.emitParticles(e.pos.x, 1, e.pos.z, 28, 0x9a88c0, 5, 3, 4, 1);
 
-    if (Math.random() < 0.15) this.dropScroll(e.pos.x, e.pos.z);
+    // Bosses always drop a scroll; other kills roll against the loadout-proportional rate
+    if (e.type === 'boss' || this.rollScroll()) this.dropScroll(e.pos.x, e.pos.z);
     else if (Math.random() < 0.2) this.dropPickup(e.pos.x, e.pos.z);
   }
 
@@ -1781,8 +1832,64 @@ export class GameEngine {
     this.callbacks.onXpChange(this.player.xp, this.player.xpNext, this.player.level);
   }
 
+  private loadoutPool(): number[] {
+    return this.loadout && this.loadout.length ? this.loadout : this.weapons.map((_, i) => i);
+  }
+
+  private rollScroll(): boolean {
+    const rate = Math.min(0.5, SCROLL_RATE_PER_WEAPON * this.loadoutPool().length);
+    this.killsSinceScroll++;
+    if (Math.random() < Math.min(1, prdConstant(rate) * this.killsSinceScroll)) {
+      this.killsSinceScroll = 0;
+      return true;
+    }
+    return false;
+  }
+
+  // Only loaded weapons get specials (a charge on an unbound weapon would be unusable).
+  // Prefers a weapon with no special running or scroll already waiting, then the one
+  // given the fewest scrolls this run, so both buttons get specials evenly.
+  private pickScrollWeapon(): number {
+    const pool = this.loadoutPool();
+    const pending = new Set(this.scrolls.map((s) => s.w));
+    const score = (i: number) =>
+      (this.player.special[i] > 0 || pending.has(i) ? 1000 : 0) + (this.scrollsGiven[i] || 0);
+    const best = Math.min(...pool.map(score));
+    const cands = pool.filter((i) => score(i) === best);
+    return cands[Math.floor(Math.random() * cands.length)];
+  }
+
+  // Weapon glyph badge floating over a scroll so the player knows which special it grants
+  private getGlyphTexture(w: WeaponDef): THREE.CanvasTexture {
+    let tex = this.glyphTex.get(w.id);
+    if (tex) return tex;
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.beginPath();
+      ctx.arc(64, 64, 56, 0, TAU);
+      ctx.fillStyle = 'rgba(22,18,31,0.85)';
+      ctx.fill();
+      ctx.lineWidth = 7;
+      ctx.strokeStyle = '#ffd166';
+      ctx.stroke();
+      ctx.font = 'bold 66px "Zen Kaku Gothic New", serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffd166';
+      ctx.fillText(w.glyph, 64, 68);
+    }
+    tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    this.glyphTex.set(w.id, tex);
+    return tex;
+  }
+
   private dropScroll(x: number, z: number) {
-    const wIdx = Math.floor(Math.random() * this.weapons.length);
+    const wIdx = this.pickScrollWeapon();
+    this.scrollsGiven[wIdx] = (this.scrollsGiven[wIdx] || 0) + 1;
     const g = new THREE.Group();
     g.add(
       new THREE.Mesh(
@@ -1794,10 +1901,17 @@ export class GameEngine {
       new THREE.RingGeometry(0.5, 0.78, 28).rotateX(-Math.PI / 2),
       new THREE.MeshBasicMaterial({ color: 0xffd166, transparent: true, opacity: 0.7 })
     );
-    const glyph = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.62, 0.62),
-      new THREE.MeshBasicMaterial({ color: 0xffd166 })
+    const glyph = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: this.getGlyphTexture(this.weapons[wIdx]),
+        transparent: true,
+        depthWrite: false,
+        fog: false,
+        toneMapped: false
+      })
     );
+    glyph.scale.set(0.95, 0.95, 1);
+    glyph.position.set(x, 1.75, z);
     g.position.set(x, 0.9, z);
     ring.position.set(x, 0.06, z);
     this.scene.add(g, ring, glyph);
@@ -1807,6 +1921,7 @@ export class GameEngine {
   private removeScroll(i: number) {
     const k = this.scrolls[i];
     this.scene.remove(k.g, k.ring, k.glyph);
+    k.glyph.material.dispose();
     this.scrolls.splice(i, 1);
   }
 
@@ -2079,7 +2194,7 @@ export class GameEngine {
       this.player.torTick += dt;
       if (this.player.torTick >= 0.2) {
         this.player.torTick -= 0.2;
-        this.meleeHit(3.4, TAU, 12, 5, false);
+        this.meleeHit(3.4, TAU, 16, 5, false);
       }
       this.player.tornado -= dt;
       if (this.player.tornado <= 0) {
@@ -2099,7 +2214,7 @@ export class GameEngine {
           const dx = tg.pos.x - this.player.pos.x;
           const dz = tg.pos.z - this.player.pos.z;
           const d = Math.hypot(dx, dz) || 0.001;
-          this.hitEnemy(tg, 16, dx / d, dz / d, 2, false);
+          this.hitEnemy(tg, 24, dx / d, dz / d, 2, false);
           this.player.anim = { kind: r.hits % 2 ? 'punchR' : 'punchL', t: 0, dur: 0.14, side: 0 };
         }
       } else if (!r.kicked && r.hits >= 3 && r.t >= 0.58) {
@@ -2109,7 +2224,7 @@ export class GameEngine {
           const dx = tg.pos.x - this.player.pos.x;
           const dz = tg.pos.z - this.player.pos.z;
           const d = Math.hypot(dx, dz) || 0.001;
-          this.hitEnemy(tg, 34, dx / d, dz / d, 10, true);
+          this.hitEnemy(tg, 60, dx / d, dz / d, 10, true);
           this.player.anim = { kind: 'roundKick', t: 0, dur: 0.3, side: 0 };
         }
       }
@@ -2118,8 +2233,11 @@ export class GameEngine {
       }
     }
 
-    if (this.input.attackHeld) {
+    if (this.attackQueueT > 0) this.attackQueueT -= dt;
+    if (this.input.attackHeld || this.attackQueueT > 0) {
+      const before = this.player.atkCd;
       this.tryAttack();
+      if (this.player.atkCd > before) this.attackQueueT = 0;
     }
 
     // Advance and update attack animation timer
@@ -2378,10 +2496,17 @@ export class GameEngine {
       const s = this.scrolls[i];
       s.t += dt;
       s.g.rotation.y += dt * 2;
+      const bob = Math.sin(s.t * 3) * 0.1;
+      s.g.position.y = 0.9 + bob;
+      s.glyph.position.y = 1.75 + bob;
+      // Blink during the last 4s before the scroll vanishes
+      s.glyph.visible = s.t < 11 || Math.floor(s.t * 6) % 2 === 0;
       const got = Math.hypot(s.x - this.player.pos.x, s.z - this.player.pos.z) < 1.4;
       if (got) {
-        this.player.special[s.w] = 20;
+        this.player.special[s.w] = SPECIAL_DURATION;
         this.callbacks.onSpecialsUpdate({ ...this.player.special });
+        const w = this.weapons[s.w];
+        this.callbacks.onWaveChange(this.wave, SPECIALS[w.id]?.name ?? 'Especial', `${w.name}: especial por ${SPECIAL_DURATION}s`);
         sfx.special();
       }
       if (got || s.t > 15) {
@@ -2453,6 +2578,10 @@ export class GameEngine {
   public loop = () => {
     this.reqId = requestAnimationFrame(this.loop);
     const real = Math.min(this.clock.getDelta(), 0.05);
+    if (this.paused && this.state === 'play') {
+      this.renderer.render(this.scene, this.camera);
+      return;
+    }
     let dt = real;
     if (this.hitstop > 0) {
       this.hitstop -= real;

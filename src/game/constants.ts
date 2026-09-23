@@ -34,10 +34,30 @@ export const WEAPONS_BRAVO: WeaponDef[] = [
   { id: 'bazooka', name: 'M45', glyph: 'B', kind: 'bomb', dmg: [90], cd: 1.3, dur: 0.22, gun: true, rocket: true, pointMult: 0.35 }
 ];
 
+// Arsenal screen: role tag + one-line description per weapon id
+export const WEAPON_INFO: Record<string, { tag: string; desc: string }> = {
+  katana: { tag: 'Corpo a corpo', desc: 'Cortes rápidos em arco; o 3º golpe da sequência causa quase o dobro de dano.' },
+  bo: { tag: 'Corpo a corpo · 360°', desc: 'Giro que atinge e empurra todos ao redor. Lento, ótimo quando cercado.' },
+  kama: { tag: 'Médio alcance', desc: 'Corrente longa que puxa o inimigo até você.' },
+  shuriken: { tag: 'Distância', desc: 'Três estrelas em leque. Cobre uma área larga, dano baixo por estrela.' },
+  kunai: { tag: 'Distância', desc: 'Lâmina rápida e forte que atravessa vários inimigos em linha.' },
+  bomb: { tag: 'Explosivo · Área', desc: 'Explosão com dano alto em área. Consome vigor.' },
+  karate: { tag: 'Corpo a corpo', desc: 'Sequência de socos e chutes com avanço; fecha com um chute pesado.' },
+  knife: { tag: 'Corpo a corpo', desc: 'Golpe curto e veloz. Arriscado, mas rende mais pontos por abate.' },
+  pistol: { tag: 'Distância', desc: 'Tiro rápido e preciso. Equilibrada e rende bons pontos.' },
+  shotgun: { tag: 'Curto alcance', desc: 'Rajada de 7 chumbos em leque. Devastadora de perto, inútil de longe.' },
+  rifle: { tag: 'Distância', desc: 'Disparo automático contínuo com longo alcance.' },
+  flame: { tag: 'Curto alcance · Área', desc: 'Jato de fogo contínuo em cone. Consome vigor.' },
+  minigun: { tag: 'Distância', desc: 'Demora a girar, depois vira uma parede de balas. Rende poucos pontos.' },
+  bazooka: { tag: 'Explosivo · Área', desc: 'Foguete com dano enorme em área. Recarga lenta e poucos pontos.' }
+};
+
+// Special damage is tuned to roughly 2x the weapon's own normal DPS (about 1.5x when a
+// single-target weapon's special becomes an area attack), so every pick is worth a scroll.
 export const SPECIALS: Record<string, SpecialDef> = {
   katana: { name: 'Corte do Vento', cd: 0.5 },
   bo: { name: 'Tornado', cd: 1.8 },
-  kama: { name: 'Ceifa', cd: 0.75 },
+  kama: { name: 'Ceifa', cd: 0.7 },
   shuriken: { name: 'Chuva de Estrelas', cd: 0.7 },
   kunai: { name: 'Relâmpago', cd: 0.8 },
   bomb: { name: 'Chuva de Fogo', cd: 1.4 },
@@ -45,9 +65,9 @@ export const SPECIALS: Record<string, SpecialDef> = {
   knife: { name: 'Retalho Relâmpago', cd: 0.6 },
   pistol: { name: 'Duplo Cano', cd: 0.5 },
   shotgun: { name: 'Rajada Dupla', cd: 0.9 },
-  rifle: { name: 'Fogo Supressivo', cd: 1.8 },
-  flame: { name: 'Parede de Fogo', cd: 1.2 },
-  minigun: { name: 'Chuva de Chumbo', cd: 1.0 },
+  rifle: { name: 'Fogo Supressivo', cd: 0.9 },
+  flame: { name: 'Parede de Fogo', cd: 0.45 },
+  minigun: { name: 'Chuva de Chumbo', cd: 0.9 },
   bazooka: { name: 'Bombardeio Aéreo', cd: 1.6 }
 };
 
