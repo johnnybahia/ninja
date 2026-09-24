@@ -49,3 +49,35 @@ html, body, #root {
   }
 }
 
+
+/* Deathblow brush kanji: slams in, ink bleed glow, fades */
+@keyframes deathblowIn {
+  0% {
+    transform: scale(2.6) rotate(-6deg);
+    opacity: 0;
+    filter: blur(6px);
+  }
+  18% {
+    transform: scale(0.94) rotate(-2deg);
+    opacity: 1;
+    filter: blur(0);
+  }
+  30% {
+    transform: scale(1.02) rotate(-2deg);
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1.08) rotate(-2deg);
+    opacity: 0;
+  }
+}
+
+.deathblow-kanji {
+  font-size: min(34vw, 220px);
+  line-height: 1;
+  letter-spacing: -0.04em;
+  text-shadow: 0 0 2px #2a0000, 4px 6px 0 rgba(10, 0, 0, 0.85), 0 0 40px rgba(255, 30, 10, 0.65);
+  animation: deathblowIn 0.95s ease-out forwards;
+}

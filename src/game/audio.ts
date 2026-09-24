@@ -89,6 +89,40 @@ export const sfx = {
   hurt: () => tone(260, 110, 0.25, 'sawtooth', 0.15),
   jump: () => tone(300, 620, 0.12, 'sine', 0.1),
   dash: () => noise(0.18, 0.3, 3500, 'highpass'),
+  // Perfect deflect: bright metallic clang with a ringing tail
+  clang: () => {
+    noise(0.09, 0.5, 5200, 'highpass');
+    tone(2350, 2200, 0.35, 'triangle', 0.16);
+    tone(3520, 3300, 0.22, 'sine', 0.08);
+  },
+  // Plain block: duller, heavier impact
+  block: () => {
+    noise(0.12, 0.42, 1800);
+    tone(620, 420, 0.14, 'triangle', 0.12);
+  },
+  // Posture broken: low temple gong
+  postureBreak: () => {
+    tone(98, 92, 1.4, 'sine', 0.32);
+    tone(196, 184, 1.0, 'triangle', 0.1);
+    noise(0.25, 0.3, 900);
+  },
+  // Perilous attack warning
+  danger: () => {
+    tone(740, 740, 0.35, 'square', 0.07);
+    setTimeout(() => tone(554, 554, 0.5, 'square', 0.06), 90);
+  },
+  deathblow: () => {
+    noise(0.35, 0.6, 1400);
+    tone(160, 40, 0.8, 'sawtooth', 0.22);
+    setTimeout(() => tone(82, 60, 1.2, 'sine', 0.3), 120);
+  },
+  guardBreak: () => {
+    noise(0.3, 0.55, 700, 'lowpass');
+    tone(300, 90, 0.45, 'sawtooth', 0.18);
+  },
+  heal: () => {
+    [440, 554, 659].forEach((f, i) => setTimeout(() => tone(f, f * 1.01, 0.35, 'sine', 0.1), i * 60));
+  },
   pick: () => {
     tone(620, 1240, 0.18, 'sine', 0.16);
   },

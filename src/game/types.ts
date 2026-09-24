@@ -128,6 +128,36 @@ export interface EnemyInstance {
   lungeYaw?: number;
   anim?: { kind: string; t: number; dur: number; side: number };
   shotPending?: boolean;
+  // Sekiro-style combat
+  posture: number;
+  maxPosture: number;
+  postureT: number; // time since posture was last raised (regen starts after a delay)
+  brokenT: number; // >0 while posture is broken: deathblow window
+  mode: 'approach' | 'circle' | 'attack' | 'recover' | 'guard' | 'stagger' | 'broken';
+  modeT: number;
+  token: boolean;
+  strike?: EnemyStrike;
+  comboLeft: number;
+  circleDir: number;
+  guardT: number;
+  staggerT: number;
+  dbCount?: number; // deathblows already taken (boss needs two)
+  postureBar?: THREE.Mesh;
+  danger?: THREE.Sprite;
+  dbMark?: THREE.Sprite;
+}
+
+export type StrikeKind = 'slash' | 'thrust' | 'sweep' | 'smash';
+
+export interface EnemyStrike {
+  kind: StrikeKind;
+  windup: number;
+  t: number;
+  perilous: boolean;
+  feint: boolean;
+  reach: number;
+  dmg: number;
+  side: number;
 }
 
 export interface ProjectileInstance {

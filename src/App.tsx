@@ -5,7 +5,7 @@ import { WEAPONS_KAGE, WEAPON_INFO, KARATE, SPECIALS } from './game/constants';
 import { ICON_URLS } from './game/icons';
 import { initAudio } from './game/audio';
 import type { Quality, QualitySetting } from './game/postfx';
-import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft } from 'lucide-react';
+import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft, ArrowUp } from 'lucide-react';
 
 const SLOT_COUNT = 2;
 const SLOT_LABELS = ['Principal', 'Secundária'];
@@ -65,6 +65,10 @@ export default function App() {
   const [activeWeaponIdx, setActiveWeaponIdx] = useState(0);
   const [activeWeapon, setActiveWeapon] = useState<WeaponDef | null>(null);
   const [specials, setSpecials] = useState<Record<number, number>>({});
+  const [posture, setPosture] = useState(0);
+  const [heals, setHeals] = useState(3);
+  const [dbReady, setDbReady] = useState(false);
+  const [cinematic, setCinematic] = useState(false);
   const [bestScore, setBestScore] = useState<number>(() => {
     try {
       return Number(localStorage.getItem('kage_best_score') || 0);
@@ -195,6 +199,10 @@ export default function App() {
         setActiveWeapon(w);
       },
       onSpecialsUpdate: (sp) => setSpecials(sp),
+      onPostureChange: (p, max) => setPosture(max > 0 ? p / max : 0),
+      onHealsChange: (n) => setHeals(n),
+      onDeathblowReady: (r) => setDbReady(r),
+      onCinematic: (on) => setCinematic(on),
       onQualityChange: (_setting, effective) => setEffectiveQuality(effective),
       onGameOver: (finalScore) => {
         setGameState('over');
@@ -282,6 +290,8 @@ export default function App() {
       if (e.button === 0) {
         engineRef.current.input.attackHeld = true;
         engineRef.current.pressAttack();
+      } else if (e.button === 2) {
+        engineRef.current.guardDown();
       }
       return;
     }
@@ -349,7 +359,8 @@ export default function App() {
       engineRef.current.lookTouch.id = null;
     }
     if (e.pointerType === 'mouse') {
-      engineRef.current.input.attackHeld = false;
+      if (e.button === 2) engineRef.current.guardUp();
+      else engineRef.current.input.attackHeld = false;
     }
   };
 
@@ -376,14 +387,15 @@ export default function App() {
         const step = e.code === 'KeyE' ? 1 : loadout.length - 1;
         engineRef.current.setWeapon(loadout[(cur + step) % loadout.length]);
       }
-      if (e.code === 'KeyR') {
-        engineRef.current.recenterCamera();
-      }
+      if (e.code === 'KeyF' && !e.repeat) engineRef.current.guardDown();
+      if (e.code === 'KeyR' && !e.repeat) engineRef.current.heal();
+      if (e.code === 'KeyC') engineRef.current.recenterCamera();
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
       if (!engineRef.current) return;
       engineRef.current.input.keys[e.code] = false;
+      if (e.code === 'KeyF') engineRef.current.guardUp();
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -404,6 +416,7 @@ export default function App() {
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
+        onContextMenu={(e) => e.preventDefault()}
       />
 
       {/* Floating Virtual Joystick */}
@@ -540,24 +553,42 @@ export default function App() {
           )}
 
           {/* Touch Movement Guidance Tip */}
-          <div className="absolute left-[calc(var(--sal)+24px)] bottom-[calc(var(--sab)+64px)] max-w-[calc(100vw-230px)] text-xs leading-snug text-[var(--paper)]/60 pointer-events-none">
+          <div className="absolute left-[calc(var(--sal)+24px)] bottom-[calc(var(--sab)+64px)] max-w-[calc(100vw-262px)] text-xs leading-snug text-[var(--paper)]/60 pointer-events-none">
             Arraste na esquerda para mover e girar a câmera
           </div>
 
-          {/* Bottom Right Controls: the 2 Arsenal weapon action buttons + dash */}
+          {/* Player posture: grows from the center; red and pulsing near a guard break */}
+          <div
+            className={`absolute left-1/2 -translate-x-1/2 bottom-[calc(var(--sab)+196px)] w-[min(46vw,220px)] transition-opacity duration-300 pointer-events-none ${
+              posture > 0.02 ? 'opacity-100' : 'opacity-0'
+            }`}
+          >
+            <div className="relative h-2 rounded-full bg-[rgba(10,8,14,0.7)] border border-[rgba(239,230,210,0.25)] overflow-hidden">
+              <div
+                className={`absolute top-0 bottom-0 left-1/2 -translate-x-1/2 rounded-full ${posture > 0.8 ? 'animate-pulse' : ''}`}
+                style={{
+                  width: `${Math.min(100, posture * 100)}%`,
+                  background: posture > 0.8 ? '#ff3b24' : posture > 0.5 ? '#ff8a30' : '#ffcf5a',
+                  boxShadow: posture > 0.8 ? '0 0 10px rgba(255,59,36,0.9)' : 'none'
+                }}
+              />
+            </div>
+          </div>
+
+          {/* Bottom Right Controls: arc of action buttons around the primary attack */}
           <div className="absolute right-[calc(var(--sar)+14px)] bottom-[calc(var(--sab)+14px)] flex flex-col items-end gap-2 pointer-events-none">
-            {/* Active weapon name */}
             <div className="text-xs font-bold text-[var(--ember)] drop-shadow-md pr-1">
               {activeWeapon?.name || 'Arma'}
             </div>
 
-            <div className="relative w-40 h-36">
+            <div className="relative w-56 h-40">
               {slots.map((weaponIdx, s) => {
                 const w = weaponList[weaponIdx];
                 const isActive = activeWeaponIdx === weaponIdx;
                 const hasSpecial = specials[weaponIdx] > 0;
-                // Big primary in the corner, secondary above-left of it within thumb reach.
-                const pos = ['right-0 bottom-0 w-20 h-20', 'right-[78px] bottom-[72px] w-16 h-16'][s];
+                const deathblow = s === 0 && dbReady;
+                // Big primary in the corner, secondary right above it
+                const pos = ['right-0 bottom-0 w-20 h-20', 'right-1 bottom-[92px] w-15 h-15'][s];
                 return (
                   <button
                     key={s}
@@ -569,23 +600,27 @@ export default function App() {
                     onPointerCancel={() => handleSlotUp(s)}
                     onPointerLeave={() => handleSlotUp(s)}
                     className={`absolute ${pos} rounded-full flex items-center justify-center pointer-events-auto shadow-lg transition-transform active:scale-95 ${
-                      isActive
+                      deathblow
+                        ? 'border-2 border-[#ff3b24] bg-[rgba(200,20,10,0.45)] shadow-[0_0_18px_rgba(255,40,20,0.8)]'
+                        : isActive
                         ? 'border-2 border-[var(--ember)] bg-[rgba(242,166,90,0.25)]'
                         : 'border border-[rgba(239,230,210,0.4)] bg-[rgba(22,18,31,0.7)]'
-                    } ${hasSpecial ? 'ring-2 ring-[#ffd166] animate-pulse' : ''}`}
-                    aria-label={`Atacar com ${w?.name}`}
+                    } ${hasSpecial && !deathblow ? 'ring-2 ring-[#ffd166] animate-pulse' : ''}`}
+                    aria-label={deathblow ? 'Golpe final' : `Atacar com ${w?.name}`}
                     title={w?.name}
                   >
-                    {w && ICON_URLS[w.id] ? (
+                    {deathblow ? (
+                      <span className="font-serif text-2xl font-black text-[#fff0e0] animate-pulse drop-shadow-[0_0_6px_rgba(255,40,20,1)] pointer-events-none">忍殺</span>
+                    ) : w && ICON_URLS[w.id] ? (
                       <img
                         src={ICON_URLS[w.id]}
                         alt={w.name}
-                        className={`${s === 0 ? 'w-12 h-12' : 'w-10 h-10'} object-contain pointer-events-none drop-shadow-md`}
+                        className={`${s === 0 ? 'w-12 h-12' : 'w-9 h-9'} object-contain pointer-events-none drop-shadow-md`}
                       />
                     ) : (
                       <Swords className="w-8 h-8 text-[var(--ember)] pointer-events-none" />
                     )}
-                    {hasSpecial && (
+                    {hasSpecial && !deathblow && (
                       <span className="absolute -top-1 -right-1 min-w-4 text-[10px] bg-[#ffd166] text-[#16121f] font-bold rounded-full px-1">
                         {Math.ceil(specials[weaponIdx])}
                       </span>
@@ -594,18 +629,78 @@ export default function App() {
                 );
               })}
 
-              {/* Dash button */}
+              {/* Guard: hold to block, tap on the enemy's strike to deflect */}
+              <button
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  initAudio();
+                  engineRef.current?.guardDown();
+                }}
+                onPointerUp={() => engineRef.current?.guardUp()}
+                onPointerCancel={() => engineRef.current?.guardUp()}
+                onPointerLeave={() => engineRef.current?.guardUp()}
+                className="absolute right-[84px] bottom-[64px] w-[66px] h-[66px] rounded-full border-2 border-[rgba(143,224,200,0.6)] bg-[rgba(22,18,31,0.7)] flex flex-col items-center justify-center pointer-events-auto shadow-md active:bg-[rgba(143,224,200,0.3)] active:scale-95 transition-transform"
+                aria-label="Defesa"
+              >
+                <Shield className="w-6 h-6 text-[#8fe0c8] pointer-events-none" />
+                <span className="text-[10px] font-bold text-[var(--paper)] leading-none mt-0.5 pointer-events-none">Defesa</span>
+              </button>
+
+              {/* Dash */}
               <button
                 onPointerDown={(e) => {
                   e.stopPropagation();
                   engineRef.current?.dash();
                 }}
                 className="absolute right-[96px] bottom-0 w-14 h-14 rounded-full border border-[rgba(239,230,210,0.4)] bg-[rgba(22,18,31,0.65)] text-[11px] font-bold text-[var(--paper)] pointer-events-auto active:bg-[rgba(242,166,90,0.4)] shadow-md transition-transform active:scale-95"
+                aria-label="Esquiva"
               >
                 Esquiva
               </button>
+
+              {/* Jump (clears perilous sweeps) */}
+              <button
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  engineRef.current?.jump();
+                }}
+                className="absolute right-[164px] bottom-1 w-[50px] h-[50px] rounded-full border border-[rgba(239,230,210,0.4)] bg-[rgba(22,18,31,0.65)] flex flex-col items-center justify-center pointer-events-auto shadow-md active:bg-[rgba(242,166,90,0.4)] active:scale-95 transition-transform"
+                aria-label="Pulo"
+              >
+                <ArrowUp className="w-4 h-4 text-[var(--paper)] pointer-events-none" />
+                <span className="text-[10px] font-bold text-[var(--paper)] leading-none pointer-events-none">Pulo</span>
+              </button>
+
+              {/* Healing gourd */}
+              <button
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  engineRef.current?.heal();
+                }}
+                disabled={heals <= 0}
+                className={`absolute right-[158px] bottom-[72px] w-[46px] h-[46px] rounded-full border flex items-center justify-center pointer-events-auto shadow-md active:scale-95 transition-transform ${
+                  heals > 0 ? 'border-[rgba(122,255,176,0.6)] bg-[rgba(22,18,31,0.7)]' : 'border-[rgba(239,230,210,0.15)] bg-[rgba(22,18,31,0.4)] opacity-50'
+                }`}
+                aria-label="Cura"
+              >
+                <span className="text-lg leading-none pointer-events-none">🍶</span>
+                <span className="absolute -top-1 -right-1 min-w-4 text-[10px] bg-[#7affb0] text-[#16121f] font-bold rounded-full px-1 pointer-events-none">
+                  {heals}
+                </span>
+              </button>
             </div>
           </div>
+      </div>
+
+      {/* Deathblow cinematic: letterbox bars and a brushed 忍殺 */}
+      <div className={`fixed inset-0 z-20 pointer-events-none transition-opacity duration-150 ${cinematic ? 'opacity-100' : 'opacity-0'}`}>
+        <div className={`absolute left-0 right-0 top-0 bg-black transition-all duration-200 ${cinematic ? 'h-[11vh]' : 'h-0'}`} />
+        <div className={`absolute left-0 right-0 bottom-0 bg-black transition-all duration-200 ${cinematic ? 'h-[11vh]' : 'h-0'}`} />
+        {cinematic && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <div className="deathblow-kanji font-serif font-black text-[#e8231a] select-none">忍殺</div>
+          </div>
+        )}
       </div>
 
       {/* Main Start Menu */}
@@ -659,8 +754,12 @@ export default function App() {
               <div>• <b>Câmera:</b> gira junto automaticamente ao mover, ou arraste com o polegar direito para ajuste livre.</div>
               <div>• <b>Armas:</b> antes de entrar você escolhe 2 armas no Arsenal. Elas ficam fixas até morrer.</div>
               <div>• <b>Atacar:</b> toque no botão da arma (segure para disparo contínuo).</div>
+              <div>• <b>Defesa:</b> segure para defender. Toque no instante do golpe inimigo para <b>aparar</b> (faíscas) e quebrar a postura dele.</div>
+              <div>• <b>忍殺 Golpe final:</b> com a postura quebrada (ponto vermelho), ataque de perto para executar.</div>
+              <div>• <b>危 Perigo:</b> rasteira = pule; estocada = apare no tempo certo ou esquive.</div>
+              <div>• <b>Cura:</b> 3 goles da cabaça por onda.</div>
               <div>• <b>Recentralizar:</b> toque no ícone da bússola para virar a câmera para frente.</div>
-              <div>• <b>No PC:</b> WASD para mover, Mouse para câmera, Clique para atacar, 1/2 ou Q/E para alternar as armas, Shift para esquiva.</div>
+              <div>• <b>No PC:</b> WASD move, mouse gira a câmera, clique esquerdo ataca, clique direito ou F defende, Espaço pula, Shift esquiva, R cura, 1/2 ou Q/E trocam a arma, C recentraliza.</div>
             </div>
 
           </div>
