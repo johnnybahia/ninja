@@ -62,7 +62,7 @@ NORMAL_DX_KEYS = ('nor_dx', 'NormalDX')
 # keyword -> substring match against each candidate's name/tags/categories
 KEYWORDS = {
     'cobble': ['cobblestone', 'cobble', 'sett'],
-    'flag': ['paving', 'flagstone', 'pavement', 'slabs'],
+    'flag': ['flagstone', 'paving stones', 'stone slabs', 'paving'],  # bare "pavement" also names brick textures - dropped
     'ground': ['forest floor', 'forest ground', 'leaves', 'mud', 'soil', 'dirt'],
     'rock': ['rock', 'granite', 'cliff'],
     'wood': ['wood planks', 'planks', 'wood floor', 'timber'],
@@ -113,33 +113,35 @@ def _ranked(keywords):
     """Assets whose own name contains a keyword always outrank ones only reachable via a
     shared/related tag (e.g. a brick texture tagged "cobblestone" must never outscore an
     asset actually named "Cobblestone ..." just because it racked up more tag hits)."""
+    # (primary, corroborating, slug, display) - same shape for both pools so a tie in the
+    # primary count breaks on corroborating tag evidence, not on alphabetical slug order
+    # (which otherwise systematically favours early-alphabet slugs for no relevance reason).
     by_name, by_tag = [], []
     for slug, meta in asset_index().items():
         name = meta.get('name', '').lower()
         rest = ' '.join([*meta.get('tags', []), *meta.get('categories', [])]).lower()
-        n = _hits(name, keywords)
+        disp = meta.get('name', '')
+        n, t = _hits(name, keywords), _hits(rest, keywords)
         if n:
-            by_name.append((n, slug, meta.get('name', '')))
-        else:
-            t = _hits(rest, keywords)
-            if t:
-                by_tag.append((t, slug, meta.get('name', '')))
-    by_name.sort(key=lambda x: (-x[0], x[1]))
-    by_tag.sort(key=lambda x: (-x[0], x[1]))
+            by_name.append((n, t, slug, disp))
+        elif t:
+            by_tag.append((t, 0, slug, disp))
+    by_name.sort(key=lambda x: (-x[0], -x[1], x[2]))
+    by_tag.sort(key=lambda x: (-x[0], -x[1], x[2]))
     return by_name, by_tag
 
 
 def best_match(keywords):
     by_name, by_tag = _ranked(keywords)
     pool = by_name or by_tag
-    return pool[0][1] if pool else None
+    return pool[0][2] if pool else None
 
 
 def list_candidates(name):
     by_name, by_tag = _ranked(KEYWORDS[name])
-    for n, slug, disp in by_name:
-        print(f'{n}  {slug}  ({disp})  [name match]')
-    for t, slug, disp in by_tag[:max(0, 10 - len(by_name))]:
+    for n, t, slug, disp in by_name:
+        print(f'{n} (+{t} tag)  {slug}  ({disp})  [name match]')
+    for t, _, slug, disp in by_tag[:max(0, 10 - len(by_name))]:
         print(f'{t}  {slug}  ({disp})  [tag match only]')
 
 
