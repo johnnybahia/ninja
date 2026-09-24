@@ -6,6 +6,8 @@ import {
   RigInstance,
   EnemyInstance,
   ProjectileInstance,
+  EnemyStrike,
+  StrikeKind,
   GameSettings
 } from './types';
 import {
@@ -21,8 +23,9 @@ import {
 } from './constants';
 import { sfx } from './audio';
 import { World } from './world';
+import { ATMOSPHERES, AtmosMode, atmosphereForWave } from './atmosphere';
 import { BladeTrail, ImpactPool, softDotTexture } from './vfx';
-import { PostFX, NINJA_LOOK, Quality, QualitySetting, qualityProfile, detectQuality } from './postfx';
+import { PostFX, NINJA_LOOK, Quality, QualitySetting, QualityProfile, qualityProfile, detectQuality } from './postfx';
 import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
 import { animateCharacter, animateDeath } from './animation';
@@ -70,6 +73,52 @@ const IMPACT_HEAVY = new THREE.Color(2.6, 1.7, 0.9);
 const IMPACT_CRIT = new THREE.Color(3.0, 2.2, 0.7);
 const IMPACT_HURT = new THREE.Color(2.6, 0.5, 0.35);
 const IMPACT_DODGE = new THREE.Color(1.2, 2.2, 2.6);
+const IMPACT_DEFLECT = new THREE.Color(3.2, 1.7, 0.45);
+const IMPACT_BLOCK = new THREE.Color(1.8, 1.5, 1.1);
+
+// Sekiro-style combat tuning
+const DEFLECT_WINDOW = 0.2; // seconds after pressing guard that an incoming strike is deflected
+const PLAYER_MAX_POSTURE = 100;
+
+// Canvas sprites shared by every enemy: the perilous-attack kanji and the deathblow mark
+let dangerTex: THREE.CanvasTexture | null = null;
+let deathblowTex: THREE.CanvasTexture | null = null;
+function markTextures() {
+  if (!dangerTex) {
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const g = c.getContext('2d')!;
+    const gr = g.createRadialGradient(64, 64, 10, 64, 64, 62);
+    gr.addColorStop(0, 'rgba(255,40,20,0.55)');
+    gr.addColorStop(1, 'rgba(255,40,20,0)');
+    g.fillStyle = gr;
+    g.fillRect(0, 0, 128, 128);
+    g.font = 'bold 84px "Zen Kaku Gothic New", serif';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.lineWidth = 10;
+    g.strokeStyle = 'rgba(20,4,4,0.9)';
+    g.strokeText('危', 64, 68);
+    g.fillStyle = '#ff3b24';
+    g.fillText('危', 64, 68);
+    dangerTex = new THREE.CanvasTexture(c);
+    dangerTex.colorSpace = THREE.SRGBColorSpace;
+  }
+  if (!deathblowTex) {
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const g = c.getContext('2d')!;
+    const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    gr.addColorStop(0, 'rgba(255,255,255,1)');
+    gr.addColorStop(0.18, 'rgba(255,60,40,1)');
+    gr.addColorStop(0.45, 'rgba(220,10,10,0.7)');
+    gr.addColorStop(1, 'rgba(160,0,0,0)');
+    g.fillStyle = gr;
+    g.fillRect(0, 0, 64, 64);
+    deathblowTex = new THREE.CanvasTexture(c);
+  }
+  return { dangerTex: dangerTex!, deathblowTex: deathblowTex! };
+}
 
 export interface GameEngineCallbacks {
   onHpChange: (hp: number, maxHp: number) => void;
@@ -82,6 +131,10 @@ export interface GameEngineCallbacks {
   onSpecialsUpdate: (specials: Record<number, number>) => void;
   onGameOver: (score: number, wave: number, level: number, kills: number, bestCombo: number) => void;
   onQualityChange?: (setting: QualitySetting, effective: Quality) => void;
+  onPostureChange?: (posture: number, max: number) => void;
+  onCinematic?: (active: boolean) => void;
+  onDeathblowReady?: (ready: boolean) => void;
+  onHealsChange?: (heals: number) => void;
 }
 
 export class GameEngine {
@@ -178,7 +231,16 @@ export class GameEngine {
     tornado: 0,
     torTick: 0,
     rush: null as { t: number; hits: number; kicked: boolean } | null,
-    attackHeldT: 0
+    attackHeldT: 0,
+    guardPressT: -99,
+    posture: 0,
+    postureT: 0,
+    staggerT: 0,
+    lastPostureSent: -1,
+    heals: 3,
+    healT: 0,
+    healDone: false,
+    dbReady: false
   };
 
   private slash!: THREE.Mesh;
@@ -226,7 +288,8 @@ export class GameEngine {
     jx: 0,
     jy: 0,
     keys: {} as Record<string, boolean>,
-    attackHeld: false
+    attackHeld: false,
+    guardHeld: false
   };
 
   public lookTouch = { id: null as number | null, lx: 0, ly: 0 };
@@ -251,6 +314,9 @@ export class GameEngine {
   // Rendering quality & post-processing
   private fx: PostFX | null = null;
   public qualitySetting: QualitySetting = 'auto';
+  public atmosMode: AtmosMode = 'two';
+  private profile: QualityProfile = qualityProfile('high');
+  private sunUv = new THREE.Vector2();
   public quality: Quality = 'high';
   private fpsAcc = 0;
   private fpsFrames = 0;
@@ -263,6 +329,9 @@ export class GameEngine {
   private baseFov = 60;
   private prevYaw = Math.PI;
   private desatFx = 0;
+  // deathblow cinematic in progress
+  private cine: { t: number; e: EnemyInstance; struck: boolean } | null = null;
+  private gourd: THREE.Group | null = null;
 
   constructor(canvas: HTMLCanvasElement, minimapCanvas: HTMLCanvasElement, callbacks: GameEngineCallbacks) {
     this.canvas = canvas;
@@ -374,6 +443,7 @@ export class GameEngine {
       this.player.rig.hand.add(m);
       this.player.weaponMeshes.push(m);
     });
+    this.attachGourd();
     this.setWeapon(0);
   }
 
@@ -427,7 +497,27 @@ export class GameEngine {
       this.player.rig.hand.add(m);
       this.player.weaponMeshes.push(m);
     });
+    this.attachGourd();
     this.setWeapon(0);
+  }
+
+  private attachGourd() {
+    const g = new THREE.Group();
+    const body = new THREE.MeshStandardMaterial({ color: 0xc89a4a, roughness: 0.55 });
+    const cord = new THREE.MeshStandardMaterial({ color: 0x8a2a22, roughness: 0.8 });
+    const a = new THREE.Mesh(new THREE.SphereGeometry(0.09, 12, 8), body);
+    const b = new THREE.Mesh(new THREE.SphereGeometry(0.065, 12, 8), body);
+    b.position.y = 0.12;
+    const c = new THREE.Mesh(new THREE.TorusGeometry(0.045, 0.012, 6, 12), cord);
+    c.position.y = 0.065;
+    c.rotation.x = Math.PI / 2;
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.025, 0.05, 8), cord);
+    cap.position.y = 0.19;
+    g.add(a, b, c, cap);
+    g.position.set(0, -0.02, 0.06);
+    g.visible = false;
+    this.player.rig.handL.add(g);
+    this.gourd = g;
   }
 
   public setWeapon(idx: number) {
@@ -447,6 +537,8 @@ export class GameEngine {
 
   public start() {
     this.reset();
+    const first = this.atmosMode === 'random' ? Math.floor(Math.random() * ATMOSPHERES.length) : 0;
+    if (first !== this.world.atmIndex) this.world.setAtmosphere(first, true);
     this.paused = false;
     this.state = 'play';
     this.nextWave();
@@ -498,8 +590,21 @@ export class GameEngine {
     this.player.rush = null;
     this.player.dash = 0;
     this.player.dashInv = false;
+    this.player.posture = 0;
+    this.player.postureT = 0;
+    this.player.staggerT = 0;
+    this.player.guardPressT = -99;
+    this.player.lastPostureSent = -1;
+    this.player.heals = 3;
+    this.player.healT = 0;
+    this.player.dbReady = false;
+    this.callbacks.onHealsChange?.(3);
+    this.callbacks.onDeathblowReady?.(false);
+    this.cine = null;
+    this.callbacks.onCinematic?.(false);
     this.attackQueueT = 0;
     this.input.attackHeld = false;
+    this.input.guardHeld = false;
     this.killsSinceScroll = 0;
     this.scrollsGiven = {};
     this.player.pos.set(0, 0, 5);
@@ -523,6 +628,8 @@ export class GameEngine {
 
   public nextWave() {
     this.wave++;
+    this.player.heals = 3;
+    this.callbacks.onHealsChange?.(3);
     this.clearedShown = false;
     this.player.tookDamage = false;
 
@@ -548,7 +655,12 @@ export class GameEngine {
       }
     });
 
-    const sub = boss ? 'O oni despertou' : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
+    let sub = boss ? 'O oni despertou' : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
+    const atmIdx = atmosphereForWave(this.wave, this.atmosMode, this.world.atmIndex);
+    if (atmIdx !== this.world.atmIndex) {
+      this.world.setAtmosphere(atmIdx);
+      sub += ` · ${ATMOSPHERES[atmIdx].name}`;
+    }
     this.callbacks.onWaveChange(this.wave, `Onda ${this.wave}`, sub);
     sfx.wave();
   }
@@ -593,7 +705,21 @@ export class GameEngine {
     fg.position.x = -0.6;
     fg.position.z = 0.001;
     fg.renderOrder = 11;
-    bar.add(bg, fg);
+    // posture bar under the health bar, growing outward from the middle
+    const pbg = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.2, 0.07),
+      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.45, fog: false, depthWrite: false })
+    );
+    pbg.position.y = -0.14;
+    pbg.renderOrder = 10;
+    const pfg = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.2, 0.07),
+      new THREE.MeshBasicMaterial({ color: 0xffc040, fog: false, depthWrite: false })
+    );
+    pfg.position.set(0, -0.14, 0.001);
+    pfg.scale.x = 0.001;
+    pfg.renderOrder = 11;
+    bar.add(bg, fg, pbg, pfg);
     bar.visible = false;
     if (type === 'boss') bar.scale.setScalar(2);
     this.scene.add(bar);
@@ -622,8 +748,37 @@ export class GameEngine {
       chargeDir: new THREE.Vector3(),
       vy: 0,
       bar,
-      barFg: fg
+      barFg: fg,
+      posture: 0,
+      maxPosture: type === 'boss' ? 320 : type === 'archer' ? 60 : 100,
+      postureT: 0,
+      brokenT: 0,
+      mode: 'approach',
+      modeT: 0,
+      token: false,
+      comboLeft: 0,
+      circleDir: Math.random() < 0.5 ? 1 : -1,
+      guardT: 0,
+      staggerT: 0,
+      postureBar: pfg
     };
+    {
+      const { dangerTex, deathblowTex } = markTextures();
+      const danger = new THREE.Sprite(new THREE.SpriteMaterial({ map: dangerTex, transparent: true, depthTest: false, depthWrite: false, fog: false }));
+      danger.position.set(0, 2.95, 0);
+      danger.visible = false;
+      danger.renderOrder = 32;
+      rig.root.add(danger);
+      enemy.danger = danger;
+      const mark = new THREE.Sprite(
+        new THREE.SpriteMaterial({ map: deathblowTex, color: new THREE.Color(2.2, 1.2, 1.2), transparent: true, depthTest: false, depthWrite: false, fog: false, blending: THREE.AdditiveBlending })
+      );
+      mark.position.set(0, 1.5, 0.25);
+      mark.visible = false;
+      mark.renderOrder = 33;
+      rig.root.add(mark);
+      enemy.dbMark = mark;
+    }
 
     if (type === 'boss' || type === 'samurai') {
       enemy.tele = new THREE.Mesh(
@@ -651,6 +806,17 @@ export class GameEngine {
     this.scene.remove(e.bar);
     if (e.tele) this.scene.remove(e.tele);
     e.rig.dispose?.();
+    e.danger?.material.dispose();
+    e.dbMark?.material.dispose();
+    e.bar.children.forEach((c) => {
+      const m = c as THREE.Mesh;
+      m.geometry.dispose();
+      (m.material as THREE.Material).dispose();
+    });
+    if (e.tele) {
+      e.tele.geometry.dispose();
+      (e.tele.material as THREE.Material).dispose();
+    }
   }
 
   private emitParticles(
@@ -1065,6 +1231,7 @@ export class GameEngine {
 
   public jump() {
     if (this.state !== 'play' || this.player.jumps >= 2) return;
+    if (this.player.staggerT > 0 || this.cine) return;
     this.player.vy = this.player.jumps === 0 ? 10.5 : 9.5;
     this.player.jumps++;
     this.player.grounded = false;
@@ -1074,6 +1241,7 @@ export class GameEngine {
 
   public dash() {
     if (this.state !== 'play' || this.player.dash > 0 || this.player.st < 28) return;
+    if (this.player.staggerT > 0 || this.cine) return;
     this.player.st -= 28;
     this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
     this.player.dash = 0.2;
@@ -1103,8 +1271,15 @@ export class GameEngine {
 
   public tryAttack() {
     if (this.player.atkCd > 0 || this.state !== 'play') return;
+    if (this.player.staggerT > 0 || this.cine || this.input.guardHeld || this.player.healT > 0) return;
     const w = this.weapons[this.activeWeaponIdx];
     if (this.player.rush || this.player.tornado > 0) return;
+
+    const db = this.findDeathblowTarget();
+    if (db) {
+      this.performDeathblow(db);
+      return;
+    }
 
     if (this.player.special[this.activeWeaponIdx] > 0) {
       this.trySpecial(w);
@@ -1352,6 +1527,25 @@ export class GameEngine {
 
   public hitEnemy(e: EnemyInstance, dmg: number, nx: number, nz: number, kb: number, heavy: boolean) {
     if (e.dead) return;
+    // Samurai may raise their guard against hits from the front; blocked hits only
+    // build posture (keep pressing to break it). Specials cut through the guard.
+    const facing = Math.abs(wrap(Math.atan2(-nx, -nz) - e.yaw)) < 1.15;
+    const guardChance = 0.22 + Math.min(0.3, this.wave * 0.03);
+    const canGuard = e.type === 'samurai' && !this.spHit && e.brokenT <= 0 && !e.strike && e.staggerT <= 0 && facing;
+    if (canGuard && (e.guardT > 0 || Math.random() < guardChance)) {
+      e.mode = 'guard';
+      e.guardT = 0.9;
+      e.modeT = 0;
+      e.flash = 0.05;
+      const nl = Math.hypot(nx, nz) || 1;
+      const p = this.tmpV.set(e.pos.x - (nx / nl) * 0.6, e.pos.y + 1.35, e.pos.z - (nz / nl) * 0.6);
+      this.impacts.spawn(p, IMPACT_BLOCK, 1.2, 0.12);
+      this.emitParticles(p.x, p.y, p.z, 12, 0xffc27a, 6, 1.5, 16, 0.25);
+      sfx.block();
+      this.player.atkCd += 0.1;
+      this.addEnemyPosture(e, dmg * 1.35 * (heavy ? 1.4 : 1));
+      return;
+    }
     const rolled = this.rollDamage(dmg * this.player.dmgMult, true);
     dmg = rolled.dmg;
     e.hp -= dmg;
@@ -1380,6 +1574,14 @@ export class GameEngine {
     const res = e.type === 'boss' ? 0.2 : 1;
     e.kb.x += nx * kb * res;
     e.kb.z += nz * kb * res;
+    // heavy blows interrupt an ordinary samurai wind-up (the Oni and perilous moves shrug them off)
+    if (heavy && e.type === 'samurai' && e.strike && !e.strike.perilous) {
+      this.cancelStrike(e);
+      e.staggerT = 0.35;
+      e.mode = 'recover';
+      e.modeT = 0;
+      e.token = false;
+    }
 
     // Atualiza sequência de golpes (Hit Combo Streak)
     if (this.player.hitComboT > 0) {
@@ -1415,13 +1617,15 @@ export class GameEngine {
     this.callbacks.onComboChange(Math.max(this.player.hitCombo, this.player.killCombo));
 
     if (e.hp <= 0) this.killEnemy(e);
+    else this.addEnemyPosture(e, dmg * 0.55 * (heavy ? 1.5 : 1));
   }
 
   private killEnemy(e: EnemyInstance) {
     e.dead = true;
     e.deathT = 0;
     e.bar.visible = false;
-    if (e.tele) e.tele.visible = false;
+    e.token = false;
+    this.cancelStrike(e);
 
     this.player.kills++;
     const pts = e.type === 'boss' ? 1200 : e.type === 'archer' ? 120 : 80;
@@ -1569,6 +1773,11 @@ export class GameEngine {
     this.player.hp = Math.max(0, this.player.hp - dmg);
     this.player.inv = 0.6;
     this.hurtFx = 1;
+    if (this.player.healT > 0 && !this.player.healDone) {
+      // interrupted mid-drink: the sip is lost
+      this.player.healT = 0;
+      this.player.anim = null;
+    }
     this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.3, this.player.pos.z), IMPACT_HURT, 1.4, 0.18);
     this.player.dashInv = false;
     this.player.killCombo = 0;
@@ -1604,22 +1813,134 @@ export class GameEngine {
     }
   }
 
-  // Resolves a telegraphed melee attack (samurai/boss) at the moment its windup ends.
-  // A dash active right then is rewarded as a "perfect" dodge (tight timing); a dash
-  // whose movement already ended but whose i-frames are still running counts as a
-  // normal dodge. Either way the hit never lands. Otherwise damage applies as usual.
-  private resolveEnemyMeleeHit(dmg: number, nx: number, nz: number) {
+  // ---------------------------------------------------------------------------
+  // Guard, deflect, posture and deathblow (Sekiro-style combat)
+  // ---------------------------------------------------------------------------
+  public guardDown() {
+    if (this.state !== 'play' || this.player.healT > 0) return;
+    this.input.guardHeld = true;
+    this.player.guardPressT = this.time;
+  }
+
+  public guardUp() {
+    this.input.guardHeld = false;
+  }
+
+  // Healing gourd: a short drink that leaves you open, three sips per wave
+  public heal() {
+    if (this.state !== 'play' || this.player.heals <= 0 || this.player.healT > 0) return;
+    if (this.player.staggerT > 0 || this.cine || this.player.hp >= this.player.maxHp) return;
+    this.player.heals--;
+    this.player.healT = 0.85;
+    this.player.healDone = false;
+    this.player.anim = { kind: 'drink', t: 0, dur: 0.85, side: 0 };
+    this.input.guardHeld = false;
+    this.callbacks.onHealsChange?.(this.player.heals);
+  }
+
+  private addPlayerPosture(v: number) {
+    this.player.posture = Math.min(PLAYER_MAX_POSTURE, this.player.posture + v);
+    this.player.postureT = 0;
+  }
+
+  private faceEnemy(e: EnemyInstance) {
+    this.player.yaw = Math.atan2(e.pos.x - this.player.pos.x, e.pos.z - this.player.pos.z);
+  }
+
+  private addEnemyPosture(e: EnemyInstance, v: number) {
+    if (e.dead || e.brokenT > 0) return;
+    e.posture += v;
+    e.postureT = 0;
+    if (e.posture >= e.maxPosture) this.breakPosture(e);
+  }
+
+  private breakPosture(e: EnemyInstance) {
+    e.posture = e.maxPosture;
+    e.brokenT = e.type === 'boss' ? 2.8 : 3.4;
+    e.mode = 'broken';
+    e.modeT = 0;
+    this.cancelStrike(e);
+    e.token = false;
+    e.anim = undefined;
+    sfx.postureBreak();
+    this.impacts.spawn(this.tmpV.set(e.pos.x, e.pos.y + 1.5 * e.rig.root.scale.x, e.pos.z), IMPACT_DEFLECT, 2.6, 0.3);
+    this.shake = Math.max(this.shake, 0.25);
+    this.spawnLabel(e.pos.x, e.pos.y + 3.1 * e.rig.root.scale.x, e.pos.z, 'POSTURA!', '#ff5a3a', 1.2);
+  }
+
+  private cancelStrike(e: EnemyInstance) {
+    e.strike = undefined;
+    e.windup = 0;
+    if (e.tele) e.tele.visible = false;
+    if (e.danger) e.danger.visible = false;
+  }
+
+  private tokensInUse() {
+    let n = 0;
+    for (const o of this.enemies) if (!o.dead && o.token && o.type !== 'boss') n++;
+    return n;
+  }
+
+  private maxTokens() {
+    return this.wave <= 2 ? 1 : this.wave <= 5 ? 2 : 3;
+  }
+
+  private startStrike(e: EnemyInstance, first: boolean) {
+    const boss = e.type === 'boss';
+    const last = e.comboLeft <= 1;
+    const perilChance = boss ? 0.35 : this.wave >= 2 ? 0.28 : 0.1;
+    let kind: StrikeKind = boss ? 'smash' : 'slash';
+    let perilous = false;
+    if (last && Math.random() < perilChance) {
+      perilous = true;
+      kind = boss ? 'sweep' : Math.random() < 0.5 ? 'thrust' : 'sweep';
+    }
+    const windup = boss ? (kind === 'sweep' ? 0.85 : first ? 0.62 : 0.46) : perilous ? 0.64 : first ? 0.46 : 0.32;
+    const reach = boss ? (kind === 'sweep' ? 4.6 : 3.9) : kind === 'thrust' ? 3.4 : kind === 'sweep' ? 2.8 : 2.3;
+    const dmg = boss ? (kind === 'sweep' ? 22 : 24) : kind === 'thrust' ? 18 : kind === 'sweep' ? 15 : 12;
+    const strike: EnemyStrike = {
+      kind,
+      windup,
+      t: 0,
+      perilous,
+      feint: first && !perilous && !boss && Math.random() < 0.08,
+      reach,
+      dmg,
+      side: e.strike ? e.strike.side ^ 1 : Math.random() < 0.5 ? 0 : 1
+    };
+    e.strike = strike;
+    e.windup = windup;
+    if (e.tele) {
+      const m = e.tele.material as THREE.MeshBasicMaterial;
+      m.color.set(perilous ? 0xff1e1e : boss ? 0xff5a30 : 0xff8a30);
+      m.opacity = 0.18;
+      e.tele.visible = true;
+      e.tele.position.set(e.pos.x, 0.05, e.pos.z);
+      e.tele.scale.setScalar(boss ? 1.6 : 1.1);
+    }
+    if (perilous && e.danger) {
+      e.danger.visible = true;
+      e.danger.scale.setScalar(0.01);
+      sfx.danger();
+    }
+  }
+
+  // An enemy strike lands: perilous sweeps must be jumped, thrusts can only be
+  // deflected; everything else can be deflected (tight timing) or blocked (posture).
+  private resolveStrike(e: EnemyInstance, st: EnemyStrike) {
+    if (this.state !== 'play' || this.cine) return;
+    const dx = this.player.pos.x - e.pos.x;
+    const dz = this.player.pos.z - e.pos.z;
+    const d = Math.hypot(dx, dz) || 0.001;
+    if (d > st.reach + 0.35) return;
+    if (Math.abs(wrap(Math.atan2(dx, dz) - e.yaw)) > (st.kind === 'sweep' ? 1.7 : 1.15)) return;
+    const nx = dx / d;
+    const nz = dz / d;
+
     if (this.player.inv > 0) {
       if (this.player.dashInv) {
         const perfect = this.player.dash > 0;
-        this.spawnLabel(
-          this.player.pos.x,
-          this.player.pos.y + 2.5,
-          this.player.pos.z,
-          perfect ? 'PERFEITO!' : 'ESQUIVOU!',
-          perfect ? '#ffd166' : '#8fe0c8',
-          perfect ? 1.55 : 1.1
-        );
+        this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, perfect ? 'PERFEITO!' : 'ESQUIVOU!', perfect ? '#ffd166' : '#8fe0c8', perfect ? 1.55 : 1.1);
         this.triggerSlowmo(perfect ? 0.5 : 0.22, perfect ? 0.22 : 0.42);
         this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.2, this.player.pos.z), IMPACT_DODGE, perfect ? 2.4 : 1.6, 0.3);
         this.fovKick = perfect ? -5 : -2.5;
@@ -1631,7 +1952,139 @@ export class GameEngine {
       }
       return;
     }
-    this.damagePlayer(dmg, nx, nz);
+
+    if (st.kind === 'sweep' && this.player.pos.y > 0.35) {
+      // jumped the sweep: small reward, like countering in Sekiro
+      this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'SALTOU!', '#ffd166', 1.3);
+      this.triggerSlowmo(0.3, 0.35);
+      this.addEnemyPosture(e, e.type === 'boss' ? 40 : 25);
+      return;
+    }
+
+    const canAct = this.player.staggerT <= 0;
+    const deflect = canAct && st.kind !== 'sweep' && this.time - this.player.guardPressT <= DEFLECT_WINDOW;
+    if (deflect) {
+      this.faceEnemy(e);
+      const mid = this.tmpV.set(this.player.pos.x - nx * 0.75, this.player.pos.y + 1.35, this.player.pos.z - nz * 0.75);
+      this.impacts.spawn(mid, IMPACT_DEFLECT, st.kind === 'thrust' ? 2.4 : 1.9, 0.16);
+      this.emitParticles(mid.x, mid.y, mid.z, 26, 0xffb347, 9, 2.2, 18, 0.32);
+      this.hitstop = 0.075;
+      this.lastHS = performance.now();
+      this.shake = Math.max(this.shake, 0.2);
+      this.fovKick = Math.min(this.fovKick, -3);
+      this.player.anim = { kind: 'deflect', t: 0, dur: 0.2, side: 0 };
+      this.addPlayerPosture(3);
+      sfx.clang();
+      if (st.kind === 'thrust') {
+        this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'CONTRA-ATAQUE!', '#ffd166', 1.3);
+        this.triggerSlowmo(0.35, 0.3);
+      }
+      e.staggerT = e.type === 'boss' ? 0.18 : 0.32;
+      e.anim = { kind: 'erecoil', t: 0, dur: 0.32, side: 0 };
+      this.addEnemyPosture(e, (e.type === 'boss' ? 34 : 28) * (st.kind === 'thrust' ? 1.7 : 1));
+      return;
+    }
+
+    const blocking = canAct && this.input.guardHeld && st.kind !== 'sweep' && st.kind !== 'thrust';
+    if (blocking) {
+      this.faceEnemy(e);
+      const mid = this.tmpV.set(this.player.pos.x - nx * 0.7, this.player.pos.y + 1.3, this.player.pos.z - nz * 0.7);
+      this.impacts.spawn(mid, IMPACT_BLOCK, 1.3, 0.12);
+      this.emitParticles(mid.x, mid.y, mid.z, 10, 0xffd49a, 5, 1.5, 16, 0.22);
+      this.player.kb.x += nx * 4;
+      this.player.kb.z += nz * 4;
+      this.shake = Math.max(this.shake, 0.12);
+      sfx.block();
+      this.addPlayerPosture(st.dmg * 2.6);
+      if (this.player.posture >= PLAYER_MAX_POSTURE) {
+        // guard broken: staggered and the hit gets through at half strength
+        this.player.staggerT = 1.1;
+        this.player.posture = PLAYER_MAX_POSTURE * 0.6;
+        this.input.guardHeld = false;
+        sfx.guardBreak();
+        this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'GUARDA QUEBRADA', '#ff5a5a', 1.2);
+        this.damagePlayer(Math.round(st.dmg * 0.5), nx, nz);
+      }
+      return;
+    }
+
+    this.addPlayerPosture(st.dmg * 0.8);
+    this.damagePlayer(st.dmg, nx, nz);
+  }
+
+  private findDeathblowTarget(): EnemyInstance | null {
+    let best: EnemyInstance | null = null;
+    let bd = Infinity;
+    for (const e of this.enemies) {
+      if (e.dead || e.brokenT <= 0) continue;
+      const d = Math.hypot(e.pos.x - this.player.pos.x, e.pos.z - this.player.pos.z) - e.r;
+      if (d < 2.9 && d < bd) {
+        bd = d;
+        best = e;
+      }
+    }
+    return best;
+  }
+
+  private performDeathblow(e: EnemyInstance) {
+    const dx = this.player.pos.x - e.pos.x;
+    const dz = this.player.pos.z - e.pos.z;
+    const d = Math.hypot(dx, dz) || 1;
+    const dist = e.r + 0.85;
+    this.player.pos.x = e.pos.x + (dx / d) * dist;
+    this.player.pos.z = e.pos.z + (dz / d) * dist;
+    this.faceEnemy(e);
+    e.yaw = Math.atan2(dx, dz);
+    this.player.inv = Math.max(this.player.inv, 1.6);
+    this.player.dashInv = false;
+    this.player.atkCd = 0.85;
+    this.player.anim = { kind: 'deathblow', t: 0, dur: 0.8, side: 0 };
+    e.brokenT = Math.max(e.brokenT, 3);
+    this.cine = { t: 0, e, struck: false };
+    this.triggerSlowmo(0.75, 0.38);
+    this.fovKick = -9;
+    this.callbacks.onCinematic?.(true);
+    sfx.heavy();
+  }
+
+  private updateCinematic(dt: number) {
+    const c = this.cine;
+    if (!c) return;
+    c.t += dt;
+    const e = c.e;
+    if (!c.struck && c.t >= 0.3) {
+      c.struck = true;
+      const sc = e.rig.root.scale.x;
+      const p = this.tmpV.set(e.pos.x, e.pos.y + 1.3 * sc, e.pos.z);
+      this.impacts.spawn(p, IMPACT_CRIT, 3.2 * (sc > 1 ? 1.4 : 1), 0.35);
+      this.emitBlood(e.pos.x, e.pos.y + 1.2 * sc, e.pos.z, Math.sin(this.player.yaw), Math.cos(this.player.yaw), 70, true, true);
+      this.emitParticles(p.x, p.y, p.z, 30, 0xff6a3a, 8, 3, 12, 0.5);
+      this.shake = Math.max(this.shake, 0.55);
+      this.hitstop = 0.14;
+      this.lastHS = performance.now();
+      sfx.deathblow();
+      if (e.type === 'boss' && (e.dbCount || 0) === 0 && e.hp > e.maxHp * 0.5) {
+        // the Oni survives the first deathblow with half its life taken
+        e.dbCount = 1;
+        e.hp -= e.maxHp * 0.5;
+        e.brokenT = 0;
+        e.posture = 0;
+        e.mode = 'recover';
+        e.modeT = 0;
+        e.staggerT = 1.2;
+        e.flash = 0.14;
+        this.spawnLabel(e.pos.x, e.pos.y + 6, e.pos.z, 'FERIDO!', '#ff5a3a', 1.6);
+      } else {
+        e.hp = 0;
+        this.player.score += e.type === 'boss' ? 1500 : 150;
+        this.callbacks.onScoreChange(this.player.score);
+        this.killEnemy(e);
+      }
+    }
+    if (c.t >= 0.95) {
+      this.cine = null;
+      this.callbacks.onCinematic?.(false);
+    }
   }
 
   private spawnProj(o: Partial<ProjectileInstance> & { type: string; pos: THREE.Vector3; vel: THREE.Vector3; dmg: number; life: number }) {
@@ -1753,7 +2206,8 @@ export class GameEngine {
       this.player.vel.set(0, 0, 0);
       this.emitParticles(this.player.pos.x, this.player.pos.y + 0.9, this.player.pos.z, 3, 0x8a86c8, 0.7, 0.2, 0, 0.4);
     } else {
-      const penalty = this.player.anim ? 0.6 : this.player.tornado > 0 ? 0.55 : 1;
+      const penalty =
+        this.cine ? 0 : this.player.staggerT > 0 ? 0.25 : this.player.healT > 0 ? 0.35 : this.input.guardHeld ? 0.45 : this.player.anim ? 0.6 : this.player.tornado > 0 ? 0.55 : 1;
       const maxSp = 7.6 * penalty;
       const dvx = amt > 0.05 ? (mx / amt) * maxSp * amt : 0;
       const dvz = amt > 0.05 ? (mz / amt) * maxSp * amt : 0;
@@ -1815,6 +2269,37 @@ export class GameEngine {
     if (specialsChanged) {
       this.callbacks.onSpecialsUpdate({ ...this.player.special });
     }
+
+    // posture: recovers after a short pause, faster while guarding; stagger ticks down
+    this.player.postureT += dt;
+    if (this.player.postureT > 1 && this.player.posture > 0) {
+      this.player.posture = Math.max(0, this.player.posture - (this.input.guardHeld ? 28 : 18) * dt);
+    }
+    if (this.player.staggerT > 0) this.player.staggerT -= dt;
+    if (this.gourd) this.gourd.visible = this.player.healT > 0;
+    if (this.player.healT > 0) {
+      this.player.healT -= dt;
+      if (!this.player.healDone && this.player.healT <= 0.35) {
+        this.player.healDone = true;
+        const amt = Math.round(this.player.maxHp * 0.45);
+        this.player.hp = Math.min(this.player.maxHp, this.player.hp + amt);
+        this.callbacks.onHpChange(this.player.hp, this.player.maxHp);
+        this.emitParticles(this.player.pos.x, this.player.pos.y + 1.2, this.player.pos.z, 26, 0x7affb0, 3, 2.5, -1, 0.9);
+        this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.4, this.player.pos.z, `+${amt}`, '#7affb0', 1.1);
+        sfx.heal();
+      }
+    }
+    const dbReady = !!this.findDeathblowTarget();
+    if (dbReady !== this.player.dbReady) {
+      this.player.dbReady = dbReady;
+      this.callbacks.onDeathblowReady?.(dbReady);
+    }
+    const pr = Math.round(this.player.posture);
+    if (pr !== this.player.lastPostureSent) {
+      this.player.lastPostureSent = pr;
+      this.callbacks.onPostureChange?.(this.player.posture, PLAYER_MAX_POSTURE);
+    }
+    this.updateCinematic(dt);
 
     this.player.st = Math.min(this.player.maxSt, this.player.st + 22 * dt);
     this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
@@ -1893,7 +2378,9 @@ export class GameEngine {
       weapon: this.weapons[this.activeWeaponIdx]?.id,
       dash: this.player.dash > 0,
       turn: yawRate,
-      hit: this.hurtFx * 0.8
+      hit: this.hurtFx * 0.8,
+      guard: this.input.guardHeld && this.player.staggerT <= 0,
+      stagger: this.player.staggerT > 0
     });
     this.updateBladeTrail();
 
@@ -1936,11 +2423,15 @@ export class GameEngine {
   }
 
   private updateEnemies(dt: number) {
+    const tokensFree = this.maxTokens() - this.tokensInUse();
+    let granted = 0;
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const e = this.enemies[i];
       if (e.dead) {
         e.deathT += dt;
         if (e.rig.flash) e.rig.flash.value = Math.max(0, 0.6 - e.deathT * 2);
+        if (e.dbMark) e.dbMark.visible = false;
+        if (e.danger) e.danger.visible = false;
         animateDeath(e.rig, e.deathT, dt);
         e.rig.root.position.y = -Math.max(0, e.deathT - 0.8) * 1.4;
         if (e.deathT > 1.8) {
@@ -1956,46 +2447,38 @@ export class GameEngine {
       const nx = dx / d;
       const nz = dz / d;
       const toP = Math.atan2(dx, dz);
+      const boss = e.type === 'boss';
 
       e.cd -= dt;
       e.cd2 -= dt;
       e.flash -= dt;
+      e.modeT += dt;
+      e.postureT += dt;
+      if (e.guardT > 0) e.guardT -= dt;
+
+      // posture recovers after a pause, slower when wounded
+      if (e.brokenT <= 0 && e.postureT > 1.3 && e.posture > 0) {
+        const regen = (boss ? 18 : e.type === 'archer' ? 22 : 14) * (0.35 + 0.65 * Math.max(0, e.hp / e.maxHp));
+        e.posture = Math.max(0, e.posture - regen * dt);
+      }
 
       let mvx = 0;
       let mvz = 0;
       let spd = 0;
+      const freezeAttacks = !!this.cine;
 
-      if (e.type === 'samurai') {
-        e.yaw = turnTo(e.yaw, toP, dt * 7);
-        if (e.windup && e.windup > 0) {
-          e.windup -= dt;
-          if (e.tele) {
-            e.tele.position.set(e.pos.x, 0.05, e.pos.z);
-            const k = 1 - Math.max(0, e.windup) / 0.42;
-            (e.tele.material as THREE.MeshBasicMaterial).opacity = 0.18 + 0.4 * k;
-          }
-          if (e.windup <= 0) {
-            e.windup = 0;
-            if (e.tele) e.tele.visible = false;
-            e.cd = 1.4;
-            const dNow = Math.hypot(this.player.pos.x - e.pos.x, this.player.pos.z - e.pos.z);
-            e.anim = { kind: 'eslash', t: 0, dur: 0.42, side: 0 };
-            if (dNow <= 2.1) this.resolveEnemyMeleeHit(12, nx, nz);
-          }
-        } else if (d > 1.8) {
-          mvx = nx;
-          mvz = nz;
-          spd = e.speed;
-        } else if (e.cd <= 0) {
-          e.cd = 999;
-          e.windup = 0.42;
-          if (e.tele) {
-            e.tele.visible = true;
-            e.tele.position.set(e.pos.x, 0.05, e.pos.z);
-            e.tele.scale.setScalar(1.1);
-            (e.tele.material as THREE.MeshBasicMaterial).opacity = 0.18;
-          }
+      if (e.brokenT > 0) {
+        e.brokenT -= dt;
+        e.mode = 'broken';
+        e.yaw = turnTo(e.yaw, toP, dt * 2);
+        if (e.brokenT <= 0 && !(this.cine && this.cine.e === e)) {
+          e.posture = e.maxPosture * 0.45;
+          e.mode = 'recover';
+          e.modeT = 0;
         }
+      } else if (e.staggerT > 0) {
+        e.staggerT -= dt;
+        e.yaw = turnTo(e.yaw, toP, dt * 4);
       } else if (e.type === 'archer') {
         e.yaw = turnTo(e.yaw, toP, dt * 6);
         if (d < 5) {
@@ -2006,11 +2489,20 @@ export class GameEngine {
           mvx = nx;
           mvz = nz;
           spd = e.speed;
-        } else if (e.cd <= 0 && !e.anim) {
+        } else if (e.cd <= 0 && !e.anim && !freezeAttacks) {
           // draw the bow first (readable telegraph), release partway through
-          e.cd = 2.4;
+          e.cd = 2.4 + Math.random() * 0.8;
           e.anim = { kind: 'eshoot', t: 0, dur: 0.75, side: 0 };
           e.shotPending = true;
+        } else {
+          // sidestep while waiting for the next shot
+          mvx = -nz * e.circleDir * 0.5;
+          mvz = nx * e.circleDir * 0.5;
+          spd = e.speed * 0.6;
+          if (e.modeT > 2.5) {
+            e.modeT = 0;
+            e.circleDir *= -1;
+          }
         }
         if (e.shotPending && e.anim && e.anim.t >= 0.45) {
           e.shotPending = false;
@@ -2024,41 +2516,121 @@ export class GameEngine {
           });
           sfx.arrow();
         }
+      } else if (e.strike) {
+        // ---- winding up / striking ----
+        const st = e.strike;
+        st.t += dt;
+        e.windup = Math.max(0, st.windup - st.t);
+        if (st.t < st.windup * 0.8) e.yaw = turnTo(e.yaw, toP, dt * (boss ? 3.5 : 6));
+        const k = Math.min(1, st.t / st.windup);
+        if (e.tele) {
+          e.tele.position.set(e.pos.x, 0.05, e.pos.z);
+          (e.tele.material as THREE.MeshBasicMaterial).opacity = 0.18 + 0.42 * k;
+          if (boss) e.tele.scale.setScalar(1.6 + k * 0.8);
+        }
+        if (e.danger && e.danger.visible) {
+          const pop = Math.min(1, st.t / 0.15);
+          e.danger.scale.setScalar((boss ? 0.5 : 0.95) * (pop + Math.sin(st.t * 18) * 0.04));
+        }
+        if (st.feint && st.t >= st.windup * 0.6) {
+          this.cancelStrike(e);
+          e.mode = 'recover';
+          e.modeT = 0;
+          e.token = false;
+          e.cd = 0.8;
+        } else if (st.t >= st.windup) {
+          const kindAnim = boss ? (st.kind === 'sweep' ? 'esweep' : 'esmash') : st.kind === 'thrust' ? 'ethrust' : st.kind === 'sweep' ? 'esweep' : 'eslash';
+          e.anim = { kind: kindAnim, t: 0, dur: boss ? 0.55 : 0.42, side: st.side };
+          if (st.kind === 'thrust') {
+            // lunge into the thrust
+            e.pos.x += Math.sin(e.yaw) * 1.1;
+            e.pos.z += Math.cos(e.yaw) * 1.1;
+          }
+          if (boss) sfx.boom();
+          else sfx.swing();
+          this.cancelStrike(e);
+          this.resolveStrike(e, st);
+          e.comboLeft--;
+          if (e.comboLeft > 0 && e.brokenT <= 0 && e.staggerT <= 0) {
+            e.cd2 = boss ? 0.35 : 0.2;
+          } else {
+            e.mode = 'recover';
+            e.modeT = 0;
+            e.token = false;
+            e.cd = (boss ? 1.6 : 1.3) + Math.random() * 1.4 - Math.min(0.7, this.wave * 0.05);
+          }
+        }
+      } else if (e.mode === 'attack') {
+        e.yaw = turnTo(e.yaw, toP, dt * 8);
+        const want = boss ? 3.3 : 1.95;
+        if (freezeAttacks) {
+          e.mode = 'circle';
+          e.token = false;
+        } else if (d > want) {
+          mvx = nx;
+          mvz = nz;
+          spd = e.speed * (boss ? 1 : 1.2);
+        } else if (e.cd2 <= 0) {
+          this.startStrike(e, e.t === 0);
+          e.t++;
+        }
+      } else if (e.mode === 'recover') {
+        e.yaw = turnTo(e.yaw, toP, dt * 6);
+        if (e.modeT < 0.55 && !boss) {
+          mvx = -nx;
+          mvz = -nz;
+          spd = e.speed * 0.55;
+        }
+        if (e.modeT > 0.8) {
+          e.mode = 'circle';
+          e.modeT = 0;
+        }
       } else {
-        // Boss
-        e.yaw = turnTo(e.yaw, toP, dt * 4);
-        if (e.windup && e.windup > 0) {
-          e.windup -= dt;
-          if (e.tele) {
-            e.tele.position.set(e.pos.x, 0.05, e.pos.z);
-            const k = 1 - Math.max(0, e.windup) / 0.55;
-            e.tele.scale.setScalar(1.6 + k * 0.7);
-            (e.tele.material as THREE.MeshBasicMaterial).opacity = 0.2 + 0.35 * k;
-          }
-          if (e.windup <= 0) {
-            e.windup = 0;
-            if (e.tele) e.tele.visible = false;
-            e.cd = 2.0;
-            const dNow = Math.hypot(this.player.pos.x - e.pos.x, this.player.pos.z - e.pos.z);
-            e.anim = { kind: 'esmash', t: 0, dur: 0.55, side: 0 };
-            if (dNow <= 3.6) {
-              this.resolveEnemyMeleeHit(24, nx, nz);
-              sfx.boom();
-            }
-          }
-        } else if (d > 3.2) {
+        // approach / circle / guard: keep a ring around the player and take turns attacking
+        e.yaw = turnTo(e.yaw, toP, dt * 7);
+        const ring = boss ? 4.2 : 3.4 + (i % 3) * 0.55;
+        const canAttack = !freezeAttacks && e.cd <= 0 && d < (boss ? 9 : 7);
+        if (canAttack && (boss || granted < tokensFree)) {
+          if (!boss) granted++;
+          e.token = !boss;
+          e.mode = 'attack';
+          e.modeT = 0;
+          e.t = 0;
+          e.cd2 = 0;
+          const maxCombo = boss ? 2 : Math.min(3, 1 + Math.floor(this.wave / 2));
+          e.comboLeft = 1 + Math.floor(Math.random() * maxCombo);
+        } else if (d > ring + 1.4) {
+          e.mode = 'approach';
           mvx = nx;
           mvz = nz;
           spd = e.speed;
-        } else if (e.cd <= 0) {
-          e.cd = 999;
-          e.windup = 0.55;
-          if (e.tele) {
-            e.tele.visible = true;
-            e.tele.position.set(e.pos.x, 0.05, e.pos.z);
-            e.tele.scale.setScalar(1.6);
-            (e.tele.material as THREE.MeshBasicMaterial).opacity = 0.2;
+        } else if (e.mode !== 'guard' || e.guardT <= 0) {
+          e.mode = 'circle';
+          const radial = (d - ring) * 0.9;
+          mvx = -nz * e.circleDir * 0.6 + nx * radial;
+          mvz = nx * e.circleDir * 0.6 + nz * radial;
+          const ml = Math.hypot(mvx, mvz) || 1;
+          mvx /= ml;
+          mvz /= ml;
+          spd = e.speed * 0.45;
+          if (e.modeT > 2 + (i % 4) * 0.6) {
+            e.modeT = 0;
+            if (Math.random() < 0.5) e.circleDir *= -1;
           }
+        }
+      }
+
+      // keep enemies from stacking into each other
+      for (const o of this.enemies) {
+        if (o === e || o.dead) continue;
+        const ox = e.pos.x - o.pos.x;
+        const oz = e.pos.z - o.pos.z;
+        const od = Math.hypot(ox, oz);
+        const minD = e.r + o.r + 0.35;
+        if (od < minD && od > 1e-4) {
+          const push = ((minD - od) / minD) * 3 * dt;
+          e.pos.x += (ox / od) * push;
+          e.pos.z += (oz / od) * push;
         }
       }
 
@@ -2075,8 +2647,8 @@ export class GameEngine {
         e.anim.t += dt;
         if (e.anim.t >= e.anim.dur) e.anim = undefined;
       }
-      const wind =
-        e.windup && e.windup > 0 ? 1 - e.windup / (e.type === 'boss' ? 0.55 : 0.42) : 0;
+      const st = e.strike;
+      const wind = st ? Math.min(1, st.t / st.windup) : 0;
       const hitK = Math.max(0, e.flash) / 0.14;
       if (e.rig.flash) e.rig.flash.value = hitK * hitK;
       animateCharacter(e.rig, {
@@ -2087,16 +2659,32 @@ export class GameEngine {
         dt,
         anim: e.anim,
         windup: wind,
+        windupKind: st ? st.kind : undefined,
+        guard: e.mode === 'guard' && e.guardT > 0,
+        broken: e.brokenT > 0,
         hit: hitK
       });
 
       e.rig.root.position.copy(e.pos);
       e.rig.root.rotation.y = e.yaw;
 
-      e.bar.visible = e.hp < e.maxHp || e.type === 'boss';
-      e.bar.position.set(e.pos.x, e.pos.y + (e.type === 'boss' ? 5.3 : 2.6), e.pos.z);
+      // deathblow mark pulses while posture is broken
+      if (e.dbMark) {
+        e.dbMark.visible = e.brokenT > 0;
+        if (e.dbMark.visible) e.dbMark.scale.setScalar((boss ? 0.28 : 0.42) * (1 + Math.sin(this.time * 12) * 0.18));
+      }
+
+      const pr = Math.min(1, e.posture / e.maxPosture);
+      e.bar.visible = e.hp < e.maxHp || pr > 0.01 || boss;
+      e.bar.position.set(e.pos.x, e.pos.y + (boss ? 5.3 : 2.6), e.pos.z);
       e.bar.quaternion.copy(this.camera.quaternion);
       e.barFg.scale.x = Math.max(0.001, e.hp / e.maxHp);
+      if (e.postureBar) {
+        e.postureBar.scale.x = Math.max(0.001, pr);
+        const pm = e.postureBar.material as THREE.MeshBasicMaterial;
+        if (e.brokenT > 0) pm.color.setRGB(1.6, 0.25 + Math.sin(this.time * 14) * 0.2, 0.15);
+        else pm.color.setRGB(1, 0.85 - pr * 0.6, 0.3 - pr * 0.2);
+      }
     }
   }
 
@@ -2144,8 +2732,21 @@ export class GameEngine {
         }
       } else if (!dead && !p.friendly) {
         if (Math.hypot(p.pos.x - this.player.pos.x, p.pos.z - this.player.pos.z) < 0.6) {
-          this.damagePlayer(p.dmg, p.vel.x, p.vel.z);
           dead = true;
+          const canAct = this.player.staggerT <= 0 && this.player.inv <= 0;
+          const mid = this.tmpV.copy(p.pos);
+          if (canAct && this.time - this.player.guardPressT <= DEFLECT_WINDOW) {
+            this.impacts.spawn(mid, IMPACT_DEFLECT, 1.4, 0.14);
+            this.emitParticles(mid.x, mid.y, mid.z, 14, 0xffb347, 7, 2, 16, 0.25);
+            this.player.anim = { kind: 'deflect', t: 0, dur: 0.2, side: 0 };
+            sfx.clang();
+          } else if (canAct && this.input.guardHeld) {
+            this.impacts.spawn(mid, IMPACT_BLOCK, 1, 0.1);
+            this.addPlayerPosture(10);
+            sfx.block();
+          } else {
+            this.damagePlayer(p.dmg, p.vel.x, p.vel.z);
+          }
         }
       }
 
@@ -2325,6 +2926,20 @@ export class GameEngine {
     this.updateCamera(real);
 
     this.world.update(dt, this.time, this.player.pos, this.camera.position);
+    this.renderer.toneMappingExposure = this.world.atm.exposure;
+    if (this.fx) {
+      this.fx.setLook(this.world.atm.look);
+      // sun position on screen for the light shafts (fade out when it leaves the view)
+      const atm = this.world.atm;
+      this.tmpV.copy(this.camera.position).addScaledVector(atm.sunDir, 200).project(this.camera);
+      let rays = 0;
+      if (this.profile.rays && this.tmpV.z < 1) {
+        this.sunUv.set(this.tmpV.x * 0.5 + 0.5, this.tmpV.y * 0.5 + 0.5);
+        const off = Math.max(Math.abs(this.tmpV.x), Math.abs(this.tmpV.y));
+        rays = atm.rays * (1 - Math.min(1, Math.max(0, off - 1) / 0.6));
+      }
+      this.fx.setStylize(this.profile.ink ? 0.6 : 0, rays, this.sunUv, atm.sunGlow, this.camera.near, this.camera.far);
+    }
 
     this.updateFx(real);
     this.render();
@@ -2416,6 +3031,7 @@ export class GameEngine {
   private applyQuality(q: Quality) {
     this.quality = q;
     const prof = qualityProfile(q);
+    this.profile = prof;
     this.renderer.setPixelRatio(prof.pixelRatio);
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
 

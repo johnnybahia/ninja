@@ -66,6 +66,10 @@ export interface AnimInput {
   hit?: number; // 0..1 hit reaction
   dash?: boolean;
   turn?: number; // yaw rate (rad/s) for leaning into turns
+  windupKind?: string; // enemy strike being prepared: slash | thrust | sweep | smash
+  guard?: boolean; // holding a guard stance
+  broken?: boolean; // posture broken (staggered, open to a deathblow)
+  stagger?: boolean; // player off balance after a guard break
 }
 
 function bone(r: RigInstance, j: Joint) {
@@ -321,6 +325,43 @@ function attack(kind: string, side: number, p: number): { snapBodyY?: number } |
       set('armL', -0.3, 0, -0.9);
       return { snapBodyY: p * Math.PI * 2 };
     }
+    case 'deflect': {
+      // quick flick of the blade outward
+      const k = Math.sin(p * Math.PI);
+      set('armR', -1.1 - 0.4 * k, -0.7 + 0.5 * k, 0.1 + 0.5 * k);
+      set('foreR', -1.0 + 0.4 * k);
+      set('handR', 1.0);
+      set('armL', -0.9, 0.5, -0.05);
+      set('foreL', -1.2);
+      add('chest', -0.12 * k, 0.3 - 0.4 * k);
+      break;
+    }
+    case 'drink': {
+      // lift the gourd to the mouth with the free hand
+      const up = smooth(p / 0.3) * (1 - smooth((p - 0.75) / 0.25));
+      set('armL', -1.1 * up - 0.2, 0.5 * up, -0.2);
+      set('foreL', -2.1 * up - 0.3);
+      add('head', -0.35 * up);
+      add('chest', -0.08 * up);
+      break;
+    }
+    case 'deathblow': {
+      // plunge the blade in, hold, then rip it out
+      const plunge = easeOut(p / 0.3);
+      const pull = smooth((p - 0.55) / 0.35);
+      set('armR', -1.55 * plunge + 0.9 * pull, -0.2, 0.05);
+      set('foreR', -0.2 - 0.3 * pull);
+      set('handR', -0.1 + 0.3 * pull);
+      set('armL', -1.2 * plunge, 0.4, -0.2);
+      set('foreL', -1.4);
+      add('chest', 0.45 * plunge - 0.3 * pull, -0.2 * plunge + 0.5 * pull);
+      add('legL', -0.75 * plunge);
+      add('shinL', 0.8 * plunge);
+      add('legR', 0.45 * plunge);
+      add('shinR', 0.5 * plunge);
+      hipsY -= 0.2 * plunge;
+      break;
+    }
     // ---- enemies ----
     case 'eslash': {
       const k = easeOut(p / 0.4);
@@ -334,6 +375,46 @@ function attack(kind: string, side: number, p: number): { snapBodyY?: number } |
       add('shinL', 0.5 * k);
       add('legR', 0.35 * k);
       hipsY -= 0.08 * k;
+      break;
+    }
+    case 'ethrust': {
+      const k = easeOut(p / 0.3);
+      set('armR', -1.55 * k + 0.5 * (1 - k), 0, 0.05);
+      set('foreR', -0.05);
+      set('handR', -0.05);
+      set('armL', -1.0, 0.3, 0.2);
+      set('foreL', -1.0);
+      add('chest', 0.35 * k, -0.3 * k);
+      add('legL', -0.8 * k);
+      add('shinL', 0.6 * k);
+      add('legR', 0.55 * k);
+      hipsY -= 0.12 * k;
+      break;
+    }
+    case 'esweep': {
+      const k = easeOut(p / 0.35);
+      set('armR', -0.5, -1.2 + 2.6 * k, 0.6 - 0.8 * k);
+      set('armL', -0.5, -0.9 + 1.6 * k, 0.3);
+      set('foreR', -0.3);
+      set('foreL', -0.4);
+      set('handR', 0.9);
+      add('chest', 0.3, -0.9 + 1.8 * k);
+      add('legL', -0.7);
+      add('shinL', 1.0);
+      add('shinR', 0.9);
+      hipsY -= 0.3;
+      break;
+    }
+    case 'erecoil': {
+      // deflected: blade knocked away, stumbling back
+      const k = Math.sin(p * Math.PI);
+      set('armR', -2.2 * k, 0.4, 0.6 * k);
+      set('armL', -1.2 * k, -0.2, -0.3);
+      set('foreR', -0.4);
+      set('foreL', -0.6);
+      add('chest', -0.4 * k);
+      add('head', -0.3 * k);
+      add('legR', 0.35 * k);
       break;
     }
     case 'esmash': {
@@ -364,8 +445,39 @@ function attack(kind: string, side: number, p: number): { snapBodyY?: number } |
   }
 }
 
-function windupPose(kind: string, w: number) {
+function windupPose(kind: string, w: number, strike?: string) {
   if (w <= 0) return;
+  if (strike === 'thrust') {
+    // blade drawn back at the hip, weight on the rear leg
+    mix('armR', w, 0.5, 0.2, 0.25);
+    mix('foreR', w, -1.6);
+    mix('handR', w, -1.4);
+    mix('armL', w, -0.9, 0.3, 0.25);
+    mix('foreL', w, -1.2);
+    add('chest', -0.1 * w, 0.5 * w);
+    add('legL', -0.45 * w);
+    add('shinL', 0.4 * w);
+    add('legR', 0.35 * w);
+    add('shinR', 0.5 * w);
+    hipsY -= 0.12 * w;
+    return;
+  }
+  if (strike === 'sweep') {
+    // crouched low, weapon cocked back at knee height
+    const big = kind === 'oni';
+    mix('armR', w, -0.4, -1.2, big ? 0.9 : 0.6);
+    mix('armL', w, -0.5, -0.9, 0.3);
+    mix('foreR', w, -0.3);
+    mix('foreL', w, -0.5);
+    mix('handR', w, 0.9);
+    add('chest', 0.35 * w, -0.9 * w);
+    add('legL', -0.7 * w);
+    add('shinL', 1.0 * w);
+    add('legR', 0.2 * w);
+    add('shinR', 0.9 * w);
+    hipsY -= 0.3 * w;
+    return;
+  }
   if (kind === 'oni') {
     mix('armR', w, -3.0, 0, 0.2);
     mix('armL', w, -2.8, 0, -0.2);
@@ -416,7 +528,43 @@ export function animateCharacter(r: RigInstance, a: AnimInput) {
     const res = attack(a.anim.kind, a.anim.side || 0, clamp01(a.anim.t / a.anim.dur));
     if (res && res.snapBodyY !== undefined) snapBodyY = res.snapBodyY;
   } else if (a.windup && a.windup > 0) {
-    windupPose(kind, smooth(a.windup));
+    windupPose(kind, smooth(a.windup), a.windupKind);
+  }
+
+  if (a.guard && !attacking) {
+    // blade held level across the body, slight crouch
+    mix('armR', 0.9, -0.95, -0.5, 0.05);
+    mix('foreR', 0.9, -1.1);
+    mix('handR', 0.9, 1.25, 0, 0.3);
+    mix('armL', 0.9, -0.95, 0.5, -0.05);
+    mix('foreL', 0.9, -1.2);
+    add('chest', 0.05, 0.25);
+    hipsY -= 0.05;
+    add('shinL', 0.15);
+    add('shinR', 0.15);
+  }
+  if (a.broken) {
+    // posture broken: sagging to one knee, arms hanging, head down
+    mix('legL', 0.9, -1.2);
+    mix('shinL', 0.9, 1.5);
+    mix('legR', 0.9, 0.3);
+    mix('shinR', 0.9, 1.6);
+    mix('chest', 0.9, 0.45);
+    mix('head', 0.9, 0.4);
+    mix('armR', 0.9, 0.1, 0, 0.3);
+    mix('armL', 0.9, 0.1, 0, -0.3);
+    mix('foreR', 0.9, -0.3);
+    mix('foreL', 0.9, -0.3);
+    hipsY -= 0.42 + Math.sin(a.t * 3) * 0.02;
+  }
+  if (a.stagger) {
+    mix('chest', 0.8, -0.35, 0.2, 0.15);
+    mix('armR', 0.8, 0.4, 0, 0.9);
+    mix('armL', 0.8, 0.4, 0, -0.9);
+    mix('head', 0.8, -0.3);
+    add('shinL', 0.3);
+    add('shinR', 0.3);
+    hipsY -= 0.08;
   }
 
   if (a.dash) {
