@@ -5,8 +5,43 @@ import { TAU, rand } from './constants';
 import type { QualityProfile } from './postfx';
 import { ATMOSPHERES, Atmos, blendAtmos, cloneAtmos } from './atmosphere';
 import { Garden } from './garden';
+import { applySurface, initSurfaces, neutralize } from './surfaces';
+import { detectQuality } from './postfx';
 
 export type Solid = { x: number; z: number; r: number; h: number };
+
+// World copies of the shared palette, with baked surface detail. Weapons and characters
+// keep the plain MAT versions (a world-space projection would swim on moving parts).
+function worldMaterials(): WorldMats {
+  const tex = (m: THREE.MeshStandardMaterial, k = 0.6) => {
+    const c = m.clone();
+    neutralize(c.color, k);
+    return c;
+  };
+  const W = {
+    stone: tex(MAT.stone),
+    stoneDark: tex(MAT.stoneDark),
+    rock: tex(MAT.rock),
+    wood: tex(MAT.wood, 0.3),
+    woodDark: tex(MAT.woodDark, 0.3),
+    roof: tex(MAT.roof, 0.2),
+    torii: MAT.torii.clone(),
+    trunk: tex(MAT.trunk, 0.5),
+    dark: MAT.dark.clone()
+  };
+  applySurface(W.stone, 'rock', { mode: 'tri', scale: 0.5, normal: 1.1, albedo: 0.85 });
+  applySurface(W.stoneDark, 'rock', { mode: 'tri', scale: 0.6, normal: 1.0, albedo: 0.8 });
+  applySurface(W.rock, 'rock', { mode: 'tri', scale: 0.42, normal: 1.3, albedo: 0.9 });
+  applySurface(W.wood, 'wood', { mode: 'tri', scale: 0.4, normal: 0.9, albedo: 0.9 });
+  applySurface(W.woodDark, 'wood', { mode: 'tri', scale: 0.45, normal: 0.8, albedo: 0.7 });
+  applySurface(W.roof, 'roof', { mode: 'uv', scale: 1, normal: 1.2, albedo: 0.9 });
+  applySurface(W.torii, 'wood', { mode: 'tri', scale: 0.4, normal: 0.35, albedo: 0.12 });
+  applySurface(W.trunk, 'bark', { mode: 'tri', scale: 0.7, normal: 1.3, albedo: 0.9 });
+  applySurface(W.dark, 'wood', { mode: 'tri', scale: 0.45, normal: 0.4, albedo: 0.2 });
+  return W;
+}
+type WorldMats = Record<'stone' | 'stoneDark' | 'rock' | 'wood' | 'woodDark' | 'roof' | 'torii' | 'trunk' | 'dark', THREE.MeshStandardMaterial>;
+let WM: WorldMats;
 
 // Shared wind clock for every swaying material (grass, foliage, banners)
 const WIND_TIME = { value: 0 };
@@ -51,107 +86,6 @@ function canvasTex(size: number, draw: (g: CanvasRenderingContext2D, s: number) 
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
   t.repeat.set(repeat, repeat);
   return t;
-}
-
-function rrect(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
-  g.beginPath();
-  if (typeof g.roundRect === 'function') g.roundRect(x, y, w, h, r);
-  else g.rect(x, y, w, h);
-}
-
-// Soft blob drawn with wrap-around so the texture tiles without seams
-function blob(g: CanvasRenderingContext2D, s: number, x: number, y: number, r: number, col: string) {
-  for (const ox of [-s, 0, s]) {
-    for (const oy of [-s, 0, s]) {
-      const cx = x + ox;
-      const cy = y + oy;
-      if (cx + r < 0 || cx - r > s || cy + r < 0 || cy - r > s) continue;
-      const gr = g.createRadialGradient(cx, cy, 0, cx, cy, r);
-      gr.addColorStop(0, col);
-      gr.addColorStop(1, 'rgba(0,0,0,0)');
-      g.fillStyle = gr;
-      g.fillRect(cx - r, cy - r, r * 2, r * 2);
-    }
-  }
-}
-
-function groundTexture() {
-  return canvasTex(
-    512,
-    (g, s) => {
-      g.fillStyle = '#56633d';
-      g.fillRect(0, 0, s, s);
-      const cols = ['rgba(120,128,70,0.35)', 'rgba(62,74,40,0.4)', 'rgba(104,84,56,0.3)', 'rgba(40,52,30,0.35)', 'rgba(140,140,86,0.22)'];
-      for (let i = 0; i < 520; i++) blob(g, s, rand(0, s), rand(0, s), rand(6, 46), cols[i % cols.length]);
-      // fine speckle
-      for (let i = 0; i < 6000; i++) {
-        g.fillStyle = Math.random() < 0.5 ? 'rgba(30,38,20,0.35)' : 'rgba(170,176,110,0.25)';
-        g.fillRect(rand(0, s), rand(0, s), 1.5, 1.5);
-      }
-    },
-    26
-  );
-}
-
-function flagstoneTexture() {
-  return canvasTex(
-    1024,
-    (g, s) => {
-      g.fillStyle = '#2e2a28';
-      g.fillRect(0, 0, s, s);
-      const rows = 8;
-      const rh = s / rows;
-      for (let r = 0; r < rows; r++) {
-        let x = rand(0, 90);
-        const y = r * rh;
-        while (x < s + 90) {
-          const w = rand(90, 190);
-          const tone = rand(92, 128);
-          const warm = rand(-6, 8);
-          for (const ox of [0, -s]) {
-            const sx = x + ox + 4;
-            if (sx > s || sx + w < 0) continue;
-            const gr = g.createLinearGradient(sx, y, sx + w, y + rh);
-            gr.addColorStop(0, `rgb(${tone + 10 + warm},${tone + 6},${tone - 2})`);
-            gr.addColorStop(1, `rgb(${tone - 14 + warm},${tone - 16},${tone - 20})`);
-            g.fillStyle = gr;
-            rrect(g, sx, y + 4, w - 8, rh - 8, 10);
-            g.fill();
-          }
-          x += w;
-        }
-      }
-      for (let i = 0; i < 14000; i++) {
-        g.fillStyle = Math.random() < 0.5 ? 'rgba(0,0,0,0.18)' : 'rgba(255,255,255,0.08)';
-        g.fillRect(rand(0, s), rand(0, s), 2, 2);
-      }
-      // moss creeping in the grout
-      for (let i = 0; i < 90; i++) blob(g, s, rand(0, s), rand(0, s), rand(8, 30), 'rgba(70,92,44,0.35)');
-    },
-    7
-  );
-}
-
-function slabTexture() {
-  return canvasTex(
-    512,
-    (g, s) => {
-      g.fillStyle = '#26221f';
-      g.fillRect(0, 0, s, s);
-      const n = 4;
-      for (let i = 0; i < n; i++) {
-        const tone = rand(84, 112);
-        g.fillStyle = `rgb(${tone + 6},${tone},${tone - 6})`;
-        rrect(g, 8, i * (s / n) + 6, s - 16, s / n - 12, 12);
-        g.fill();
-      }
-      for (let i = 0; i < 5000; i++) {
-        g.fillStyle = Math.random() < 0.5 ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.07)';
-        g.fillRect(rand(0, s), rand(0, s), 2, 2);
-      }
-    },
-    1
-  );
 }
 
 // Shoji paper panel: warm glowing paper with a dark wooden lattice
@@ -539,6 +473,14 @@ export class World {
   constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene) {
     this.scene = scene;
     scene.add(this.root);
+    let q: string | null = null;
+    try {
+      q = localStorage.getItem('kage_quality');
+    } catch {
+      q = null;
+    }
+    initSurfaces(renderer, (q && q !== 'auto' ? q : detectQuality()) === 'high');
+    WM = worldMaterials();
     const atm = this.atm;
     scene.background = atm.fog.clone();
     scene.fog = new THREE.Fog(atm.fog.clone(), atm.fogNear, atm.fogFar);
@@ -566,10 +508,9 @@ export class World {
     this.root.add(mFar, mNear);
     this.mountains.push({ mesh: mFar, far: true }, { mesh: mNear, far: false });
 
-    const aniso = Math.min(8, renderer.capabilities.getMaxAnisotropy());
     const batch = new Batcher();
 
-    this.buildGround(aniso);
+    this.buildGround();
     this.buildTemple(batch);
     this.buildTorii(batch);
     this.buildTrees(batch);
@@ -603,37 +544,29 @@ export class World {
     this.solids.push({ x, z, r, h });
   }
 
-  private buildGround(aniso: number) {
-    const gTex = groundTexture();
-    gTex.anisotropy = aniso;
-    const groundMat = new THREE.MeshStandardMaterial({ map: gTex, roughness: 0.95, color: 0xffffff });
+  private buildGround() {
+    const groundMat = new THREE.MeshStandardMaterial({ roughness: 0.95, color: new THREE.Color(0.075, 0.08, 0.06) });
+    applySurface(groundMat, 'ground', { mode: 'top', scale: 0.19, normal: 1.0, breakup: true });
     const ground = new THREE.Mesh(new THREE.CircleGeometry(170, 64).rotateX(-Math.PI / 2), groundMat);
     ground.receiveShadow = true;
     this.root.add(ground);
 
-    const fTex = flagstoneTexture();
-    fTex.anisotropy = aniso;
-    const plaza = new THREE.Mesh(
-      new THREE.CircleGeometry(13, 64).rotateX(-Math.PI / 2),
-      new THREE.MeshStandardMaterial({ map: fTex, roughness: 0.82, color: 0xbfc3cc })
-    );
+    const plazaMat = new THREE.MeshStandardMaterial({ roughness: 0.8, color: new THREE.Color(0.12, 0.12, 0.125) });
+    applySurface(plazaMat, 'cobble', { mode: 'top', scale: 0.3, normal: 1.1, breakup: true });
+    const plaza = new THREE.Mesh(new THREE.CircleGeometry(13, 64).rotateX(-Math.PI / 2), plazaMat);
     plaza.position.y = 0.02;
     plaza.receiveShadow = true;
     this.root.add(plaza);
     // raised stone curb around the plaza
-    const curb = new THREE.Mesh(new THREE.TorusGeometry(13.05, 0.16, 6, 96).rotateX(Math.PI / 2), MAT.stoneDark);
+    const curb = new THREE.Mesh(new THREE.TorusGeometry(13.05, 0.16, 6, 96).rotateX(Math.PI / 2), WM.stoneDark);
     curb.position.y = 0.04;
     curb.scale.y = 0.6;
     curb.receiveShadow = true;
     this.root.add(curb);
 
-    const sTex = slabTexture();
-    sTex.anisotropy = aniso;
-    sTex.repeat.set(1, 3);
-    const path = new THREE.Mesh(
-      new THREE.BoxGeometry(3.4, 0.06, 11),
-      new THREE.MeshStandardMaterial({ map: sTex, roughness: 0.85, color: 0xd0c8c0 })
-    );
+    const pathMat = new THREE.MeshStandardMaterial({ roughness: 0.85, color: new THREE.Color(0.16, 0.16, 0.155) });
+    applySurface(pathMat, 'flag', { mode: 'tri', scale: 0.32, normal: 1.0 });
+    const path = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.06, 11), pathMat);
     path.position.set(0, 0.03, -17.8);
     path.receiveShadow = true;
     this.root.add(path);
@@ -649,56 +582,56 @@ export class World {
     const box = (w: number, h: number, d: number) => new THREE.BoxGeometry(w, h, d);
 
     // stone podium with steps
-    b.add(box(17, 1.2, 12), MAT.stone, at(mtx(0, 0.6, 0)));
-    b.add(box(17.4, 0.18, 12.4), MAT.stoneDark, at(mtx(0, 1.21, 0)));
+    b.add(box(17, 1.2, 12), WM.stone, at(mtx(0, 0.6, 0)));
+    b.add(box(17.4, 0.18, 12.4), WM.stoneDark, at(mtx(0, 1.21, 0)));
     for (let i = 0; i < 4; i++) {
-      b.add(box(5.2, 0.3, 0.55), MAT.stone, at(mtx(0, 0.15 + i * 0.3, 7.6 - i * 0.55)));
+      b.add(box(5.2, 0.3, 0.55), WM.stone, at(mtx(0, 0.15 + i * 0.3, 7.6 - i * 0.55)));
     }
     // wooden floor / veranda
-    b.add(box(15, 0.28, 10), MAT.wood, at(mtx(0, 1.44, 0)));
+    b.add(box(15, 0.28, 10), WM.wood, at(mtx(0, 1.44, 0)));
     // veranda railing (front, gap for the stairs) and posts
     const railY = 2.25;
     for (const side of [-1, 1]) {
-      b.add(box(4.6, 0.1, 0.12), MAT.woodDark, at(mtx(side * 5.2, railY, 4.95)));
-      b.add(box(4.6, 0.08, 0.1), MAT.woodDark, at(mtx(side * 5.2, railY - 0.35, 4.95)));
-      for (let k = 0; k < 5; k++) b.add(box(0.12, 0.8, 0.12), MAT.woodDark, at(mtx(side * (3.0 + k * 1.1), 1.95, 4.95)));
+      b.add(box(4.6, 0.1, 0.12), WM.woodDark, at(mtx(side * 5.2, railY, 4.95)));
+      b.add(box(4.6, 0.08, 0.1), WM.woodDark, at(mtx(side * 5.2, railY - 0.35, 4.95)));
+      for (let k = 0; k < 5; k++) b.add(box(0.12, 0.8, 0.12), WM.woodDark, at(mtx(side * (3.0 + k * 1.1), 1.95, 4.95)));
     }
     // pillars: red with black bases
     const pg = new THREE.CylinderGeometry(0.3, 0.33, 4.6, 12);
     const baseG = new THREE.CylinderGeometry(0.42, 0.46, 0.35, 12);
     for (const x of [-6.8, -2.3, 2.3, 6.8]) {
       for (const z of [4.3, -4.3]) {
-        b.add(pg, MAT.torii, at(mtx(x, 3.88, z)));
-        b.add(baseG, MAT.dark, at(mtx(x, 1.75, z)));
+        b.add(pg, WM.torii, at(mtx(x, 3.88, z)));
+        b.add(baseG, WM.dark, at(mtx(x, 1.75, z)));
       }
     }
     // walls: back & sides in dark wood, front shoji panels glowing from inside
-    b.add(box(13.6, 4.4, 0.35), MAT.wood, at(mtx(0, 3.8, -4.2)));
-    b.add(box(0.35, 4.4, 8.4), MAT.wood, at(mtx(-6.8, 3.8, 0)));
-    b.add(box(0.35, 4.4, 8.4), MAT.wood, at(mtx(6.8, 3.8, 0)));
+    b.add(box(13.6, 4.4, 0.35), WM.wood, at(mtx(0, 3.8, -4.2)));
+    b.add(box(0.35, 4.4, 8.4), WM.wood, at(mtx(-6.8, 3.8, 0)));
+    b.add(box(0.35, 4.4, 8.4), WM.wood, at(mtx(6.8, 3.8, 0)));
     const shojiMat = new THREE.MeshBasicMaterial({ map: shojiTexture(), color: new THREE.Color(1.05, 0.82, 0.56) });
     this.root.userData.shoji = shojiMat;
     b.noShadow(shojiMat);
     const panel = new THREE.PlaneGeometry(4.2, 3.3);
     for (const x of [-4.55, 0, 4.55]) b.add(panel, shojiMat, at(mtx(x, 3.42, 3.95)));
     // lintels and beams
-    b.add(box(15.2, 0.5, 0.55), MAT.woodDark, at(mtx(0, 5.95, 4.3)));
-    b.add(box(15.2, 0.5, 0.55), MAT.woodDark, at(mtx(0, 5.95, -4.3)));
-    b.add(box(0.55, 0.5, 9.2), MAT.woodDark, at(mtx(-6.8, 5.95, 0)));
-    b.add(box(0.55, 0.5, 9.2), MAT.woodDark, at(mtx(6.8, 5.95, 0)));
-    b.add(box(14.2, 0.18, 0.22), MAT.woodDark, at(mtx(0, 5.25, 4.1)));
+    b.add(box(15.2, 0.5, 0.55), WM.woodDark, at(mtx(0, 5.95, 4.3)));
+    b.add(box(15.2, 0.5, 0.55), WM.woodDark, at(mtx(0, 5.95, -4.3)));
+    b.add(box(0.55, 0.5, 9.2), WM.woodDark, at(mtx(-6.8, 5.95, 0)));
+    b.add(box(0.55, 0.5, 9.2), WM.woodDark, at(mtx(6.8, 5.95, 0)));
+    b.add(box(14.2, 0.18, 0.22), WM.woodDark, at(mtx(0, 5.25, 4.1)));
     // bracket blocks under the eaves
-    for (const x of [-6.8, -2.3, 2.3, 6.8]) b.add(box(0.7, 0.3, 0.7), MAT.torii, at(mtx(x, 6.35, 4.3)));
+    for (const x of [-6.8, -2.3, 2.3, 6.8]) b.add(box(0.7, 0.3, 0.7), WM.torii, at(mtx(x, 6.35, 4.3)));
     // main curved roof + ridge + raised upper roof
-    b.add(curvedRoof(19.5, 14, 3.6, 5.2, 1.1), MAT.roof, at(mtx(0, 6.3, 0)));
-    b.add(box(10.6, 0.45, 0.6), MAT.dark, at(mtx(0, 9.95, 0)));
+    b.add(curvedRoof(19.5, 14, 3.6, 5.2, 1.1), WM.roof, at(mtx(0, 6.3, 0)));
+    b.add(box(10.6, 0.45, 0.6), WM.dark, at(mtx(0, 9.95, 0)));
     for (const s of [-1, 1]) {
       const orn = new THREE.ConeGeometry(0.28, 0.9, 6);
       b.add(orn, MAT.gold, at(mtx(s * 5.4, 10.45, 0, 0, 0, -s * 0.35)));
     }
-    b.add(box(7.5, 1.3, 4.4), MAT.wood, at(mtx(0, 10.6, 0)));
-    b.add(curvedRoof(10.5, 6.8, 2.1, 2.6, 0.7), MAT.roof, at(mtx(0, 11.15, 0)));
-    b.add(box(5.6, 0.3, 0.4), MAT.dark, at(mtx(0, 13.28, 0)));
+    b.add(box(7.5, 1.3, 4.4), WM.wood, at(mtx(0, 10.6, 0)));
+    b.add(curvedRoof(10.5, 6.8, 2.1, 2.6, 0.7), WM.roof, at(mtx(0, 11.15, 0)));
+    b.add(box(5.6, 0.3, 0.4), WM.dark, at(mtx(0, 13.28, 0)));
     // hanging lanterns at the entrance
     const lanternG = new THREE.CylinderGeometry(0.32, 0.32, 0.62, 12);
     for (const x of [-3.2, 3.2]) b.add(lanternG, MAT.glow, at(mtx(x, 4.9, 4.7)));
@@ -716,15 +649,15 @@ export class World {
     const pil = new THREE.CylinderGeometry(0.3, 0.36, 6.2, 14);
     const foot = new THREE.CylinderGeometry(0.42, 0.46, 0.5, 14);
     for (const x of [-3.3, 3.3]) {
-      b.add(pil, MAT.torii, at(mtx(x, 3.1, 0)));
-      b.add(foot, MAT.dark, at(mtx(x, 0.25, 0)));
+      b.add(pil, WM.torii, at(mtx(x, 3.1, 0)));
+      b.add(foot, WM.dark, at(mtx(x, 0.25, 0)));
       this.addSolid(x, 17, 0.55, 7);
     }
-    b.add(curvedBeam(10.4, 0.42, 0.85, 0.55), MAT.dark, at(mtx(0, 6.55, 0)));
-    b.add(curvedBeam(9.4, 0.36, 0.6, 0.35), MAT.torii, at(mtx(0, 6.12, 0)));
-    b.add(new THREE.BoxGeometry(8.2, 0.34, 0.42), MAT.torii, at(mtx(0, 5.0, 0)));
-    b.add(new THREE.BoxGeometry(0.34, 0.8, 0.3), MAT.torii, at(mtx(0, 5.55, 0)));
-    b.add(new THREE.BoxGeometry(1.1, 0.7, 0.08), MAT.dark, at(mtx(0, 5.6, 0.2)));
+    b.add(curvedBeam(10.4, 0.42, 0.85, 0.55), WM.dark, at(mtx(0, 6.55, 0)));
+    b.add(curvedBeam(9.4, 0.36, 0.6, 0.35), WM.torii, at(mtx(0, 6.12, 0)));
+    b.add(new THREE.BoxGeometry(8.2, 0.34, 0.42), WM.torii, at(mtx(0, 5.0, 0)));
+    b.add(new THREE.BoxGeometry(0.34, 0.8, 0.3), WM.torii, at(mtx(0, 5.55, 0)));
+    b.add(new THREE.BoxGeometry(1.1, 0.7, 0.08), WM.dark, at(mtx(0, 5.6, 0.2)));
   }
 
   private buildTrees(b: Batcher) {
@@ -752,10 +685,10 @@ export class World {
       const ry = rand(0, TAU);
       const sakura = Math.random() < 0.45;
       if (sakura) {
-        b.add(trunkG, MAT.trunk, mtx(x, 0.95 * s, z, rand(-0.08, 0.08), ry, rand(-0.08, 0.08), s, s, s));
+        b.add(trunkG, WM.trunk, mtx(x, 0.95 * s, z, rand(-0.08, 0.08), ry, rand(-0.08, 0.08), s, s, s));
         for (let k = 0; k < 3; k++) {
           const la = ry + (k / 3) * TAU;
-          b.add(limbG, MAT.trunk, mtx(x + Math.sin(la) * 0.45 * s, 2.3 * s, z + Math.cos(la) * 0.45 * s, Math.cos(la) * 0.7, 0, -Math.sin(la) * 0.7, s, s, s));
+          b.add(limbG, WM.trunk, mtx(x + Math.sin(la) * 0.45 * s, 2.3 * s, z + Math.cos(la) * 0.45 * s, Math.cos(la) * 0.7, 0, -Math.sin(la) * 0.7, s, s, s));
         }
         const n = 9 + Math.floor(rand(0, 4));
         for (let k = 0; k < n; k++) {
@@ -766,7 +699,7 @@ export class World {
           b.add(blobG, sakuraMat, mtx(x + Math.sin(la) * lr, (3.4 + rand(-0.2, 1.1)) * s, z + Math.cos(la) * lr, rand(0, 3), rand(0, 3), 0, sc, sc * 0.78, sc), col);
         }
       } else {
-        b.add(trunkG, MAT.trunk, mtx(x, 0.95 * s, z, 0, ry, 0, s * 0.9, s * 1.2, s * 0.9));
+        b.add(trunkG, WM.trunk, mtx(x, 0.95 * s, z, 0, ry, 0, s * 0.9, s * 1.2, s * 0.9));
         for (let k = 0; k < 4; k++) {
           const w = (2.2 - k * 0.45) * s;
           const col = greenA.clone().lerp(greenB, Math.random());
@@ -792,13 +725,13 @@ export class World {
     const roofG = new THREE.ConeGeometry(0.7, 0.38, 6);
     const jewelG = new THREE.SphereGeometry(0.1, 8, 6);
     for (const [lx, lz] of pts) {
-      b.add(baseG, MAT.stone, mtx(lx, 0.15, lz));
-      b.add(pillarG, MAT.stone, mtx(lx, 0.72, lz));
-      b.add(shelfG, MAT.stone, mtx(lx, 1.22, lz));
+      b.add(baseG, WM.stone, mtx(lx, 0.15, lz));
+      b.add(pillarG, WM.stone, mtx(lx, 0.72, lz));
+      b.add(shelfG, WM.stone, mtx(lx, 1.22, lz));
       b.add(boxG, MAT.glow, mtx(lx, 1.52, lz));
-      for (const [fx, fz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) b.add(frameG, MAT.stoneDark, mtx(lx + fx * 0.24, 1.52, lz + fz * 0.24));
-      b.add(roofG, MAT.stone, mtx(lx, 1.94, lz, 0, Math.PI / 6, 0, 1, 1, 1));
-      b.add(jewelG, MAT.stone, mtx(lx, 2.2, lz));
+      for (const [fx, fz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) b.add(frameG, WM.stoneDark, mtx(lx + fx * 0.24, 1.52, lz + fz * 0.24));
+      b.add(roofG, WM.stone, mtx(lx, 1.94, lz, 0, Math.PI / 6, 0, 1, 1, 1));
+      b.add(jewelG, WM.stone, mtx(lx, 2.2, lz));
       this.addSolid(lx, lz, 0.5, 2.3);
       this.emberSources.push(new THREE.Vector3(lx, 1.5, lz));
     }
@@ -820,8 +753,8 @@ export class World {
     ];
     for (const [rx, rz, s] of pts) {
       const g = jitter(new THREE.DodecahedronGeometry(s, 1), s * 0.14);
-      b.add(g, MAT.rock, mtx(rx, s * 0.35, rz, rand(0, 1), rand(0, TAU), 0, 1.25, 0.72, 1.1));
-      b.add(jitter(new THREE.DodecahedronGeometry(s * 0.45, 0), s * 0.06), MAT.rock, mtx(rx + s * 1.1, s * 0.15, rz + s * 0.4, rand(0, 1), rand(0, TAU), 0));
+      b.add(g, WM.rock, mtx(rx, s * 0.35, rz, rand(0, 1), rand(0, TAU), 0, 1.25, 0.72, 1.1));
+      b.add(jitter(new THREE.DodecahedronGeometry(s * 0.45, 0), s * 0.06), WM.rock, mtx(rx + s * 1.1, s * 0.15, rz + s * 0.4, rand(0, 1), rand(0, TAU), 0));
       this.addSolid(rx, rz, s * 0.95, s * 1.5);
     }
   }
@@ -874,8 +807,8 @@ export class World {
     const barG = new THREE.CylinderGeometry(0.04, 0.04, 1.15, 6).rotateZ(Math.PI / 2);
     for (const [bx, bz, ry] of pts) {
       const base = new THREE.Matrix4().compose(new THREE.Vector3(bx, 0, bz), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), ry), new THREE.Vector3(1, 1, 1));
-      b.add(poleG, MAT.woodDark, base.clone().multiply(mtx(0, 2.8, 0)));
-      b.add(barG, MAT.woodDark, base.clone().multiply(mtx(0.55, 5.2, 0)));
+      b.add(poleG, WM.woodDark, base.clone().multiply(mtx(0, 2.8, 0)));
+      b.add(barG, WM.woodDark, base.clone().multiply(mtx(0.55, 5.2, 0)));
       const c = new THREE.Mesh(clothG, cloth);
       c.position.set(bx, 3.45, bz);
       c.rotation.y = ry;
@@ -902,9 +835,9 @@ export class World {
       g.position.set(tx, 0, tz);
       for (let i = 0; i < 3; i++) {
         const ang = (i / 3) * TAU;
-        b.add(legG, MAT.woodDark, mtx(tx + Math.sin(ang) * 0.28, 1.12, tz + Math.cos(ang) * 0.28, Math.cos(ang) * 0.18, 0, -Math.sin(ang) * 0.18));
+        b.add(legG, WM.woodDark, mtx(tx + Math.sin(ang) * 0.28, 1.12, tz + Math.cos(ang) * 0.28, Math.cos(ang) * 0.18, 0, -Math.sin(ang) * 0.18));
       }
-      b.add(bowlG, MAT.dark, mtx(tx, 2.2, tz));
+      b.add(bowlG, WM.dark, mtx(tx, 2.2, tz));
       const outer = new THREE.Mesh(outerG, outerM);
       outer.position.y = 2.3;
       const inner = new THREE.Mesh(innerG, innerM);
