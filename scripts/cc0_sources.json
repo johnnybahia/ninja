@@ -1,0 +1,9 @@
+{
+  "flag": "monastery_stone_floor",
+  "rock": "mountainside",
+  "cobble": "cobblestone_01",
+  "ground": "leaves_forest_ground",
+  "wood": "oak_wood_planks",
+  "bark": "bark_bluegum",
+  "roof": "roof_tiles"
+}
