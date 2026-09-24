@@ -1,20 +1,21 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { GameEngine } from './game/engine';
 import { CharacterId, WeaponDef } from './game/types';
-import { WEAPONS_KAGE, WEAPONS_BRAVO, WEAPON_INFO, KARATE, SPECIALS } from './game/constants';
+import { WEAPONS_KAGE, WEAPON_INFO, KARATE, SPECIALS } from './game/constants';
 import { ICON_URLS } from './game/icons';
 import { initAudio } from './game/audio';
+import type { Quality, QualitySetting } from './game/postfx';
 import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft } from 'lucide-react';
 
 const SLOT_COUNT = 2;
 const SLOT_LABELS = ['Principal', 'Secundária'];
-// Defaults pair a close-range weapon with a ranged one: Katana + Shuriken, Fuzil + M45.
-const DEFAULT_SLOTS: Record<CharacterId, number[]> = { kage: [0, 3], bravo: [3, 6] };
+// Default pairs a close-range weapon with a ranged one: Katana + Shuriken.
+const DEFAULT_SLOTS: Record<CharacterId, number[]> = { kage: [0, 3] };
 
 // Loadout picked on the Arsenal screen, saved per character; falls back to the default
 // pair if missing or invalid (e.g. an older 4-button save).
 function loadSlots(id: CharacterId): number[] {
-  const total = (id === 'kage' ? WEAPONS_KAGE : WEAPONS_BRAVO).length;
+  const total = WEAPONS_KAGE.length;
   const fallback = DEFAULT_SLOTS[id];
   try {
     const raw = localStorage.getItem(`${id}_loadout`);
@@ -75,10 +76,9 @@ export default function App() {
   // Action buttons: SLOT_COUNT slots, each bound to a weapon picked on the Arsenal screen
   // before the run (locked during play). Pressing a slot selects its weapon and attacks
   // right away; holding keeps firing.
-  const weaponList = charId === 'kage' ? WEAPONS_KAGE : WEAPONS_BRAVO;
+  const weaponList = WEAPONS_KAGE;
   const [loadouts, setLoadouts] = useState<Record<CharacterId, number[]>>(() => ({
-    kage: loadSlots('kage'),
-    bravo: loadSlots('bravo')
+    kage: loadSlots('kage')
   }));
   const slots = loadouts[charId];
   const slotsRef = useRef(slots);
@@ -142,6 +142,16 @@ export default function App() {
 
   // Settings Modal
   const [showSettings, setShowSettings] = useState(false);
+  const [qualitySetting, setQualitySetting] = useState<QualitySetting>(() => {
+    try {
+      const v = localStorage.getItem('kage_quality');
+      return v === 'high' || v === 'medium' || v === 'low' ? v : 'auto';
+    } catch {
+      return 'auto';
+    }
+  });
+  const [effectiveQuality, setEffectiveQuality] = useState<Quality>('high');
+  const qualityRef = useRef(qualitySetting);
   const [sensitivity, setSensitivity] = useState(1.0);
   const [autoCamera, setAutoCamera] = useState(true);
   const [autoTurnStick, setAutoTurnStick] = useState(true);
@@ -185,6 +195,7 @@ export default function App() {
         setActiveWeapon(w);
       },
       onSpecialsUpdate: (sp) => setSpecials(sp),
+      onQualityChange: (_setting, effective) => setEffectiveQuality(effective),
       onGameOver: (finalScore) => {
         setGameState('over');
         if (finalScore > bestScore) {
@@ -197,7 +208,10 @@ export default function App() {
     });
 
     engineRef.current = engine;
+    // Dev-only handle for automated visual checks; stripped from production builds
+    if (import.meta.env.DEV) (window as any).__engine = engine;
     engine.loadout = slotsRef.current;
+    engine.setQuality(qualityRef.current);
     setActiveWeapon(engine.weapons[0]);
 
     const handleResize = () => engine.resize();
@@ -381,7 +395,7 @@ export default function App() {
   }, [gameState]);
 
   return (
-    <div className={`relative w-full h-full select-none overflow-hidden ${charId === 'bravo' ? 'doom' : ''}`}>
+    <div className="relative w-full h-full select-none overflow-hidden">
       {/* 3D WebGL Canvas */}
       <canvas
         ref={canvasRef}
@@ -427,7 +441,7 @@ export default function App() {
             {/* Character Portrait Photo */}
             <div className="relative shrink-0">
               <img
-                src={charId === 'bravo' ? ICON_URLS.bravo_portrait : ICON_URLS.kage_portrait}
+                src={ICON_URLS.kage_portrait}
                 alt="Player Avatar"
                 className="w-12 h-12 rounded-full border-2 border-[var(--ember)] shadow-md object-cover bg-black/60"
               />
@@ -596,18 +610,14 @@ export default function App() {
 
       {/* Main Start Menu */}
       {gameState === 'menu' && (
-        <div id="menu-overlay" className="fixed inset-0 flex items-center justify-center bg-[rgba(22,18,31,0.85)] backdrop-blur-md p-6 z-30 overflow-auto">
+        <div id="menu-overlay" className="fixed inset-0 flex items-center justify-center bg-[radial-gradient(ellipse_at_center,rgba(16,12,24,0.78),rgba(16,12,24,0.42))] backdrop-blur-[2px] p-6 z-30 overflow-auto">
           <div className="max-w-md w-full text-center py-4">
             <div className="kanji-title font-serif text-8xl font-bold text-[var(--torii)] leading-none mb-2">
-              {charId === 'kage' ? '影' : '死'}
+              影
             </div>
-            <h1 className="font-serif text-4xl font-extrabold text-[var(--paper)] mb-2">
-              {charId === 'kage' ? 'Kage' : 'Bravo'}
-            </h1>
+            <h1 className="font-serif text-4xl font-extrabold text-[var(--paper)] mb-2">Kage</h1>
             <p className="text-sm text-[var(--paper)]/80 mb-4 px-4 leading-relaxed">
-              {charId === 'kage'
-                ? 'Defenda o templo ao entardecer. Enfrente samurais, arqueiros e o temido Oni com armas ninjas lendárias.'
-                : 'Sobreviva ao apocalipse nas ruínas infestadas por infectados, cuspidores tóxicos e um Colosso voraz.'}
+              Defenda o templo ao entardecer. Enfrente samurais, arqueiros e o temido Oni com armas ninjas lendárias.
             </p>
 
             {bestScore > 0 && (
@@ -616,45 +626,29 @@ export default function App() {
               </p>
             )}
 
-            {/* Character Selection */}
-            <div className="flex gap-4 justify-center mb-6">
+            {/* The ninja: tapping the card (or Jogar) opens the Arsenal */}
+            <div className="flex flex-col items-center gap-3 mb-6">
               <button
                 onClick={() => handleCharSelect('kage')}
-                className={`char-card flex flex-col items-center gap-1.5 w-32 py-3 px-2 rounded-xl border-2 transition-all cursor-pointer ${
-                  charId === 'kage'
-                    ? 'on border-[var(--ember)] bg-[rgba(242,166,90,0.25)] shadow-[0_0_16px_rgba(242,166,90,0.4)] scale-105'
-                    : 'border-[rgba(239,230,210,0.2)] bg-[rgba(22,18,31,0.6)] opacity-70 hover:opacity-90'
-                }`}
+                className="char-card on flex items-center gap-3 w-64 py-3 px-4 rounded-xl border-2 border-[var(--ember)] bg-[rgba(242,166,90,0.2)] shadow-[0_0_16px_rgba(242,166,90,0.35)] transition-all cursor-pointer active:scale-95"
               >
-                <span className="font-serif text-3xl font-bold text-[var(--ember)] leading-tight">影</span>
                 <img
                   src={ICON_URLS.kage_portrait}
                   alt="Kage Ninja"
                   className="w-14 h-14 rounded-full border-2 border-[var(--torii)] object-cover shadow-md"
                 />
-                <span className="text-xs font-bold text-[var(--paper)]">Kage (Ninja)</span>
-                <span className="text-[10px] text-[var(--ember)] font-medium">
-                  {loadouts.kage.map((i) => WEAPONS_KAGE[i].name).join(' & ')}
+                <span className="flex flex-col items-start text-left">
+                  <span className="text-sm font-bold text-[var(--paper)]">Kage, o Shinobi</span>
+                  <span className="text-[11px] text-[var(--ember)] font-medium">
+                    {loadouts.kage.map((i) => WEAPONS_KAGE[i].name).join(' & ')}
+                  </span>
                 </span>
               </button>
               <button
-                onClick={() => handleCharSelect('bravo')}
-                className={`char-card flex flex-col items-center gap-1.5 w-32 py-3 px-2 rounded-xl border-2 transition-all cursor-pointer ${
-                  charId === 'bravo'
-                    ? 'on border-[var(--ember)] bg-[rgba(242,166,90,0.25)] shadow-[0_0_16px_rgba(242,166,90,0.4)] scale-105'
-                    : 'border-[rgba(239,230,210,0.2)] bg-[rgba(22,18,31,0.6)] opacity-70 hover:opacity-90'
-                }`}
+                onClick={() => handleCharSelect('kage')}
+                className="go-btn w-64 font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] py-3 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer"
               >
-                <span className="font-serif text-3xl font-bold text-[var(--ember)] leading-tight">兵</span>
-                <img
-                  src={ICON_URLS.bravo_portrait}
-                  alt="Bravo Soldier"
-                  className="w-14 h-14 rounded-full border-2 border-[#5a7848] object-cover shadow-md"
-                />
-                <span className="text-xs font-bold text-[var(--paper)]">Bravo (Soldier)</span>
-                <span className="text-[10px] text-[#8ab870] font-medium">
-                  {loadouts.bravo.map((i) => WEAPONS_BRAVO[i].name).join(' & ')}
-                </span>
+                Jogar
               </button>
             </div>
 
@@ -669,7 +663,6 @@ export default function App() {
               <div>• <b>No PC:</b> WASD para mover, Mouse para câmera, Clique para atacar, 1/2 ou Q/E para alternar as armas, Shift para esquiva.</div>
             </div>
 
-            <p className="text-xs text-[var(--paper)]/60">Toque em um personagem acima para escolher as armas</p>
           </div>
         </div>
       )}
@@ -685,7 +678,7 @@ export default function App() {
               >
                 <ChevronLeft className="w-4 h-4" /> Voltar
               </button>
-              <span className="text-xs font-bold text-[var(--paper)]/60">{charId === 'kage' ? 'Kage (Ninja)' : 'Bravo (Soldier)'}</span>
+              <span className="text-xs font-bold text-[var(--paper)]/60">Kage, o Shinobi</span>
             </div>
 
             <div className="text-center mb-4">
@@ -844,7 +837,7 @@ export default function App() {
         <div className="fixed inset-0 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 z-40">
           <div className="bg-[var(--ink)] border border-[rgba(239,230,210,0.3)] rounded-xl max-w-sm w-full p-5 shadow-2xl">
             <h3 className="font-serif text-lg font-bold text-[var(--ember)] mb-4 flex items-center gap-2">
-              <Settings className="w-5 h-5" /> Configurações de Rotação
+              <Settings className="w-5 h-5" /> Configurações
             </h3>
 
             <div className="space-y-4 text-xs text-[var(--paper)]">
@@ -887,6 +880,47 @@ export default function App() {
                 />
               </div>
 
+              <div className="py-1 border-t border-[rgba(239,230,210,0.1)]">
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="font-bold">Qualidade gráfica:</span>
+                  {qualitySetting === 'auto' && (
+                    <span className="text-[10px] text-[var(--paper)]/60">
+                      agora: {effectiveQuality === 'high' ? 'Alta' : effectiveQuality === 'medium' ? 'Média' : 'Baixa'}
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-4 gap-1">
+                  {(
+                    [
+                      ['auto', 'Auto'],
+                      ['high', 'Alta'],
+                      ['medium', 'Média'],
+                      ['low', 'Baixa']
+                    ] as [QualitySetting, string][]
+                  ).map(([q, label]) => (
+                    <button
+                      key={q}
+                      onClick={() => {
+                        setQualitySetting(q);
+                        qualityRef.current = q;
+                        engineRef.current?.setQuality(q);
+                        try {
+                          localStorage.setItem('kage_quality', q);
+                        } catch {}
+                      }}
+                      className={`py-1.5 rounded border text-[11px] font-bold cursor-pointer ${
+                        qualitySetting === q
+                          ? 'border-[var(--ember)] bg-[rgba(242,166,90,0.25)] text-[var(--paper)]'
+                          : 'border-[rgba(239,230,210,0.2)] text-[var(--paper)]/70'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-[var(--paper)]/50 mt-1">Auto reduz a qualidade se o jogo ficar lento.</p>
+              </div>
+
             </div>
 
             <button
@@ -900,7 +934,7 @@ export default function App() {
               onClick={handleBackToMenu}
               className="mt-2 w-full py-2.5 rounded-md border border-[rgba(239,230,210,0.3)] font-bold text-sm text-[var(--paper)] flex items-center justify-center gap-1.5 cursor-pointer active:scale-98"
             >
-              <RotateCcw className="w-4 h-4" /> Voltar para Seleção de Personagem
+              <RotateCcw className="w-4 h-4" /> Voltar ao Menu
             </button>
           </div>
         </div>

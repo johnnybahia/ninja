@@ -1,8 +1,9 @@
 import type * as THREE from 'three';
+import type { Ribbon } from './characters';
 
-export type CharacterId = 'kage' | 'bravo';
+export type CharacterId = 'kage';
 
-export type WeaponKind = 'melee' | 'chain' | 'proj' | 'bomb' | 'karate' | 'flame';
+export type WeaponKind = 'melee' | 'chain' | 'proj' | 'bomb' | 'karate';
 
 export interface WeaponDef {
   id: string;
@@ -17,16 +18,10 @@ export interface WeaponDef {
   anim?: string;
   dur?: number;
   stamina?: number;
-  stCost?: number;
   count?: number;
   spread?: number;
   speed?: number;
   pierce?: boolean;
-  gun?: boolean;
-  spin?: boolean;
-  cdBase?: number;
-  cdMin?: number;
-  rocket?: boolean;
   life?: number;
   pointMult?: number;
 }
@@ -61,24 +56,42 @@ export interface CharacterDef {
 
 export interface RigInstance {
   root: THREE.Group;
-  body: THREE.Group;
-  head: THREE.Group;
-  eye: THREE.Mesh | THREE.Object3D;
-  legL: THREE.Group;
-  legR: THREE.Group;
+  body: THREE.Object3D;
+  head: THREE.Object3D;
+  eye: THREE.Object3D;
+  legL: THREE.Object3D;
+  legR: THREE.Object3D;
   legBaseY: number;
-  armL: THREE.Group;
-  armR: THREE.Group;
+  armL: THREE.Object3D;
+  armR: THREE.Object3D;
   hand: THREE.Group;
   handL: THREE.Group;
   scarf: THREE.Object3D;
   tails?: THREE.Group;
   mats: THREE.Material[];
+  // articulated skeleton (characters.ts)
+  hips?: THREE.Object3D;
+  hipsRestY?: number;
+  spine?: THREE.Object3D;
+  chest?: THREE.Object3D;
+  neck?: THREE.Object3D;
+  foreL?: THREE.Object3D;
+  foreR?: THREE.Object3D;
+  handBoneL?: THREE.Object3D;
+  handBoneR?: THREE.Object3D;
+  shinL?: THREE.Object3D;
+  shinR?: THREE.Object3D;
+  footL?: THREE.Object3D;
+  footR?: THREE.Object3D;
+  plates?: THREE.Object3D[];
+  flash?: { value: number };
+  cloth?: Ribbon[];
+  kind?: 'ninja' | 'samurai' | 'archer' | 'oni';
+  dispose?: () => void;
 }
 
 export interface EnemyInstance {
   type: 'samurai' | 'archer' | 'boss';
-  isZ: boolean;
   hp: number;
   maxHp: number;
   speed: number;
@@ -113,6 +126,8 @@ export interface EnemyInstance {
   _wasExecutable?: boolean;
   hitLunge?: boolean;
   lungeYaw?: number;
+  anim?: { kind: string; t: number; dur: number; side: number };
+  shotPending?: boolean;
 }
 
 export interface ProjectileInstance {
@@ -129,7 +144,6 @@ export interface ProjectileInstance {
   mesh: THREE.Object3D;
   homing?: boolean;
   speed?: number;
-  gun?: boolean;
   sp?: boolean;
   ptMult?: number;
   bomb?: boolean;

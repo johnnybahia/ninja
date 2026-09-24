@@ -16,13 +16,16 @@ import {
   turnTo,
   rand,
   WEAPONS_KAGE,
-  WEAPONS_BRAVO,
   SPECIALS,
-  KARATE,
-  WORLD_PAL
+  KARATE
 } from './constants';
 import { sfx } from './audio';
-import { MAT, GEO, buildRig, buildZombieRig, buildPlayerRig, animateRig, makeWeapon, mesh } from './rigs';
+import { World } from './world';
+import { BladeTrail, ImpactPool, softDotTexture } from './vfx';
+import { PostFX, NINJA_LOOK, Quality, QualitySetting, qualityProfile, detectQuality } from './postfx';
+import { MAT, makeWeapon, mesh } from './rigs';
+import { buildCharacter } from './characters';
+import { animateCharacter, animateDeath } from './animation';
 
 // Scroll drop chance per kill for each loaded weapon (2 weapons -> 7.5% per kill).
 const SCROLL_RATE_PER_WEAPON = 0.0375;
@@ -55,6 +58,19 @@ function prdConstant(p: number): number {
   return hi;
 }
 
+// Blade span (local Z on the weapon mesh) swept by the melee trail
+const TRAIL_SPEC: Record<string, { base: number; tip: number; tint: THREE.Color }> = {
+  katana: { base: 0.25, tip: 1.45, tint: new THREE.Color(1.25, 1.4, 1.75) },
+  bo: { base: -0.95, tip: 1.55, tint: new THREE.Color(1.7, 1.25, 0.6) },
+  kama: { base: 0.3, tip: 0.62, tint: new THREE.Color(1.3, 1.55, 1.35) }
+};
+const TRAIL_SPECIAL = new THREE.Color(2.2, 1.6, 0.5);
+const IMPACT_NORMAL = new THREE.Color(2.2, 1.9, 1.5);
+const IMPACT_HEAVY = new THREE.Color(2.6, 1.7, 0.9);
+const IMPACT_CRIT = new THREE.Color(3.0, 2.2, 0.7);
+const IMPACT_HURT = new THREE.Color(2.6, 0.5, 0.35);
+const IMPACT_DODGE = new THREE.Color(1.2, 2.2, 2.6);
+
 export interface GameEngineCallbacks {
   onHpChange: (hp: number, maxHp: number) => void;
   onStaminaChange: (st: number, maxSt: number) => void;
@@ -65,6 +81,7 @@ export interface GameEngineCallbacks {
   onWeaponChange: (weaponIdx: number, weapon: WeaponDef) => void;
   onSpecialsUpdate: (specials: Record<number, number>) => void;
   onGameOver: (score: number, wave: number, level: number, kills: number, bestCombo: number) => void;
+  onQualityChange?: (setting: QualitySetting, effective: Quality) => void;
 }
 
 export class GameEngine {
@@ -83,15 +100,9 @@ export class GameEngine {
   private scene!: THREE.Scene;
   private camera!: THREE.PerspectiveCamera;
   private sun!: THREE.DirectionalLight;
-  private sunDisc!: THREE.Mesh;
-  private hemi!: THREE.HemisphereLight;
-  private ground!: THREE.Mesh;
+  private world!: World;
 
   private solids: { x: number; z: number; r: number; h: number }[] = [];
-  private occluders: THREE.Object3D[] = [];
-  private barrelsGroup = new THREE.Group();
-  private barrelPositions: { x: number; z: number; fire: THREE.Mesh }[] = [];
-  private doomActive = false;
 
   // Particles (Gerais: poeira, faíscas, fumaça, magia)
   private PN = 700;
@@ -166,13 +177,8 @@ export class GameEngine {
     special: {} as Record<number, number>,
     tornado: 0,
     torTick: 0,
-    rush: null as { t: number; hits: number; kicked: boolean; knife?: boolean } | null,
-    recoil: 0,
-    attackHeldT: 0,
-    suppress: 0,
-    suppressTick: 0,
-    gunHoldT: 0,
-    gloryCd: 0
+    rush: null as { t: number; hits: number; kicked: boolean } | null,
+    attackHeldT: 0
   };
 
   private slash!: THREE.Mesh;
@@ -201,6 +207,8 @@ export class GameEngine {
   public camYaw = Math.PI;
   public camPitch = 0.35;
   public camDist = 7.2;
+  // optional fixed camera distance (close-ups / cinematics); null = automatic
+  public camDistOverride: number | null = null;
   private shake = 0;
   private hitstop = 0;
   private spHit = false;
@@ -237,6 +245,24 @@ export class GameEngine {
 
   private tmpV = new THREE.Vector3();
   private tmpH = new THREE.Vector3();
+  private trailA = new THREE.Vector3();
+  private trailB = new THREE.Vector3();
+
+  // Rendering quality & post-processing
+  private fx: PostFX | null = null;
+  public qualitySetting: QualitySetting = 'auto';
+  public quality: Quality = 'high';
+  private fpsAcc = 0;
+  private fpsFrames = 0;
+  private slowWindows = 0;
+  private hurtFx = 0;
+  private trail!: BladeTrail;
+  private impacts!: ImpactPool;
+  private camTarget = new THREE.Vector3(0, 1.6, 5);
+  private fovKick = 0;
+  private baseFov = 60;
+  private prevYaw = Math.PI;
+  private desatFx = 0;
 
   constructor(canvas: HTMLCanvasElement, minimapCanvas: HTMLCanvasElement, callbacks: GameEngineCallbacks) {
     this.canvas = canvas;
@@ -248,7 +274,7 @@ export class GameEngine {
     this.initWorld();
     this.initPlayer();
     this.initSlashEffects();
-    this.applyTheme(false);
+    this.setQuality(this.qualitySetting);
 
     this.isRunning = true;
     this.clock.start();
@@ -268,36 +294,13 @@ export class GameEngine {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.info.autoReset = false;
 
     this.scene = new THREE.Scene();
-    const SKY = 0x3b2b4f;
-    this.scene.background = new THREE.Color(SKY);
-    this.scene.fog = new THREE.Fog(SKY, 30, 85);
-
-    this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 220);
-
-    this.hemi = new THREE.HemisphereLight(0xffd6b0, 0x2a2040, 0.78);
-    this.scene.add(this.hemi);
-
-    this.sun = new THREE.DirectionalLight(0xffb27a, 0.95);
-    this.sun.position.set(-30, 40, -25);
-    this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(1024, 1024);
-    Object.assign(this.sun.shadow.camera, { left: -45, right: 45, top: 45, bottom: -45, near: 1, far: 130 });
-    this.sun.shadow.bias = -0.0015;
-    this.scene.add(this.sun, this.sun.target);
-
-    // Rim / Fill light for specular highlights on metal and character silhouettes
-    const rimLight = new THREE.DirectionalLight(0x7590b8, 0.45);
-    rimLight.position.set(30, 25, 30);
-    this.scene.add(rimLight);
-
-    this.sunDisc = new THREE.Mesh(
-      new THREE.SphereGeometry(7, 20, 14),
-      new THREE.MeshBasicMaterial({ color: 0xffc98a, fog: false })
-    );
-    this.sunDisc.position.set(-80, 22, -120);
-    this.scene.add(this.sunDisc);
+    this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 420);
+    this.baseFov = this.camera.aspect < 1 ? 72 : 60;
+    this.camera.fov = this.baseFov;
+    this.camera.updateProjectionMatrix();
 
     // General Particle Buffer
     for (let i = 0; i < this.PN; i++) this.pPos[i * 3 + 1] = -999;
@@ -306,7 +309,9 @@ export class GameEngine {
     const points = new THREE.Points(
       this.pGeo,
       new THREE.PointsMaterial({
-        size: 0.24,
+        size: 0.3,
+        map: softDotTexture(),
+        color: new THREE.Color(2.2, 2.2, 2.2),
         vertexColors: true,
         transparent: true,
         depthWrite: false,
@@ -351,267 +356,17 @@ export class GameEngine {
     this.scene.add(this.bloodPoints);
   }
 
-  private addSolid(x: number, z: number, r: number, h: number) {
-    this.solids.push({ x, z, r, h });
-  }
-
   private initWorld() {
-    this.ground = mesh(new THREE.CircleGeometry(95, 48).rotateX(-Math.PI / 2), MAT.ground, false, true);
-    this.scene.add(this.ground);
-
-    const plaza = mesh(new THREE.CircleGeometry(13, 40).rotateX(-Math.PI / 2), MAT.stone, false, true);
-    plaza.position.y = 0.02;
-    this.scene.add(plaza);
-
-    const path = mesh(new THREE.BoxGeometry(3.2, 0.04, 12), MAT.stoneDark, false, true);
-    path.position.set(0, 0.02, -17);
-    this.scene.add(path);
-
-    // Temple
-    const tg = new THREE.Group();
-    tg.position.set(0, 0, -29);
-    const base = mesh(new THREE.BoxGeometry(16, 1.2, 11), MAT.stone, true, true);
-    base.position.y = 0.6;
-    tg.add(base);
-
-    const floor = mesh(new THREE.BoxGeometry(14, 0.3, 9), MAT.wood, true, true);
-    floor.position.y = 1.35;
-    tg.add(floor);
-
-    const pg = new THREE.CylinderGeometry(0.35, 0.35, 4.5, 10);
-    [-6, -2, 2, 6].forEach((x) => {
-      const p = mesh(pg, MAT.torii);
-      p.position.set(x, 3.75, 4.2);
-      tg.add(p);
-      this.occluders.push(p);
-    });
-
-    const wall = mesh(new THREE.BoxGeometry(13, 4.5, 0.4), MAT.wood);
-    wall.position.set(0, 3.75, -4);
-    tg.add(wall);
-
-    const sideG = new THREE.BoxGeometry(0.4, 4.5, 8);
-    [-6.5, 6.5].forEach((x) => {
-      const s = mesh(sideG, MAT.wood);
-      s.position.set(x, 3.75, 0);
-      tg.add(s);
-      this.occluders.push(s);
-    });
-
-    const roof = mesh(new THREE.ConeGeometry(12, 4.5, 4), MAT.roof);
-    roof.rotation.y = Math.PI / 4;
-    roof.scale.z = 0.78;
-    roof.position.y = 8.2;
-    tg.add(roof);
-
-    const eave = mesh(new THREE.BoxGeometry(17.5, 0.35, 12.5), MAT.roof);
-    eave.position.y = 6.05;
-    tg.add(eave);
-
-    this.scene.add(tg);
-    this.occluders.push(base, wall, roof, eave);
-    this.addSolid(-4, -29, 5.8, 10);
-    this.addSolid(4, -29, 5.8, 10);
-
-    // Torii Gate
-    const toriiG = new THREE.Group();
-    toriiG.position.set(0, 0, 17);
-    const toriiP = new THREE.CylinderGeometry(0.28, 0.32, 6, 10);
-    [-3.2, 3.2].forEach((x) => {
-      const p = mesh(toriiP, MAT.torii);
-      p.position.set(x, 3, 0);
-      toriiG.add(p);
-      this.occluders.push(p);
-      this.addSolid(x, 17, 0.55, 7);
-    });
-    const tTop = mesh(new THREE.BoxGeometry(9.2, 0.5, 0.7), MAT.dark);
-    tTop.position.y = 6.3;
-    toriiG.add(tTop);
-    const tTop2 = mesh(new THREE.BoxGeometry(8.4, 0.35, 0.5), MAT.torii);
-    tTop2.position.y = 5.9;
-    toriiG.add(tTop2);
-    const tMid = mesh(new THREE.BoxGeometry(7.4, 0.3, 0.4), MAT.torii);
-    tMid.position.y = 5;
-    toriiG.add(tMid);
-    this.scene.add(toriiG);
-
-    // Trees & Rocks
-    const trunkG = new THREE.CylinderGeometry(0.3, 0.42, 3.2, 7);
-    const pineG = new THREE.ConeGeometry(2.1, 5.2, 7);
-    const sakG = new THREE.IcosahedronGeometry(2.3, 0);
-
-    for (let i = 0; i < 26; i++) {
-      const a = (i / 26) * TAU + rand(0, 0.15);
-      const r = 30 + rand(0, 8);
-      const x = Math.sin(a) * r;
-      const z = Math.cos(a) * r;
-      if (z < -19 && Math.abs(x) < 13) continue;
-      if (z > 13 && Math.abs(x) < 6) continue;
-
-      const g = new THREE.Group();
-      g.position.set(x, 0, z);
-      const t = mesh(trunkG, MAT.trunk);
-      t.position.y = 1.6;
-      g.add(t);
-
-      const s = 0.8 + rand(0, 0.5);
-      const top = Math.random() < 0.4 ? mesh(sakG, MAT.sakura) : mesh(pineG, MAT.pine);
-      top.position.y = 4.8;
-      top.scale.setScalar(s);
-      g.add(top);
-
-      this.scene.add(g);
-      this.occluders.push(t, top);
-      this.addSolid(x, z, 0.9, 9);
-    }
-
-    // Japanese Stone Lanterns (Tōrō) along path and courtyard
-    const lanternPts = [
-      [-3.2, -6], [3.2, -6],
-      [-3.2, -14], [3.2, -14],
-      [-3.8, 12], [3.8, 12],
-      [-9, 0], [9, 0]
-    ];
-    lanternPts.forEach(([lx, lz]) => {
-      const lg = new THREE.Group();
-      lg.position.set(lx, 0, lz);
-      const lBase = mesh(new THREE.BoxGeometry(0.7, 0.35, 0.7), MAT.stone);
-      lBase.position.y = 0.175;
-      lg.add(lBase);
-      const lPillar = mesh(new THREE.CylinderGeometry(0.18, 0.22, 0.8, 8), MAT.stone);
-      lPillar.position.y = 0.75;
-      lg.add(lPillar);
-      const lShelf = mesh(new THREE.BoxGeometry(0.65, 0.15, 0.65), MAT.stone);
-      lShelf.position.y = 1.2;
-      lg.add(lShelf);
-      const lGlow = mesh(new THREE.BoxGeometry(0.45, 0.45, 0.45), MAT.glow);
-      lGlow.position.y = 1.48;
-      lg.add(lGlow);
-      const lRoof = mesh(new THREE.ConeGeometry(0.62, 0.35, 4), MAT.roof);
-      lRoof.rotation.y = Math.PI / 4;
-      lRoof.position.y = 1.88;
-      lg.add(lRoof);
-      this.scene.add(lg);
-      this.occluders.push(lBase, lRoof);
-      this.addSolid(lx, lz, 0.45, 2.2);
-    });
-
-    // Japanese War Banners (Sashimono)
-    const bannerPts = [
-      [-12, -22, 0.1], [12, -22, -0.1],
-      [-15, 8, 0.15], [15, 8, -0.15],
-      [-7, 22, 0.05], [7, 22, -0.05]
-    ];
-    bannerPts.forEach(([bx, bz, rotY]) => {
-      const bg = new THREE.Group();
-      bg.position.set(bx, 0, bz);
-      bg.rotation.y = rotY;
-      const pole = mesh(new THREE.CylinderGeometry(0.06, 0.08, 5.5, 8), MAT.woodDark);
-      pole.position.y = 2.75;
-      bg.add(pole);
-      const bar = mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.2, 6).rotateZ(Math.PI / 2), MAT.woodDark);
-      bar.position.set(0.55, 5.2, 0);
-      bg.add(bar);
-      const cloth = mesh(new THREE.BoxGeometry(1.0, 3.6, 0.02), MAT.crimson);
-      cloth.position.set(0.55, 3.3, 0);
-      bg.add(cloth);
-      const crest = mesh(new THREE.OctahedronGeometry(0.18, 0), MAT.gold);
-      crest.position.set(0.55, 4.0, 0.02);
-      bg.add(crest);
-      this.scene.add(bg);
-      this.addSolid(bx, bz, 0.3, 5.5);
-    });
-
-    // Zen Garden Mossy Stone Formations (Ishi)
-    const rockPts = [
-      [-10, -12, 1.1], [10, -12, 0.9],
-      [-8, 16, 0.85], [8, 16, 1.05],
-      [-16, -2, 1.3], [16, -2, 1.2],
-      [-5, -24, 0.95], [5, -24, 0.9]
-    ];
-    rockPts.forEach(([rx, rz, s]) => {
-      const rock = mesh(new THREE.DodecahedronGeometry(s, 1), MAT.stoneDark);
-      rock.position.set(rx, s * 0.4, rz);
-      rock.scale.set(1.2, 0.7, 1.1);
-      this.scene.add(rock);
-      this.occluders.push(rock);
-      this.addSolid(rx, rz, s * 0.9, s * 1.5);
-    });
-
-    // Sacred Temple Torches (Kagaribi) with flickering fire
-    const torchPts = [
-      [-5.5, -23], [5.5, -23],
-      [-2, 14], [2, 14]
-    ];
-    torchPts.forEach(([tx, tz]) => {
-      const tg = new THREE.Group();
-      tg.position.set(tx, 0, tz);
-      // Tripod wooden legs
-      for (let i = 0; i < 3; i++) {
-        const ang = (i / 3) * Math.PI * 2;
-        const leg = mesh(new THREE.CylinderGeometry(0.04, 0.04, 2.2, 6), MAT.woodDark);
-        leg.position.set(Math.sin(ang) * 0.28, 1.1, Math.cos(ang) * 0.28);
-        leg.rotation.x = Math.cos(ang) * 0.18;
-        leg.rotation.z = -Math.sin(ang) * 0.18;
-        tg.add(leg);
-      }
-      // Iron Fire Bowl
-      const bowl = mesh(new THREE.CylinderGeometry(0.35, 0.2, 0.25, 8), MAT.dark);
-      bowl.position.y = 2.15;
-      tg.add(bowl);
-      // Fire flame glow
-      const fire = new THREE.Mesh(
-        new THREE.ConeGeometry(0.22, 0.45, 8),
-        new THREE.MeshBasicMaterial({ color: 0xff7a18, transparent: true, opacity: 0.9, fog: false })
-      );
-      fire.position.y = 2.45;
-      tg.add(fire);
-      this.scene.add(tg);
-      this.addSolid(tx, tz, 0.35, 2.5);
-    });
-
-    // Doom Barrels
-    this.barrelsGroup.visible = false;
-    this.scene.add(this.barrelsGroup);
-    const bodyG = new THREE.CylinderGeometry(0.42, 0.46, 0.9, 10);
-    const rimG = new THREE.CylinderGeometry(0.44, 0.44, 0.06, 10);
-    const fireG = new THREE.CylinderGeometry(0.3, 0.1, 0.3, 8);
-    const rustM = new THREE.MeshLambertMaterial({ color: 0x3a2620 });
-    const rimM = new THREE.MeshLambertMaterial({ color: 0x1c1512 });
-    const fireM = new THREE.MeshBasicMaterial({ color: 0xff5a20, transparent: true, opacity: 0.85, fog: false });
-
-    const pts = [
-      [6, -6],
-      [-7, -3],
-      [9, 8],
-      [-9, 6],
-      [3, 20],
-      [-4, 22],
-      [11, -18],
-      [-12, -14]
-    ];
-    pts.forEach(([x, z]) => {
-      const g = new THREE.Group();
-      g.position.set(x, 0, z);
-      const b = mesh(bodyG, rustM);
-      b.position.y = 0.45;
-      g.add(b);
-      const r1 = mesh(rimG, rimM);
-      r1.position.y = 0.88;
-      g.add(r1);
-      const f = new THREE.Mesh(fireG, fireM);
-      f.position.y = 1.05;
-      g.add(f);
-      this.barrelsGroup.add(g);
-      this.barrelPositions.push({ x, z, fire: f });
-    });
+    this.world = new World(this.renderer, this.scene);
+    this.sun = this.world.sun;
+    this.solids = this.world.solids;
   }
 
   private initPlayer() {
-    this.player.rig = buildPlayerRig(this.charId);
+    this.player.rig = buildCharacter('ninja');
     this.scene.add(this.player.rig.root);
 
-    this.weapons = this.charId === 'kage' ? WEAPONS_KAGE : WEAPONS_BRAVO;
+    this.weapons = WEAPONS_KAGE;
     this.player.weaponMeshes = [];
     this.weapons.forEach((w) => {
       const m = makeWeapon(w.id);
@@ -623,6 +378,9 @@ export class GameEngine {
   }
 
   private initSlashEffects() {
+    this.trail = new BladeTrail(this.scene);
+    this.impacts = new ImpactPool(this.scene);
+
     this.slashGeos = {
       katana: new THREE.RingGeometry(1.1, 2.9, 24, 1, -Math.PI / 2 - 1.05, 2.1).rotateX(-Math.PI / 2),
       bo: new THREE.RingGeometry(1.6, 3.5, 40).rotateX(-Math.PI / 2),
@@ -630,7 +388,7 @@ export class GameEngine {
     };
 
     const slashMat = new THREE.MeshBasicMaterial({
-      color: 0xfff0d8,
+      color: new THREE.Color(0xfff0d8).multiplyScalar(1.8),
       transparent: true,
       side: THREE.DoubleSide,
       depthWrite: false,
@@ -642,8 +400,8 @@ export class GameEngine {
     this.buildReticle();
 
     this.chainLink = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.025, 0.025, 1, 4).rotateX(Math.PI / 2).translate(0, 0, 0.5),
-      MAT.metal
+      new THREE.CylinderGeometry(0.04, 0.04, 1, 6).rotateX(Math.PI / 2).translate(0, 0, 0.5),
+      new THREE.MeshStandardMaterial({ color: 0xc8ccd4, roughness: 0.3, metalness: 0.9, emissive: 0x2a2c30 })
     );
     this.chainTip = mesh(new THREE.BoxGeometry(0.03, 0.34, 0.08), MAT.metal);
     this.chainTip.scale.setScalar(1.6);
@@ -654,14 +412,14 @@ export class GameEngine {
 
   public setCharacter(id: CharacterId) {
     this.charId = id;
-    this.applyTheme(id === 'bravo');
     if (this.state === 'play') return;
 
     this.scene.remove(this.player.rig.root);
-    this.player.rig = buildPlayerRig(id);
+    this.player.rig.dispose?.();
+    this.player.rig = buildCharacter('ninja');
     this.scene.add(this.player.rig.root);
 
-    this.weapons = id === 'kage' ? WEAPONS_KAGE : WEAPONS_BRAVO;
+    this.weapons = WEAPONS_KAGE;
     this.player.weaponMeshes = [];
     this.weapons.forEach((w) => {
       const m = makeWeapon(w.id);
@@ -670,34 +428,6 @@ export class GameEngine {
       this.player.weaponMeshes.push(m);
     });
     this.setWeapon(0);
-  }
-
-  public applyTheme(isDoom: boolean) {
-    this.doomActive = isDoom;
-    const T = WORLD_PAL[isDoom ? 'doom' : 'ninja'];
-    this.scene.background = new THREE.Color(T.sky);
-    if (this.scene.fog && 'far' in this.scene.fog) {
-      this.scene.fog.color.set(T.sky);
-      (this.scene.fog as THREE.Fog).far = T.fogFar;
-    }
-    MAT.ground.color.set(T.ground);
-    MAT.stone.color.set(T.stone);
-    MAT.stoneDark.color.set(T.stoneDark);
-    MAT.wood.color.set(T.wood);
-    MAT.roof.color.set(T.roof);
-    MAT.torii.color.set(T.torii);
-    MAT.trunk.color.set(T.trunk);
-    MAT.pine.color.set(T.pine);
-    MAT.sakura.color.set(T.sakura);
-    MAT.glow.color.set(T.glow);
-
-    this.sun.color.set(T.sun);
-    this.sun.intensity = T.sunI;
-    (this.sunDisc.material as THREE.MeshBasicMaterial).color.set(T.sunDisc);
-    this.hemi.color.set(T.hemiSky);
-    this.hemi.groundColor.set(T.hemiGround);
-
-    this.barrelsGroup.visible = isDoom;
   }
 
   public setWeapon(idx: number) {
@@ -766,7 +496,6 @@ export class GameEngine {
     this.player.special = {};
     this.player.tornado = 0;
     this.player.rush = null;
-    this.player.suppress = 0;
     this.player.dash = 0;
     this.player.dashInv = false;
     this.attackQueueT = 0;
@@ -797,10 +526,9 @@ export class GameEngine {
     this.clearedShown = false;
     this.player.tookDamage = false;
 
-    const isZ = this.charId === 'bravo';
     const boss = this.wave % 4 === 0;
-    const nS = Math.min(isZ ? 13 : 9, (isZ ? 3 : 2) + this.wave);
-    const nA = Math.min(isZ ? 6 : 4, Math.floor(this.wave / 2) + (isZ ? 1 : 0));
+    const nS = Math.min(9, 2 + this.wave);
+    const nA = Math.min(4, Math.floor(this.wave / 2));
 
     const list: ('samurai' | 'archer' | 'boss')[] = [];
     for (let i = 0; i < nS; i++) list.push('samurai');
@@ -820,18 +548,13 @@ export class GameEngine {
       }
     });
 
-    const sub = boss
-      ? isZ
-        ? 'O colosso desperta'
-        : 'O oni despertou'
-      : `${nS} ${isZ ? 'infectados' : 'samurais'}${nA ? ` e ${nA} ${isZ ? 'cuspidores' : 'arqueiros'}` : ''}`;
+    const sub = boss ? 'O oni despertou' : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
     this.callbacks.onWaveChange(this.wave, `Onda ${this.wave}`, sub);
     sfx.wave();
   }
 
   private spawnEnemy(type: 'samurai' | 'archer' | 'boss', x: number, z: number) {
     const hpMul = 1 + (this.wave - 1) * 0.15;
-    const isZ = this.charId === 'bravo';
     let rig: RigInstance;
     let hp = 60;
     let speed = 3.7;
@@ -839,42 +562,19 @@ export class GameEngine {
     let h = 2.5;
 
     if (type === 'samurai') {
-      rig = isZ
-        ? buildZombieRig({ cloth: 0x3c4230, skin: 0x7c9159, hunch: 0.34 })
-        : buildRig({ cloth: 0x7d2a2a, band: 0x1c1a22, skin: 0xd9a577 });
-      if (!isZ) {
-        const hMesh = mesh(GEO.helmet, MAT.dark);
-        hMesh.position.y = 0.26;
-        rig.head.add(hMesh);
-        rig.hand.add(makeWeapon('katana'));
-      }
-      hp = (isZ ? 46 : 60) * hpMul;
-      speed = isZ ? 3.0 : 3.7;
+      rig = buildCharacter('samurai');
+      rig.hand.add(makeWeapon('katana'));
+      hp = 60 * hpMul;
+      speed = 3.7;
     } else if (type === 'archer') {
-      rig = isZ
-        ? buildZombieRig({ cloth: 0x4a3d55, skin: 0x8aa060, hunch: 0.22, eye: 0x8fff5a })
-        : buildRig({ cloth: 0x3d5640, band: 0xb89a5a, skin: 0xd9a577 });
-      if (!isZ) rig.handL.add(makeWeapon('bow'));
-      hp = (isZ ? 34 : 40) * hpMul;
-      speed = isZ ? 2.8 : 3.3;
+      rig = buildCharacter('archer');
+      rig.handL.add(makeWeapon('bow'));
+      hp = 40 * hpMul;
+      speed = 3.3;
     } else {
-      rig = isZ
-        ? buildZombieRig({
-            cloth: 0x2e3a20,
-            skin: 0x5a6b3f,
-            scale: 2.1,
-            hunch: 0.16,
-            eye: 0xc8ff6a,
-            armBend: -0.2,
-            armTwist: 0.1
-          })
-        : buildRig({ cloth: 0x3a1414, band: 0xd4a24c, skin: 0xb03a2e, scale: 2.1 });
-      if (isZ) {
-        rig.hand.add(makeWeapon('club'));
-      } else {
-        rig.hand.add(makeWeapon('kanabo'));
-      }
-      hp = (isZ ? 400 : 480) * hpMul;
+      rig = buildCharacter('oni', 2.1);
+      rig.hand.add(makeWeapon('kanabo'));
+      hp = 480 * hpMul;
       speed = 3.1;
       r = 1.1;
       h = 5.2;
@@ -900,7 +600,6 @@ export class GameEngine {
 
     const enemy: EnemyInstance = {
       type,
-      isZ,
       hp,
       maxHp: hp,
       speed,
@@ -951,7 +650,7 @@ export class GameEngine {
     this.scene.remove(e.rig.root);
     this.scene.remove(e.bar);
     if (e.tele) this.scene.remove(e.tele);
-    e.rig.mats.forEach((m) => m.dispose());
+    e.rig.dispose?.();
   }
 
   private emitParticles(
@@ -1090,7 +789,7 @@ export class GameEngine {
     this.rings.push({ m, t: 0, dur, maxR, startR: 0.2 });
   }
 
-  // AoE burst for bomb-flagged projectiles (grenades, bazooka rockets). Damage falls
+  // AoE burst for bomb-flagged projectiles (grenades). Damage falls
   // off with distance from the blast center; the player's own explosives never hurt them.
   private explodeAt(x: number, y: number, z: number, radius: number, dmg: number, kb: number) {
     for (const e of this.enemies) {
@@ -1285,17 +984,16 @@ export class GameEngine {
 
   private updateReticle(dt: number) {
     const w = this.weapons[this.activeWeaponIdx];
-    const straight = w && (w.kind === 'proj' || w.kind === 'flame' || !!w.rocket);
+    const straight = w && w.kind === 'proj';
     if (!straight || this.player.hp <= 0) {
       this.reticle.visible = false;
       return;
     }
     const fx = Math.sin(this.player.yaw);
     const fz = Math.cos(this.player.yaw);
-    const reach =
-      w.kind === 'flame' ? w.range || 4.6 : Math.min(18, (w.rocket ? 26 : w.speed || 30) * (w.rocket ? 2.2 : w.life || 1.2));
+    const reach = Math.min(18, (w.speed || 30) * (w.life || 1.2));
     const n = w.count || 1;
-    const halfSpread = ((n - 1) / 2) * (w.spread || 0) + (w.kind === 'flame' ? (w.arc || 1.3) / 2 : 0);
+    const halfSpread = ((n - 1) / 2) * (w.spread || 0);
 
     // Nearest enemy inside the line of fire (feedback only; the shot direction is unchanged)
     let lock: EnemyInstance | null = null;
@@ -1384,7 +1082,6 @@ export class GameEngine {
     this.player.comboT = 0;
     this.player.tornado = 0;
     this.player.rush = null;
-    this.player.suppress = 0;
 
     if (this.lastMove.lengthSq() > 0.01 && this.player.moveAmt > 0.1) {
       this.player.dashDir.copy(this.lastMove).normalize();
@@ -1392,6 +1089,7 @@ export class GameEngine {
       this.player.dashDir.set(Math.sin(this.player.yaw), 0, Math.cos(this.player.yaw));
     }
     this.player.yaw = Math.atan2(this.player.dashDir.x, this.player.dashDir.z);
+    this.fovKick = Math.max(this.fovKick, 7);
     sfx.dash();
   }
 
@@ -1453,11 +1151,7 @@ export class GameEngine {
       this.player.comboT = 0.75;
     }
     const heavy = step === 2 || w.id === 'bo';
-    if (!w.gun) {
-      this.player.anim = { kind: w.anim || 'slash', t: 0, dur: w.dur || 0.2, side: step };
-    } else {
-      this.player.anim = { kind: 'shoot', t: 0, dur: Math.min(w.cd, 0.16), side: 0 };
-    }
+    this.player.anim = { kind: w.anim || 'slash', t: 0, dur: w.dur || 0.2, side: step };
     this.player.atkCd = w.cd + (step === 2 ? 0.15 : 0);
     this.ptMult = w.pointMult || 1;
 
@@ -1480,11 +1174,10 @@ export class GameEngine {
     } else if (w.kind === 'proj') {
       const n = w.count || 1;
       for (let i = 0; i < n; i++) {
-        const a = this.player.yaw + (i - (n - 1) / 2) * (w.spread || 0) + (w.gun ? rand(-0.03, 0.03) : 0);
+        const a = this.player.yaw + (i - (n - 1) / 2) * (w.spread || 0);
         this.spawnProj({
-          type: w.gun ? 'tracer' : w.id,
+          type: w.id,
           friendly: true,
-          gun: !!w.gun,
           ptMult: w.pointMult || 1,
           pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
           vel: new THREE.Vector3(Math.sin(a) * (w.speed || 30), 0, Math.cos(a) * (w.speed || 30)),
@@ -1493,52 +1186,19 @@ export class GameEngine {
           life: w.life || 1.2
         });
       }
-      if (w.gun) {
-        this.emitParticles(this.tmpH.x, this.tmpH.y, this.tmpH.z, w.id === 'shotgun' ? 14 : 6, 0xffe3a0, 3.5, 1, 6, 0.16);
-        this.player.recoil = 0.12;
-        if (w.id === 'shotgun') sfx.shotgun();
-        else if (w.id === 'rifle') sfx.rifle();
-        else if (w.id === 'minigun') sfx.minigun();
-        else sfx.pistol();
-      } else {
-        sfx.throw();
-      }
+      sfx.throw();
     } else if (w.kind === 'bomb') {
-      if (w.rocket) {
-        this.spawnProj({
-          type: 'tracer',
-          gun: true,
-          ptMult: w.pointMult || 1,
-          friendly: true,
-          bomb: true,
-          pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-          vel: new THREE.Vector3(fx * 26, 0, fz * 26),
-          dmg: w.dmg[0],
-          life: 2.2
-        });
-        this.player.recoil = 0.2;
-        sfx.bazooka();
-      } else {
-        this.spawnProj({
-          type: 'bomb',
-          friendly: true,
-          pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-          vel: new THREE.Vector3(fx * 14, 7.5, fz * 14),
-          grav: 16,
-          dmg: w.dmg[0],
-          life: 3,
-          bomb: true
-        });
-        sfx.throw();
-      }
-    } else if (w.kind === 'flame') {
-      this.meleeHit(w.range || 4.6, w.arc || 1.3, w.dmg[0], 1, false);
-      for (let i = 0; i < 4; i++) {
-        const a = this.player.yaw + rand(-0.35, 0.35);
-        const d = rand(0.5, w.range || 4.6);
-        this.emitParticles(this.tmpH.x + Math.sin(a) * d, this.tmpH.y, this.tmpH.z + Math.cos(a) * d, 2, 0xff7a2e, 1.5, 1.2, 3, 0.3);
-      }
-      sfx.flame();
+      this.spawnProj({
+        type: 'bomb',
+        friendly: true,
+        pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
+        vel: new THREE.Vector3(fx * 14, 7.5, fz * 14),
+        grav: 16,
+        dmg: w.dmg[0],
+        life: 3,
+        bomb: true
+      });
+      sfx.throw();
     }
   }
 
@@ -1546,6 +1206,7 @@ export class GameEngine {
     const S = SPECIALS[w.id];
     if (!S) return;
     this.player.atkCd = S.cd;
+    this.fovKick = Math.min(this.fovKick, -4);
     const fx = Math.sin(this.player.yaw);
     const fz = Math.cos(this.player.yaw);
     this.player.rig.root.updateMatrixWorld(true);
@@ -1653,152 +1314,6 @@ export class GameEngine {
         sfx.throw();
         break;
       }
-      case 'knife':
-        // Retalho Relâmpago: one wide, hard slash rather than the default gunfire
-        this.player.anim = { kind: 'slash', t: 0, dur: 0.22, side: 0 };
-        this.slash.geometry = this.slashGeos.katana;
-        this.slashT = 0;
-        this.slashDur = 0.18;
-        this.spHit = true;
-        this.meleeHit(2.6, 2.6, 64, 7, true);
-        this.spHit = false;
-        sfx.heavy();
-        break;
-      case 'pistol':
-        // Duplo Cano: two precise, piercing high-damage shots instead of a weak spread
-        for (let i = 0; i < 2; i++) {
-          this.spawnProj({
-            type: 'tracer',
-            gun: true,
-            sp: true,
-            friendly: true,
-            pierce: true,
-            pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-            vel: new THREE.Vector3(fx * 60, 0, fz * 60),
-            dmg: 31,
-            life: 0.9
-          });
-        }
-        this.player.recoil = 0.16;
-        sfx.pistol();
-        break;
-      case 'shotgun':
-        // Rajada Dupla: two full pellet blasts back to back
-        for (let blast = 0; blast < 2; blast++) {
-          for (let i = 0; i < (w.count || 7); i++) {
-            const a =
-              this.player.yaw + (i - ((w.count || 7) - 1) / 2) * (w.spread || 0.32) + rand(-0.02, 0.02);
-            this.spawnProj({
-              type: 'tracer',
-              gun: true,
-              sp: true,
-              friendly: true,
-              pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-              vel: new THREE.Vector3(Math.sin(a) * (w.speed || 40), 0, Math.cos(a) * (w.speed || 40)),
-              dmg: w.dmg[0] || 8,
-              life: w.life || 0.22
-            });
-          }
-        }
-        this.player.recoil = 0.22;
-        sfx.shotgun();
-        break;
-      case 'rifle':
-        // Fogo Supressivo: a big rapid burst, not the same 5 shots every other gun gets
-        for (let i = 0; i < 14; i++) {
-          const a = this.player.yaw + rand(-0.05, 0.05);
-          this.spawnProj({
-            type: 'tracer',
-            gun: true,
-            sp: true,
-            friendly: true,
-            pierce: true,
-            pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-            vel: new THREE.Vector3(Math.sin(a) * 58, 0, Math.cos(a) * 58),
-            dmg: 11,
-            life: 1.1
-          });
-        }
-        this.player.recoil = 0.15;
-        sfx.rifle();
-        break;
-      case 'flame':
-        // Parede de Fogo: a wide fire AoE — the default gunfire made zero sense on a flamethrower
-        this.meleeHit((w.range || 4.6) * 1.5, TAU * 0.6, 52, 2, false);
-        for (let i = 0; i < 16; i++) {
-          const a = this.player.yaw + rand(-1.0, 1.0);
-          const d = rand(1, (w.range || 4.6) * 1.4);
-          this.emitParticles(
-            this.tmpH.x + Math.sin(a) * d,
-            this.tmpH.y,
-            this.tmpH.z + Math.cos(a) * d,
-            3,
-            0xff7a2e,
-            2,
-            1.5,
-            4,
-            0.4
-          );
-        }
-        sfx.flame();
-        break;
-      case 'minigun':
-        // Chuva de Chumbo: a much wider, denser spray than the generic burst
-        for (let i = 0; i < 28; i++) {
-          const a = this.player.yaw + rand(-0.12, 0.12);
-          this.spawnProj({
-            type: 'tracer',
-            gun: true,
-            sp: true,
-            friendly: true,
-            pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-            vel: new THREE.Vector3(Math.sin(a) * 62, 0, Math.cos(a) * 62),
-            dmg: 10,
-            life: 1.0
-          });
-        }
-        this.player.recoil = 0.18;
-        sfx.minigun();
-        break;
-      case 'bazooka':
-        // Bombardeio Aéreo: a volley of explosive rockets instead of a handful of bullets
-        for (let i = 0; i < 3; i++) {
-          const a = this.player.yaw + (i - 1) * 0.18;
-          this.spawnProj({
-            type: 'tracer',
-            gun: true,
-            sp: true,
-            friendly: true,
-            bomb: true,
-            pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-            vel: new THREE.Vector3(Math.sin(a) * 26, 0, Math.cos(a) * 26),
-            dmg: 70,
-            aoeR: 4.5,
-            kb: 10,
-            life: 2.2
-          });
-        }
-        this.player.recoil = 0.3;
-        sfx.bazooka();
-        break;
-      default:
-        // Firearms default burst
-        for (let i = -2; i <= 2; i++) {
-          const a = this.player.yaw + i * 0.08;
-          this.spawnProj({
-            type: 'tracer',
-            gun: true,
-            sp: true,
-            friendly: true,
-            pierce: true,
-            pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-            vel: new THREE.Vector3(Math.sin(a) * 60, 0, Math.cos(a) * 60),
-            dmg: 24,
-            life: 0.9
-          });
-        }
-        sfx.pistol();
-        break;
     }
   }
 
@@ -1841,6 +1356,16 @@ export class GameEngine {
     dmg = rolled.dmg;
     e.hp -= dmg;
     e.flash = 0.14;
+    {
+      const nl = Math.hypot(nx, nz) || 1;
+      const sc = e.rig.root.scale.x;
+      this.tmpV.set(e.pos.x - (nx / nl) * e.r * 0.7, e.pos.y + 1.25 * sc, e.pos.z - (nz / nl) * e.r * 0.7);
+      const crit = rolled.tier === 'crit';
+      const size = (crit ? 1.9 : heavy ? 1.55 : 1.1) * (e.type === 'boss' ? 1.4 : 1);
+      this.impacts.spawn(this.tmpV, crit ? IMPACT_CRIT : heavy ? IMPACT_HEAVY : IMPACT_NORMAL, size);
+      this.emitParticles(this.tmpV.x, this.tmpV.y, this.tmpV.z, crit ? 16 : 9, 0xffd49a, 7, 1.5, 16, 0.24);
+      if (crit || heavy) this.fovKick = Math.min(this.fovKick, -3);
+    }
 
     const labelY = e.pos.y + (e.type === 'boss' ? 5.6 : 2.9);
     const labelColor = rolled.tier === 'crit' ? '#ffd166' : rolled.tier === 'weak' ? '#b9b0c8' : '#efe6d2';
@@ -2043,6 +1568,8 @@ export class GameEngine {
     dmg = rolled.dmg;
     this.player.hp = Math.max(0, this.player.hp - dmg);
     this.player.inv = 0.6;
+    this.hurtFx = 1;
+    this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.3, this.player.pos.z), IMPACT_HURT, 1.4, 0.18);
     this.player.dashInv = false;
     this.player.killCombo = 0;
     this.player.hitCombo = 0;
@@ -2094,6 +1621,8 @@ export class GameEngine {
           perfect ? 1.55 : 1.1
         );
         this.triggerSlowmo(perfect ? 0.5 : 0.22, perfect ? 0.22 : 0.42);
+        this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.2, this.player.pos.z), IMPACT_DODGE, perfect ? 2.4 : 1.6, 0.3);
+        this.fovKick = perfect ? -5 : -2.5;
         if (perfect) {
           this.player.st = Math.min(this.player.maxSt, this.player.st + 18);
           this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
@@ -2124,7 +1653,6 @@ export class GameEngine {
       life: o.life,
       mesh: m,
       pierce: o.pierce,
-      gun: o.gun,
       sp: o.sp,
       ptMult: o.ptMult,
       bomb: o.bomb,
@@ -2223,7 +1751,7 @@ export class GameEngine {
       this.player.dash -= dt;
       this.player.pos.addScaledVector(this.player.dashDir, 23 * dt);
       this.player.vel.set(0, 0, 0);
-      this.emitParticles(this.player.pos.x, this.player.pos.y + 1, this.player.pos.z, 3, 0x7a5cc8, 0.6, 0, 0, 0.35);
+      this.emitParticles(this.player.pos.x, this.player.pos.y + 0.9, this.player.pos.z, 3, 0x8a86c8, 0.7, 0.2, 0, 0.4);
     } else {
       const penalty = this.player.anim ? 0.6 : this.player.tornado > 0 ? 0.55 : 1;
       const maxSp = 7.6 * penalty;
@@ -2352,14 +1880,22 @@ export class GameEngine {
 
     // Animation updates
     this.player.phase += dt * 11 * this.player.moveAmt;
-    animateRig(
-      this.player.rig,
-      this.player.moveAmt,
-      this.player.phase,
-      !this.player.grounded,
-      this.time,
-      this.player.anim
-    );
+    const yawRate = dt > 0 ? wrap(this.player.yaw - this.prevYaw) / dt : 0;
+    this.prevYaw = this.player.yaw;
+    if (this.player.rig.flash) this.player.rig.flash.value = this.hurtFx * this.hurtFx * 0.35;
+    animateCharacter(this.player.rig, {
+      moveAmt: this.player.moveAmt,
+      phase: this.player.phase,
+      air: !this.player.grounded,
+      t: this.time,
+      dt,
+      anim: this.player.anim,
+      weapon: this.weapons[this.activeWeaponIdx]?.id,
+      dash: this.player.dash > 0,
+      turn: yawRate,
+      hit: this.hurtFx * 0.8
+    });
+    this.updateBladeTrail();
 
     this.player.rig.root.position.copy(this.player.pos);
     this.player.rig.root.rotation.y = this.player.yaw;
@@ -2367,7 +1903,19 @@ export class GameEngine {
   }
 
   private updateCamera(dt: number) {
-    const camTarget = new THREE.Vector3(this.player.pos.x, this.player.pos.y + 1.6, this.player.pos.z);
+    // soft follow: the frame trails the player slightly, which reads as weight
+    const kx = 1 - Math.exp(-14 * dt);
+    const ky = 1 - Math.exp(-9 * dt);
+    this.camTarget.x += (this.player.pos.x - this.camTarget.x) * kx;
+    this.camTarget.z += (this.player.pos.z - this.camTarget.z) * kx;
+    this.camTarget.y += (this.player.pos.y + 1.6 - this.camTarget.y) * ky;
+    const camTarget = this.camTarget;
+    this.fovKick *= Math.exp(-5 * dt);
+    const fov = this.baseFov + this.fovKick;
+    if (Math.abs(this.camera.fov - fov) > 0.01) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
     const cp = Math.cos(this.camPitch);
     const camDir = new THREE.Vector3(
       Math.sin(this.camYaw) * cp,
@@ -2375,7 +1923,7 @@ export class GameEngine {
       Math.cos(this.camYaw) * cp
     );
 
-    let want = this.camera.aspect < 1 ? 10.5 : 7.2;
+    const want = this.camDistOverride ?? (this.camera.aspect < 1 ? 10.5 : 7.2);
     this.camDist += (want - this.camDist) * Math.min(1, dt * 8);
 
     this.camera.position.copy(camTarget).addScaledVector(camDir, this.camDist);
@@ -2392,8 +1940,9 @@ export class GameEngine {
       const e = this.enemies[i];
       if (e.dead) {
         e.deathT += dt;
-        e.rig.body.rotation.x = -Math.min(Math.PI / 2, e.deathT * 5);
-        e.rig.root.position.y = -Math.max(0, e.deathT - 0.7) * 1.4;
+        if (e.rig.flash) e.rig.flash.value = Math.max(0, 0.6 - e.deathT * 2);
+        animateDeath(e.rig, e.deathT, dt);
+        e.rig.root.position.y = -Math.max(0, e.deathT - 0.8) * 1.4;
         if (e.deathT > 1.8) {
           this.removeEnemy(e);
           this.enemies.splice(i, 1);
@@ -2430,6 +1979,7 @@ export class GameEngine {
             if (e.tele) e.tele.visible = false;
             e.cd = 1.4;
             const dNow = Math.hypot(this.player.pos.x - e.pos.x, this.player.pos.z - e.pos.z);
+            e.anim = { kind: 'eslash', t: 0, dur: 0.42, side: 0 };
             if (dNow <= 2.1) this.resolveEnemyMeleeHit(12, nx, nz);
           }
         } else if (d > 1.8) {
@@ -2456,10 +2006,16 @@ export class GameEngine {
           mvx = nx;
           mvz = nz;
           spd = e.speed;
-        } else if (e.cd <= 0) {
+        } else if (e.cd <= 0 && !e.anim) {
+          // draw the bow first (readable telegraph), release partway through
           e.cd = 2.4;
+          e.anim = { kind: 'eshoot', t: 0, dur: 0.75, side: 0 };
+          e.shotPending = true;
+        }
+        if (e.shotPending && e.anim && e.anim.t >= 0.45) {
+          e.shotPending = false;
           this.spawnProj({
-            type: e.isZ ? 'spit' : 'arrow',
+            type: 'arrow',
             friendly: false,
             pos: new THREE.Vector3(e.pos.x + nx * 0.6, 1.5, e.pos.z + nz * 0.6),
             vel: new THREE.Vector3(nx * 22, 0, nz * 22),
@@ -2484,6 +2040,7 @@ export class GameEngine {
             if (e.tele) e.tele.visible = false;
             e.cd = 2.0;
             const dNow = Math.hypot(this.player.pos.x - e.pos.x, this.player.pos.z - e.pos.z);
+            e.anim = { kind: 'esmash', t: 0, dur: 0.55, side: 0 };
             if (dNow <= 3.6) {
               this.resolveEnemyMeleeHit(24, nx, nz);
               sfx.boom();
@@ -2514,7 +2071,24 @@ export class GameEngine {
       const moving = spd > 0 ? Math.min(1, spd / e.speed) : 0;
       e.moveAmt += (moving - e.moveAmt) * Math.min(1, dt * 8);
       e.phase += dt * 10 * e.moveAmt;
-      animateRig(e.rig, e.moveAmt, e.phase, false, this.time + i);
+      if (e.anim) {
+        e.anim.t += dt;
+        if (e.anim.t >= e.anim.dur) e.anim = undefined;
+      }
+      const wind =
+        e.windup && e.windup > 0 ? 1 - e.windup / (e.type === 'boss' ? 0.55 : 0.42) : 0;
+      const hitK = Math.max(0, e.flash) / 0.14;
+      if (e.rig.flash) e.rig.flash.value = hitK * hitK;
+      animateCharacter(e.rig, {
+        moveAmt: e.moveAmt,
+        phase: e.phase,
+        air: false,
+        t: this.time + i * 1.7,
+        dt,
+        anim: e.anim,
+        windup: wind,
+        hit: hitK
+      });
 
       e.rig.root.position.copy(e.pos);
       e.rig.root.rotation.y = e.yaw;
@@ -2533,6 +2107,16 @@ export class GameEngine {
       if (p.grav) p.vel.y -= p.grav * dt;
       p.pos.addScaledVector(p.vel, dt);
       p.mesh.position.copy(p.pos);
+      if (p.type === 'kunai' || p.type === 'arrow') {
+        p.mesh.lookAt(this.tmpV.copy(p.pos).add(p.vel));
+      } else if (p.type === 'shuriken') {
+        p.mesh.rotation.y += dt * 24;
+      } else if (p.type === 'bomb') {
+        p.mesh.rotation.x += dt * 7;
+        p.mesh.rotation.z += dt * 4;
+      } else if (p.type === 'wave') {
+        p.mesh.rotation.y = Math.atan2(p.vel.x, p.vel.z) + Math.PI;
+      }
 
       let dead = p.life <= 0 || Math.hypot(p.pos.x, p.pos.z) > 55;
       let exploded = false;
@@ -2672,8 +2256,10 @@ export class GameEngine {
 
   public resize() {
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+    this.fx?.setSize(window.innerWidth, window.innerHeight);
     this.camera.aspect = window.innerWidth / window.innerHeight;
-    this.camera.fov = this.camera.aspect < 1 ? 72 : 60;
+    this.baseFov = this.camera.aspect < 1 ? 72 : 60;
+    this.camera.fov = this.baseFov + this.fovKick;
     this.camera.updateProjectionMatrix();
   }
 
@@ -2681,7 +2267,7 @@ export class GameEngine {
     this.reqId = requestAnimationFrame(this.loop);
     const real = Math.min(this.clock.getDelta(), 0.05);
     if (this.paused && this.state === 'play') {
-      this.renderer.render(this.scene, this.camera);
+      this.render();
       return;
     }
     let dt = real;
@@ -2720,21 +2306,137 @@ export class GameEngine {
       this.reticle.visible = false;
       this.camYaw += real * 0.12;
       this.player.phase += real * 2;
-      animateRig(this.player.rig, 0, this.player.phase, false, this.time, null);
+      animateCharacter(this.player.rig, {
+        moveAmt: 0,
+        phase: this.player.phase,
+        air: false,
+        t: this.time,
+        dt: real,
+        weapon: this.weapons[this.activeWeaponIdx]?.id
+      });
       this.player.rig.root.position.copy(this.player.pos);
       this.player.rig.root.rotation.y = this.player.yaw;
     }
 
     this.updateParticles(dt);
+    this.impacts.update(dt);
+    this.updateChain(dt);
     this.updateLabels(dt);
     this.updateCamera(real);
 
-    this.sun.position.set(this.player.pos.x - 30, 40, this.player.pos.z - 25);
-    this.sun.target.position.set(this.player.pos.x, 0, this.player.pos.z);
+    this.world.update(dt, this.time, this.player.pos, this.camera.position);
 
-    this.renderer.render(this.scene, this.camera);
+    this.updateFx(real);
+    this.render();
     this.drawMinimap();
   };
+
+  // Kusarigama chain: shoots out from the hand to full reach and snaps back; during the
+  // special it whirls around the player
+  private updateChain(dt: number) {
+    const striking = this.chainT < 0.36;
+    const spinning = this.chainSpin > 0;
+    if (!striking && !spinning) {
+      this.chain.visible = false;
+      return;
+    }
+    this.chainT += dt;
+    if (spinning) this.chainSpin = Math.max(0, this.chainSpin - dt);
+    this.player.rig.root.updateMatrixWorld(true);
+    this.player.rig.hand.getWorldPosition(this.tmpH);
+    let yaw = this.player.yaw;
+    let len: number;
+    if (spinning) {
+      yaw += (0.45 - this.chainSpin) * Math.PI * 4.4;
+      len = 6.5;
+    } else {
+      const t = this.chainT;
+      len = 6.5 * (t < 0.14 ? t / 0.14 : Math.max(0, 1 - (t - 0.14) / 0.22));
+    }
+    this.chain.visible = len > 0.05;
+    this.chain.position.copy(this.tmpH);
+    this.chain.rotation.set(0, yaw, 0);
+    this.chainLink.scale.set(1, 1, len);
+    this.chainTip.position.set(0, 0, len);
+    this.chainTip.rotation.set(0, 0, this.time * 20);
+  }
+
+  private updateBladeTrail() {
+    const w = this.weapons[this.activeWeaponIdx];
+    const spec = w && TRAIL_SPEC[w.id];
+    if (spec && (this.player.anim || this.player.tornado > 0)) {
+      const m = this.player.weaponMeshes[this.activeWeaponIdx];
+      this.player.rig.root.updateMatrixWorld(true);
+      m.localToWorld(this.trailA.set(0, 0, spec.base));
+      m.localToWorld(this.trailB.set(0, 0, spec.tip));
+      this.trail.setTint(this.player.special[this.activeWeaponIdx] > 0 ? TRAIL_SPECIAL : spec.tint);
+      this.trail.push(this.trailA, this.trailB, this.time);
+    }
+    this.trail.update(this.time);
+  }
+
+  private render() {
+    this.renderer.info.reset();
+    if (this.fx) this.fx.render();
+    else this.renderer.render(this.scene, this.camera);
+  }
+
+  // Grade uniforms driven by gameplay: desaturate in slow motion, red edge pulse on hits
+  // (plus a faint persistent one at low health). Also watches frame rate for 'auto'.
+  private updateFx(real: number) {
+    this.hurtFx = Math.max(0, this.hurtFx - real * 2.2);
+    const low = this.state === 'play' && this.player.hp > 0 && this.player.hp / this.player.maxHp < 0.3 ? 0.35 + Math.sin(this.time * 5) * 0.1 : 0;
+    const wantDesat = this.slowmoT > 0 ? 1 : 0;
+    this.desatFx += (wantDesat - this.desatFx) * Math.min(1, real * 10);
+    if (this.fx) this.fx.update(this.time, this.desatFx, Math.max(this.hurtFx, low));
+
+    if (this.qualitySetting !== 'auto' || this.state !== 'play' || this.quality === 'low') return;
+    this.fpsAcc += real;
+    this.fpsFrames++;
+    if (this.fpsAcc >= 4) {
+      const fps = this.fpsFrames / this.fpsAcc;
+      this.fpsAcc = 0;
+      this.fpsFrames = 0;
+      this.slowWindows = fps < 38 ? this.slowWindows + 1 : 0;
+      if (this.slowWindows >= 2) {
+        this.slowWindows = 0;
+        this.applyQuality(this.quality === 'high' ? 'medium' : 'low');
+      }
+    }
+  }
+
+  public setQuality(setting: QualitySetting) {
+    this.qualitySetting = setting;
+    this.fpsAcc = 0;
+    this.fpsFrames = 0;
+    this.slowWindows = 0;
+    this.applyQuality(setting === 'auto' ? detectQuality() : setting);
+  }
+
+  private applyQuality(q: Quality) {
+    this.quality = q;
+    const prof = qualityProfile(q);
+    this.renderer.setPixelRatio(prof.pixelRatio);
+    this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+
+    this.world.setQuality(prof);
+    const shadowType = prof.softShadows ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+    if (this.sun.shadow.map?.width !== prof.shadowMap || this.renderer.shadowMap.type !== shadowType) {
+      this.renderer.shadowMap.type = shadowType;
+      this.sun.shadow.map?.dispose();
+      (this.sun.shadow as { map: THREE.WebGLRenderTarget | null }).map = null;
+      this.renderer.shadowMap.needsUpdate = true;
+    }
+
+    this.fx?.dispose();
+    this.fx = null;
+    if (prof.composer) {
+      this.fx = new PostFX(this.renderer, this.scene, this.camera, prof.msaa, prof.bloom);
+      this.fx.setLook(NINJA_LOOK);
+      this.fx.setSize(window.innerWidth, window.innerHeight);
+    }
+    this.callbacks.onQualityChange?.(this.qualitySetting, q);
+  }
 
   public destroy() {
     if (this.reqId) cancelAnimationFrame(this.reqId);
@@ -2745,6 +2447,7 @@ export class GameEngine {
     this.rings = [];
     this.pGeo.dispose();
     this.bGeo.dispose();
+    this.fx?.dispose();
     this.renderer.dispose();
   }
 }
