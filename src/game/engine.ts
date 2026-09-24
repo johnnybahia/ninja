@@ -3011,7 +3011,7 @@ export class GameEngine {
         const off = Math.max(Math.abs(this.tmpV.x), Math.abs(this.tmpV.y));
         rays = atm.rays * (1 - Math.min(1, Math.max(0, off - 1) / 0.6));
       }
-      this.fx.setStylize(this.profile.ink ? 0.6 : 0, rays, this.sunUv, atm.sunGlow, this.camera.near, this.camera.far);
+      this.fx.setStylize(this.profile.ink ? 0.4 : 0, rays, this.sunUv, atm.sunGlow, this.camera.near, this.camera.far);
     }
 
     this.updateFx(real);

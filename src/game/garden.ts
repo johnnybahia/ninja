@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { TAU, rand } from './constants';
 import type { Atmos } from './atmosphere';
+import { rockGeometry } from './shapes';
+import { applySurface } from './surfaces';
 
 // ===========================================================================
 // Garden details around the temple: koi pond, bamboo grove, red spider lilies,
@@ -61,9 +63,10 @@ export class Garden {
     root.add(bed);
 
     // edging stones
-    const stoneG = new THREE.DodecahedronGeometry(1, 0);
+    const stoneG = rockGeometry(41, 2, 0.3);
     const n = 30;
-    const stones = new THREE.InstancedMesh(stoneG, new THREE.MeshStandardMaterial({ color: 0x6a655e, roughness: 0.9, flatShading: true }), n);
+    const stoneM = applySurface(new THREE.MeshStandardMaterial({ color: 0x5e5b57, roughness: 0.85 }), 'rock', { mode: 'tri', scale: 1.1, normal: 1.2, albedo: 0.9 });
+    const stones = new THREE.InstancedMesh(stoneG, stoneM, n);
     for (let i = 0; i < n; i++) {
       const a = (i / n) * TAU + rand(-0.05, 0.05);
       const r = pondRadius(a) + rand(0.05, 0.3);
@@ -373,8 +376,9 @@ export class Garden {
 
   private buildPebbles(root: THREE.Object3D, isFree: (x: number, z: number, pad: number) => boolean) {
     const n = 420;
-    const g = new THREE.DodecahedronGeometry(1, 0);
-    const pebbles = new THREE.InstancedMesh(g, new THREE.MeshStandardMaterial({ roughness: 0.9, flatShading: true }), n);
+    const g = rockGeometry(43, 1, 0.22);
+    const pebbleM = applySurface(new THREE.MeshStandardMaterial({ roughness: 0.8 }), 'rock', { mode: 'tri', scale: 3, normal: 0.8, albedo: 0.7 });
+    const pebbles = new THREE.InstancedMesh(g, pebbleM, n);
     let i = 0;
     for (let t = 0; t < n * 3 && i < n; t++) {
       // mostly along the plaza curb and the stone path

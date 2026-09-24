@@ -118,8 +118,8 @@ const GradeShader = {
         float ly = invDepth(vUv + vec2(0.0, o.y)) + invDepth(vUv - vec2(0.0, o.y)) - 2.0 * ic;
         float dist = 1.0 / ic;
         float edge = (abs(lx) + abs(ly)) * dist;
-        float ink = smoothstep(0.06, 0.3, edge) * (1.0 - smoothstep(30.0, 85.0, dist));
-        col = mix(col, col * 0.16 + vec3(0.012, 0.008, 0.012), ink * uInk);
+        float ink = smoothstep(0.14, 0.5, edge) * (1.0 - smoothstep(25.0, 70.0, dist));
+        col = mix(col, col * 0.35, ink * uInk);
       }
 
       // Light shafts: march toward the sun and gather bright open sky, so gaps between

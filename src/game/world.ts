@@ -5,6 +5,7 @@ import { TAU, rand } from './constants';
 import type { QualityProfile } from './postfx';
 import { ATMOSPHERES, Atmos, blendAtmos, cloneAtmos } from './atmosphere';
 import { Garden } from './garden';
+import { Lobe, coniferGeometry, foliageCards, foliageMaterial, makeRng, rockGeometry, sweep } from './shapes';
 import { applySurface, initSurfaces, neutralize } from './surfaces';
 import { detectQuality } from './postfx';
 
@@ -45,6 +46,7 @@ let WM: WorldMats;
 
 // Shared wind clock for every swaying material (grass, foliage, banners)
 const WIND_TIME = { value: 0 };
+const IDENT = new THREE.Matrix4();
 
 function glsl(n: number) {
   return n.toFixed(4);
@@ -263,22 +265,6 @@ function curvedBeam(len: number, hgt: number, dep: number, rise: number) {
   for (let i = 0; i < p.count; i++) {
     const k = p.getX(i) / (len / 2);
     p.setY(i, p.getY(i) + rise * k * k * Math.abs(k));
-  }
-  g.computeVertexNormals();
-  return g;
-}
-
-function jitter(g: THREE.BufferGeometry, amt: number) {
-  const p = g.attributes.position as THREE.BufferAttribute;
-  const seen = new Map<string, [number, number, number]>();
-  for (let i = 0; i < p.count; i++) {
-    const key = `${p.getX(i).toFixed(3)},${p.getY(i).toFixed(3)},${p.getZ(i).toFixed(3)}`;
-    let o = seen.get(key);
-    if (!o) {
-      o = [rand(-amt, amt), rand(-amt, amt), rand(-amt, amt)];
-      seen.set(key, o);
-    }
-    p.setXYZ(i, p.getX(i) + o[0], p.getY(i) + o[1], p.getZ(i) + o[2]);
   }
   g.computeVertexNormals();
   return g;
@@ -558,7 +544,7 @@ export class World {
     plaza.receiveShadow = true;
     this.root.add(plaza);
     // raised stone curb around the plaza
-    const curb = new THREE.Mesh(new THREE.TorusGeometry(13.05, 0.16, 6, 96).rotateX(Math.PI / 2), WM.stoneDark);
+    const curb = new THREE.Mesh(new THREE.TorusGeometry(13.05, 0.16, 10, 160).rotateX(Math.PI / 2), WM.stoneDark);
     curb.position.y = 0.04;
     curb.scale.y = 0.6;
     curb.receiveShadow = true;
@@ -597,8 +583,8 @@ export class World {
       for (let k = 0; k < 5; k++) b.add(box(0.12, 0.8, 0.12), WM.woodDark, at(mtx(side * (3.0 + k * 1.1), 1.95, 4.95)));
     }
     // pillars: red with black bases
-    const pg = new THREE.CylinderGeometry(0.3, 0.33, 4.6, 12);
-    const baseG = new THREE.CylinderGeometry(0.42, 0.46, 0.35, 12);
+    const pg = new THREE.CylinderGeometry(0.3, 0.33, 4.6, 24);
+    const baseG = new THREE.CylinderGeometry(0.42, 0.46, 0.35, 24);
     for (const x of [-6.8, -2.3, 2.3, 6.8]) {
       for (const z of [4.3, -4.3]) {
         b.add(pg, WM.torii, at(mtx(x, 3.88, z)));
@@ -633,7 +619,7 @@ export class World {
     b.add(curvedRoof(10.5, 6.8, 2.1, 2.6, 0.7), WM.roof, at(mtx(0, 11.15, 0)));
     b.add(box(5.6, 0.3, 0.4), WM.dark, at(mtx(0, 13.28, 0)));
     // hanging lanterns at the entrance
-    const lanternG = new THREE.CylinderGeometry(0.32, 0.32, 0.62, 12);
+    const lanternG = new THREE.CylinderGeometry(0.32, 0.32, 0.62, 20);
     for (const x of [-3.2, 3.2]) b.add(lanternG, MAT.glow, at(mtx(x, 4.9, 4.7)));
     b.noShadow(MAT.glow);
 
@@ -646,8 +632,8 @@ export class World {
   private buildTorii(b: Batcher) {
     const T = new THREE.Matrix4().makeTranslation(0, 0, 17);
     const at = (m: THREE.Matrix4) => T.clone().multiply(m);
-    const pil = new THREE.CylinderGeometry(0.3, 0.36, 6.2, 14);
-    const foot = new THREE.CylinderGeometry(0.42, 0.46, 0.5, 14);
+    const pil = new THREE.CylinderGeometry(0.3, 0.36, 6.2, 24);
+    const foot = new THREE.CylinderGeometry(0.42, 0.46, 0.5, 24);
     for (const x of [-3.3, 3.3]) {
       b.add(pil, WM.torii, at(mtx(x, 3.1, 0)));
       b.add(foot, WM.dark, at(mtx(x, 0.25, 0)));
@@ -661,53 +647,97 @@ export class World {
   }
 
   private buildTrees(b: Batcher) {
-    const sakuraMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.75, flatShading: true });
-    const pineMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, flatShading: true });
-    addWind(sakuraMat, { amp: 0.14, base: 3.2, span: 3.5, key: 'leaf' });
-    addWind(pineMat, { amp: 0.09, base: 2.5, span: 5, key: 'pine' });
-    const trunkG = new THREE.CylinderGeometry(0.2, 0.34, 1.9, 7);
-    const limbG = new THREE.CylinderGeometry(0.11, 0.18, 1.7, 6);
-    const blobG = jitter(new THREE.IcosahedronGeometry(1, 1), 0.12);
-    const coneG = new THREE.ConeGeometry(1, 1, 8);
-    const pinkA = new THREE.Color(0xf2a7bd);
-    const pinkB = new THREE.Color(0xd9809c);
-    const greenA = new THREE.Color(0x2d4a32);
-    const greenB = new THREE.Color(0x1e3424);
+    const rng = makeRng(20260924);
+    const R = (a: number, c: number) => a + (c - a) * rng();
+    const up = new THREE.Vector3(0, 1, 0);
+    const sakuraCards: THREE.BufferGeometry[] = [];
+    const pineCards: THREE.BufferGeometry[] = [];
+    const pinkTint = () => new THREE.Color().setHSL(0.95 + R(-0.02, 0.02), R(0.1, 0.35), R(0.78, 0.95));
+    const pineTint = () => new THREE.Color().setHSL(0.3 + R(-0.03, 0.04), R(0.2, 0.4), R(0.42, 0.62));
 
     for (let i = 0; i < 28; i++) {
-      const a = (i / 28) * TAU + rand(0, 0.14);
-      const r = 30 + rand(0, 8);
+      const a = (i / 28) * TAU + R(0, 0.14);
+      const r = 30 + R(0, 8);
       const x = Math.sin(a) * r;
       const z = Math.cos(a) * r;
       if (z < -19 && Math.abs(x) < 14) continue;
       if (z > 13 && Math.abs(x) < 7) continue;
-      const s = 0.85 + rand(0, 0.45);
-      const ry = rand(0, TAU);
-      const sakura = Math.random() < 0.45;
-      if (sakura) {
-        b.add(trunkG, WM.trunk, mtx(x, 0.95 * s, z, rand(-0.08, 0.08), ry, rand(-0.08, 0.08), s, s, s));
-        for (let k = 0; k < 3; k++) {
-          const la = ry + (k / 3) * TAU;
-          b.add(limbG, WM.trunk, mtx(x + Math.sin(la) * 0.45 * s, 2.3 * s, z + Math.cos(la) * 0.45 * s, Math.cos(la) * 0.7, 0, -Math.sin(la) * 0.7, s, s, s));
+      const s = 0.85 + R(0, 0.45);
+      const ry = R(0, TAU);
+      const base = new THREE.Vector3(x, -0.1, z);
+      if (rng() < 0.45) {
+        // sakura: short leaning trunk, a crown of curving limbs, blossom clouds
+        const lean = new THREE.Vector3(R(-0.5, 0.5), 0, R(-0.5, 0.5)).multiplyScalar(s);
+        const h = R(2.0, 2.6) * s;
+        const top = base.clone().add(lean).setY(h);
+        const trunk = [base, base.clone().lerp(top, 0.45).add(new THREE.Vector3(R(-0.2, 0.2), 0, R(-0.2, 0.2))), top];
+        b.add(sweep(trunk, (t) => 0.26 * s * (1 - 0.45 * t) * (1 + 0.9 * Math.exp(-t * 9)), 12, 12).geo, WM.trunk, IDENT);
+        const lobes: Lobe[] = [{ c: top.clone().addScaledVector(up, 1.0 * s), r: 1.25 * s }];
+        const nb = 4 + Math.floor(rng() * 2);
+        for (let k = 0; k < nb; k++) {
+          const ang = ry + (k / nb) * TAU + R(-0.35, 0.35);
+          const dir = new THREE.Vector3(Math.sin(ang), 0, Math.cos(ang));
+          const len = R(1.6, 2.5) * s;
+          const rise = R(0.6, 1.3) * s;
+          const p0 = top.clone().addScaledVector(up, -0.35 * s);
+          const p1 = p0.clone().addScaledVector(dir, len * 0.45).addScaledVector(up, rise * 0.65);
+          const p2 = p0.clone().addScaledVector(dir, len).addScaledVector(up, rise);
+          b.add(sweep([p0, p1, p2], (t) => 0.13 * s * (1 - 0.75 * t), 8, 10).geo, WM.trunk, IDENT);
+          lobes.push({ c: p2.clone().addScaledVector(up, 0.3 * s), r: R(1.0, 1.35) * s }, { c: p1.clone().addScaledVector(up, 0.55 * s), r: R(0.75, 1.0) * s });
         }
-        const n = 9 + Math.floor(rand(0, 4));
-        for (let k = 0; k < n; k++) {
-          const la = rand(0, TAU);
-          const lr = rand(0.4, 1.6) * s;
-          const sc = rand(0.8, 1.25) * s;
-          const col = pinkA.clone().lerp(pinkB, Math.random());
-          b.add(blobG, sakuraMat, mtx(x + Math.sin(la) * lr, (3.4 + rand(-0.2, 1.1)) * s, z + Math.cos(la) * lr, rand(0, 3), rand(0, 3), 0, sc, sc * 0.78, sc), col);
-        }
+        const canopy = lobes.reduce((acc, l) => acc.add(l.c), new THREE.Vector3()).divideScalar(lobes.length);
+        sakuraCards.push(foliageCards(lobes, canopy, 15, [1.0, 1.45], pinkTint, rng));
       } else {
-        b.add(trunkG, WM.trunk, mtx(x, 0.95 * s, z, 0, ry, 0, s * 0.9, s * 1.2, s * 0.9));
+        // kuromatsu: S-curved trunk with cloud-pruned needle pads on low sweeping limbs
+        const h = R(4.2, 5.4) * s;
+        const bend = new THREE.Vector3(R(-1, 1), 0, R(-1, 1)).normalize().multiplyScalar(0.8 * s);
+        const trunk = [
+          base,
+          base.clone().add(new THREE.Vector3(bend.x * 0.6, h * 0.33, bend.z * 0.6)),
+          base.clone().add(new THREE.Vector3(-bend.x * 0.3, h * 0.66, -bend.z * 0.3)),
+          base.clone().add(new THREE.Vector3(bend.x * 0.4, h, bend.z * 0.4))
+        ];
+        const tr = sweep(trunk, (t) => 0.3 * s * (1 - 0.62 * t) * (1 + 0.7 * Math.exp(-t * 10)), 12, 18);
+        b.add(tr.geo, WM.trunk, IDENT);
+        const pads: Lobe[] = [{ c: trunk[3].clone().addScaledVector(up, 0.3 * s), r: 0.95 * s, flat: 0.45 }];
         for (let k = 0; k < 4; k++) {
-          const w = (2.2 - k * 0.45) * s;
-          const col = greenA.clone().lerp(greenB, Math.random());
-          b.add(coneG, pineMat, mtx(x, (2.3 + k * 1.15) * s, z, 0, ry + k, 0, w, 1.9 * s, w), col);
+          const t = 0.42 + k * 0.15;
+          const at = tr.curve.getPointAt(t);
+          for (let side = 0; side < 2; side++) {
+            const ang = ry + k * 2.1 + side * Math.PI + R(-0.4, 0.4);
+            const dir = new THREE.Vector3(Math.sin(ang), 0, Math.cos(ang));
+            const len = (2.0 - k * 0.32) * s * R(0.8, 1.1);
+            const p1 = at.clone().addScaledVector(dir, len * 0.5).addScaledVector(up, -0.15 * s);
+            const p2 = at.clone().addScaledVector(dir, len).addScaledVector(up, 0.25 * s);
+            b.add(sweep([at, p1, p2], (tt) => 0.1 * s * (1 - 0.7 * tt), 7, 8).geo, WM.trunk, IDENT);
+            pads.push({ c: p2.clone().addScaledVector(up, 0.2 * s), r: (1.35 - k * 0.17) * s, flat: 0.38 });
+          }
         }
+        const canopy = pads.reduce((acc, l) => acc.add(l.c), new THREE.Vector3()).divideScalar(pads.length);
+        pineCards.push(foliageCards(pads, canopy, 20, [0.85, 1.25], pineTint, rng, 0.75));
       }
-      this.addSolid(x, z, 0.9, 9);
+      this.addSolid(x, z, 0.7, 9);
     }
+
+    const base = `${import.meta.env.BASE_URL}tex/`;
+    let sakMesh: THREE.Mesh | undefined;
+    let pineMesh: THREE.Mesh | undefined;
+    const sakuraMat = foliageMaterial(`${base}sakura_card.webp`, () => sakMesh, 0x2a0e16);
+    const pineMat = foliageMaterial(`${base}pine_card.webp`, () => pineMesh);
+    addWind(sakuraMat, { amp: 0.12, base: 2.4, span: 3.5, key: 'sakura-card' });
+    addWind(pineMat, { amp: 0.07, base: 2.0, span: 5, key: 'pine-card' });
+    const mk = (parts: THREE.BufferGeometry[], mat: THREE.Material) => {
+      const g = mergeGeometries(parts, false)!;
+      parts.forEach((p) => p.dispose());
+      const m = new THREE.Mesh(g, mat);
+      m.castShadow = true;
+      m.receiveShadow = true;
+      m.visible = false;
+      this.root.add(m);
+      return m;
+    };
+    sakMesh = mk(sakuraCards, sakuraMat);
+    pineMesh = mk(pineCards, pineMat);
   }
 
   private buildLanterns(b: Batcher) {
@@ -717,13 +747,13 @@ export class World {
       [-4, 12], [4, 12],
       [-9, 0], [9, 0]
     ];
-    const baseG = new THREE.CylinderGeometry(0.42, 0.5, 0.3, 8);
-    const pillarG = new THREE.CylinderGeometry(0.16, 0.2, 0.85, 8);
+    const baseG = new THREE.CylinderGeometry(0.42, 0.5, 0.3, 16);
+    const pillarG = new THREE.CylinderGeometry(0.16, 0.2, 0.85, 16);
     const shelfG = new THREE.CylinderGeometry(0.48, 0.4, 0.16, 6);
     const boxG = new THREE.BoxGeometry(0.46, 0.44, 0.46);
     const frameG = new THREE.BoxGeometry(0.08, 0.5, 0.08);
     const roofG = new THREE.ConeGeometry(0.7, 0.38, 6);
-    const jewelG = new THREE.SphereGeometry(0.1, 8, 6);
+    const jewelG = new THREE.SphereGeometry(0.1, 14, 10);
     for (const [lx, lz] of pts) {
       b.add(baseG, WM.stone, mtx(lx, 0.15, lz));
       b.add(pillarG, WM.stone, mtx(lx, 0.72, lz));
@@ -751,20 +781,18 @@ export class World {
       [-16, -2, 1.3], [16, -2, 1.2],
       [-5.5, -23.5, 0.95], [5.5, -23.8, 0.9]
     ];
-    for (const [rx, rz, s] of pts) {
-      const g = jitter(new THREE.DodecahedronGeometry(s, 1), s * 0.14);
-      b.add(g, WM.rock, mtx(rx, s * 0.35, rz, rand(0, 1), rand(0, TAU), 0, 1.25, 0.72, 1.1));
-      b.add(jitter(new THREE.DodecahedronGeometry(s * 0.45, 0), s * 0.06), WM.rock, mtx(rx + s * 1.1, s * 0.15, rz + s * 0.4, rand(0, 1), rand(0, TAU), 0));
+    pts.forEach(([rx, rz, s], i) => {
+      b.add(rockGeometry(i * 7 + 3, 3), WM.rock, mtx(rx, s * 0.22, rz, 0, rand(0, TAU), 0, s * 1.3, s * 0.85, s * 1.1));
+      b.add(rockGeometry(i * 7 + 5, 2, 0.28), WM.rock, mtx(rx + s * 1.15, s * 0.1, rz + s * 0.45, 0, rand(0, TAU), 0, s * 0.5, s * 0.4, s * 0.45));
       this.addSolid(rx, rz, s * 0.95, s * 1.5);
-    }
+    });
   }
 
   // Dark pine silhouettes between the arena and the mountains for depth
   private buildDistantForest() {
     const n = 150;
-    const g = new THREE.ConeGeometry(1, 1, 6);
-    g.translate(0, 0.5, 0);
-    const m = new THREE.InstancedMesh(g, new THREE.MeshLambertMaterial({ color: 0x1a2a22 }), n);
+    const g = coniferGeometry(9);
+    const m = new THREE.InstancedMesh(g, new THREE.MeshLambertMaterial({ color: 0x1a2a22, side: THREE.DoubleSide }), n);
     const d = this.dummy;
     for (let i = 0; i < n; i++) {
       const a = rand(0, TAU);
@@ -772,7 +800,8 @@ export class World {
       const s = rand(3.5, 8);
       d.position.set(Math.sin(a) * r, -0.2, Math.cos(a) * r);
       d.rotation.set(0, rand(0, TAU), 0);
-      d.scale.set(s * 0.42, s * rand(1.6, 2.4), s * 0.42);
+      const hh = s * rand(1.6, 2.4);
+      d.scale.set(s * 0.85, hh, s * 0.85);
       d.updateMatrix();
       m.setMatrixAt(i, d.matrix);
     }
@@ -875,7 +904,7 @@ export class World {
       shader.fragmentShader = 'varying float vBladeH;\nvarying vec3 vGrassW;\nuniform vec3 uSunDir;\nuniform vec3 uSunCol;\n' + shader.fragmentShader.replace(
         '#include <color_fragment>',
         `#include <color_fragment>
-        diffuseColor.rgb *= mix(0.5, 1.15, vBladeH);`
+        diffuseColor.rgb *= mix(0.68, 1.12, vBladeH);`
       ).replace(
         '#include <emissivemap_fragment>',
         `#include <emissivemap_fragment>
