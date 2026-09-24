@@ -495,20 +495,6 @@ export default function App() {
             </button>
           </div>
 
-          {/* Aim Reticle: only for ranged weapons (melee already hits via arc, no aim needed) */}
-          {(activeWeapon?.kind === 'proj' || activeWeapon?.kind === 'flame') && (
-            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
-              <div className="relative w-7 h-7 reticle">
-                <div className="absolute inset-0 rounded-full border border-[var(--paper)]/50" />
-                <div className="absolute top-1/2 left-1/2 w-1 h-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[var(--ember)] shadow-[0_0_4px_rgba(242,166,90,0.9)]" />
-                <div className="absolute top-1/2 -left-0.5 w-2 h-px -translate-y-1/2 bg-[var(--paper)]/80" />
-                <div className="absolute top-1/2 -right-0.5 w-2 h-px -translate-y-1/2 bg-[var(--paper)]/80" />
-                <div className="absolute left-1/2 -top-0.5 h-2 w-px -translate-x-1/2 bg-[var(--paper)]/80" />
-                <div className="absolute left-1/2 -bottom-0.5 h-2 w-px -translate-x-1/2 bg-[var(--paper)]/80" />
-              </div>
-            </div>
-          )}
-
           {/* Banner message */}
           {banner && (
             <div className="absolute left-0 right-0 top-[calc(var(--sat)+64px)] text-center pointer-events-none drop-shadow-lg transition-opacity duration-300">

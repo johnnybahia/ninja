@@ -211,6 +211,8 @@ export class GameEngine {
   private attackQueueT = 0;
   private slowmoScale = 1;
   private labels: { sprite: THREE.Sprite; t: number; life: number; vy: number }[] = [];
+  private reticle!: THREE.Sprite;
+  private reticleTarget = new THREE.Vector3();
 
   public input = {
     jx: 0,
@@ -637,6 +639,7 @@ export class GameEngine {
     this.slash = new THREE.Mesh(this.slashGeos.katana, slashMat);
     this.slash.visible = false;
     this.scene.add(this.slash);
+    this.buildReticle();
 
     this.chainLink = new THREE.Mesh(
       new THREE.CylinderGeometry(0.025, 0.025, 1, 4).rotateX(Math.PI / 2).translate(0, 0, 0.5),
@@ -1225,6 +1228,105 @@ export class GameEngine {
         old.sprite.material.dispose();
       }
     }
+  }
+
+  // ----------------------------------------------------
+  // AIM RETICLE: shots fly along the player's facing, so the reticle sits in the world on
+  // that line (not at screen center, which in third person is the character itself)
+  // ----------------------------------------------------
+  private buildReticle() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineCap = 'round';
+      ctx.shadowColor = 'rgba(0,0,0,0.8)';
+      ctx.shadowBlur = 6;
+      ctx.lineWidth = 7;
+      ctx.beginPath();
+      ctx.arc(64, 64, 38, 0, TAU);
+      ctx.stroke();
+      ctx.lineWidth = 8;
+      for (const [x0, y0, x1, y1] of [
+        [64, 6, 64, 30],
+        [64, 98, 64, 122],
+        [6, 64, 30, 64],
+        [98, 64, 122, 64]
+      ]) {
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+        ctx.stroke();
+      }
+      ctx.beginPath();
+      ctx.arc(64, 64, 7, 0, TAU);
+      ctx.fillStyle = '#ffffff';
+      ctx.fill();
+    }
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    this.reticle = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: tex,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        fog: false,
+        toneMapped: false,
+        sizeAttenuation: false
+      })
+    );
+    this.reticle.renderOrder = 31;
+    this.reticle.visible = false;
+    this.scene.add(this.reticle);
+  }
+
+  private updateReticle(dt: number) {
+    const w = this.weapons[this.activeWeaponIdx];
+    const straight = w && (w.kind === 'proj' || w.kind === 'flame' || !!w.rocket);
+    if (!straight || this.player.hp <= 0) {
+      this.reticle.visible = false;
+      return;
+    }
+    const fx = Math.sin(this.player.yaw);
+    const fz = Math.cos(this.player.yaw);
+    const reach =
+      w.kind === 'flame' ? w.range || 4.6 : Math.min(18, (w.rocket ? 26 : w.speed || 30) * (w.rocket ? 2.2 : w.life || 1.2));
+    const n = w.count || 1;
+    const halfSpread = ((n - 1) / 2) * (w.spread || 0) + (w.kind === 'flame' ? (w.arc || 1.3) / 2 : 0);
+
+    // Nearest enemy inside the line of fire (feedback only; the shot direction is unchanged)
+    let lock: EnemyInstance | null = null;
+    let best = Infinity;
+    for (const e of this.enemies) {
+      if (e.dead) continue;
+      const dx = e.pos.x - this.player.pos.x;
+      const dz = e.pos.z - this.player.pos.z;
+      const along = dx * fx + dz * fz;
+      if (along <= 0.3 || along > reach + e.r) continue;
+      const lateral = Math.abs(dx * fz - dz * fx);
+      if (lateral > e.r + 0.35 + along * Math.tan(halfSpread)) continue;
+      if (along < best) {
+        best = along;
+        lock = e;
+      }
+    }
+
+    const aimDist = Math.min(reach, 10);
+    if (lock) this.reticleTarget.set(lock.pos.x, lock.pos.y + lock.h * 0.55, lock.pos.z);
+    else this.reticleTarget.set(this.player.pos.x + fx * aimDist, 1.25, this.player.pos.z + fz * aimDist);
+
+    const mat = this.reticle.material;
+    if (!this.reticle.visible) this.reticle.position.copy(this.reticleTarget);
+    else this.reticle.position.lerp(this.reticleTarget, 1 - Math.exp(-dt * 16));
+    this.reticle.visible = true;
+    mat.color.set(lock ? 0xff4a3a : 0xffffff);
+    mat.opacity = lock ? 1 : 0.75;
+    // Constant on-screen size (~3.5% of view height), slightly larger when locked on
+    const s = 2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2) * (lock ? 0.042 : 0.036);
+    this.reticle.scale.set(s, s, 1);
   }
 
   private updateLabels(dt: number) {
@@ -2598,6 +2700,7 @@ export class GameEngine {
       this.updateProjectiles(dt);
       this.updatePickups(dt);
       this.updateScrolls(dt);
+      this.updateReticle(dt);
 
       const alive = this.enemies.some((e) => !e.dead);
       if (!alive && this.wave > 0) {
@@ -2614,6 +2717,7 @@ export class GameEngine {
         }
       }
     } else {
+      this.reticle.visible = false;
       this.camYaw += real * 0.12;
       this.player.phase += real * 2;
       animateRig(this.player.rig, 0, this.player.phase, false, this.time, null);
