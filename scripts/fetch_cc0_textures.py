@@ -20,6 +20,7 @@ OVERRIDE_SLUG.
 import argparse
 import json
 import os
+import re
 import time
 import urllib.request
 from io import BytesIO
@@ -104,25 +105,42 @@ def asset_index():
     return _INDEX
 
 
-def score(meta, keywords):
-    text = ' '.join([meta.get('name', ''), *meta.get('tags', []), *meta.get('categories', [])]).lower()
-    return sum(1 for kw in keywords if kw in text)
+def _hits(text, keywords):
+    return sum(1 for kw in keywords if re.search(r'\b' + re.escape(kw) + r'\b', text))
+
+
+def _ranked(keywords):
+    """Assets whose own name contains a keyword always outrank ones only reachable via a
+    shared/related tag (e.g. a brick texture tagged "cobblestone" must never outscore an
+    asset actually named "Cobblestone ..." just because it racked up more tag hits)."""
+    by_name, by_tag = [], []
+    for slug, meta in asset_index().items():
+        name = meta.get('name', '').lower()
+        rest = ' '.join([*meta.get('tags', []), *meta.get('categories', [])]).lower()
+        n = _hits(name, keywords)
+        if n:
+            by_name.append((n, slug, meta.get('name', '')))
+        else:
+            t = _hits(rest, keywords)
+            if t:
+                by_tag.append((t, slug, meta.get('name', '')))
+    by_name.sort(key=lambda x: (-x[0], x[1]))
+    by_tag.sort(key=lambda x: (-x[0], x[1]))
+    return by_name, by_tag
 
 
 def best_match(keywords):
-    scored = [(score(meta, keywords), slug) for slug, meta in asset_index().items()]
-    scored = [s for s in scored if s[0] > 0]
-    if not scored:
-        return None
-    scored.sort(key=lambda t: (-t[0], t[1]))
-    return scored[0][1]
+    by_name, by_tag = _ranked(keywords)
+    pool = by_name or by_tag
+    return pool[0][1] if pool else None
 
 
 def list_candidates(name):
-    scored = [(score(meta, KEYWORDS[name]), slug, meta.get('name', '')) for slug, meta in asset_index().items()]
-    scored = sorted((s for s in scored if s[0] > 0), key=lambda t: (-t[0], t[1]))[:10]
-    for sc, slug, disp in scored:
-        print(f'{sc}  {slug}  ({disp})')
+    by_name, by_tag = _ranked(KEYWORDS[name])
+    for n, slug, disp in by_name:
+        print(f'{n}  {slug}  ({disp})  [name match]')
+    for t, slug, disp in by_tag[:max(0, 10 - len(by_name))]:
+        print(f'{t}  {slug}  ({disp})  [tag match only]')
 
 
 def pick_map(files, keys, res_order=RES_ORDER, fmt_order=FMT_ORDER):
