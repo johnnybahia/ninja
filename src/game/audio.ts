@@ -89,27 +89,6 @@ export const sfx = {
   hurt: () => tone(260, 110, 0.25, 'sawtooth', 0.15),
   jump: () => tone(300, 620, 0.12, 'sine', 0.1),
   dash: () => noise(0.18, 0.3, 3500, 'highpass'),
-  pistol: () => {
-    noise(0.09, 0.35, 2200, 'highpass');
-    tone(200, 90, 0.07, 'square', 0.1);
-  },
-  shotgun: () => {
-    noise(0.16, 0.45, 1400, 'lowpass');
-    tone(140, 55, 0.15, 'sawtooth', 0.14);
-  },
-  rifle: () => {
-    noise(0.06, 0.28, 2600, 'highpass');
-  },
-  flame: () => {
-    noise(0.1, 0.3, 900, 'lowpass');
-  },
-  minigun: () => {
-    noise(0.05, 0.3, 2000, 'bandpass');
-  },
-  bazooka: () => {
-    noise(0.25, 0.5, 500, 'lowpass');
-    tone(110, 40, 0.3, 'sawtooth', 0.2);
-  },
   pick: () => {
     tone(620, 1240, 0.18, 'sine', 0.16);
   },

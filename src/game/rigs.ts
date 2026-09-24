@@ -29,18 +29,10 @@ export const MAT = {
   crimson: std(0xa61c24, 0.62, 0.05),
   blood: std(0x820e15, 0.45, 0.1),
   skin: std(0xdca880, 0.68, 0.0),
-  skinBravo: std(0xc28a68, 0.68, 0.0),
   skinDemon: std(0xb33026, 0.62, 0.02),
-  skinZombie: std(0x758c56, 0.8, 0.0),
-  camo: std(0x444f33, 0.85, 0.0),
-  vest: std(0x282b22, 0.8, 0.05),
-  hazard: std(0xf0b820, 0.4, 0.1),
-  laser: new THREE.MeshBasicMaterial({ color: 0x00ff88 }),
-  redDot: new THREE.MeshBasicMaterial({ color: 0xff2222 }),
   eyeCyan: new THREE.MeshBasicMaterial({ color: 0x36e2ff }),
   eyeAmber: new THREE.MeshBasicMaterial({ color: 0xffb326 }),
   eyeDemon: new THREE.MeshBasicMaterial({ color: 0xff3b1f }),
-  eyeZombie: new THREE.MeshBasicMaterial({ color: 0x9eff4a }),
   arrowFeather: std(0xdedede, 0.8, 0.0)
 };
 
@@ -57,56 +49,6 @@ export const GEO = {
   belt: new THREE.BoxGeometry(0.75, 0.1, 0.45),
   helmet: new THREE.ConeGeometry(0.42, 0.34, 10),
   horn: new THREE.ConeGeometry(0.08, 0.42, 8)
-};
-
-export const GEO_Z = {
-  hips: new THREE.BoxGeometry(0.6, 0.26, 0.38),
-  torsoA: new THREE.BoxGeometry(0.68, 0.54, 0.4),
-  torsoB: new THREE.BoxGeometry(0.5, 0.3, 0.44).translate(0.09, -0.1, 0.02),
-  rib: new THREE.BoxGeometry(0.18, 0.22, 0.08),
-  wound: new THREE.BoxGeometry(0.22, 0.16, 0.06),
-  head: new THREE.SphereGeometry(0.25, 12, 10),
-  jaw: new THREE.BoxGeometry(0.2, 0.1, 0.2).translate(0, -0.16, 0.02),
-  hair1: new THREE.BoxGeometry(0.05, 0.22, 0.05),
-  hair2: new THREE.BoxGeometry(0.04, 0.16, 0.04),
-  leg: new THREE.BoxGeometry(0.2, 0.74, 0.22).translate(0, -0.37, 0),
-  armUpper: new THREE.BoxGeometry(0.16, 0.36, 0.18).translate(0, -0.18, 0),
-  armFore: new THREE.BoxGeometry(0.135, 0.34, 0.155).translate(0, -0.17, 0.01),
-  scarfStub: new THREE.BoxGeometry(0.001, 0.001, 0.001)
-};
-
-export const GUN_G = {
-  pistolSlide: new THREE.BoxGeometry(0.085, 0.1, 0.34).translate(0, 0.05, 0.05),
-  pistolFrame: new THREE.BoxGeometry(0.09, 0.09, 0.18).translate(0, -0.005, -0.02),
-  pistolGrip: new THREE.BoxGeometry(0.075, 0.19, 0.095).translate(0, -0.15, -0.09),
-  pistolTrigger: new THREE.TorusGeometry(0.045, 0.012, 6, 12).translate(0, -0.05, -0.02),
-  pistolSight: new THREE.BoxGeometry(0.02, 0.02, 0.03).translate(0, 0.105, 0.2),
-  shotBarrel: new THREE.CylinderGeometry(0.04, 0.045, 0.82, 10).rotateX(Math.PI / 2).translate(0, 0.03, 0.32),
-  shotPump: new THREE.BoxGeometry(0.075, 0.075, 0.28).translate(0, -0.01, 0.14),
-  shotStock: new THREE.BoxGeometry(0.09, 0.14, 0.4).translate(0, -0.02, -0.15),
-  shotTrigger: new THREE.TorusGeometry(0.045, 0.011, 6, 12).translate(0, -0.06, -0.03),
-  rifleBody: new THREE.BoxGeometry(0.08, 0.13, 0.6).translate(0, 0, 0.05),
-  rifleBarrel: new THREE.CylinderGeometry(0.02, 0.022, 0.4, 10).rotateX(Math.PI / 2).translate(0, 0.01, 0.52),
-  rifleMag: new THREE.BoxGeometry(0.06, 0.24, 0.09).rotateX(-0.25).translate(0, -0.19, 0.02),
-  rifleStock: new THREE.BoxGeometry(0.06, 0.1, 0.22).translate(0, -0.01, -0.42),
-  rifleGrip: new THREE.BoxGeometry(0.06, 0.15, 0.07).rotateX(-0.3).translate(0, -0.13, -0.18),
-  rifleTrigger: new THREE.TorusGeometry(0.045, 0.011, 6, 12).translate(0, -0.08, -0.1),
-  rifleSight: new THREE.BoxGeometry(0.02, 0.05, 0.02).translate(0, 0.1, 0.15),
-  flameTank: new THREE.CylinderGeometry(0.11, 0.11, 0.5, 12).rotateZ(Math.PI / 2).translate(-0.15, -0.05, -0.15),
-  flameCap: new THREE.CylinderGeometry(0.115, 0.115, 0.04, 12).rotateZ(Math.PI / 2),
-  flameNozzle: new THREE.CylinderGeometry(0.035, 0.05, 0.55, 10).rotateX(Math.PI / 2).translate(0, 0, 0.2),
-  flameGrip: new THREE.BoxGeometry(0.05, 0.16, 0.06).translate(0, -0.1, 0.05),
-  miniBody: new THREE.BoxGeometry(0.13, 0.16, 0.4).translate(0, 0, 0.05),
-  miniDrum: new THREE.CylinderGeometry(0.09, 0.09, 0.14, 12).rotateX(Math.PI / 2).translate(0, -0.14, -0.02),
-  miniBarrel: new THREE.CylinderGeometry(0.024, 0.024, 0.62, 8).rotateX(Math.PI / 2),
-  miniMuzzle: new THREE.CylinderGeometry(0.11, 0.08, 0.08, 10).rotateX(Math.PI / 2).translate(0, 0, 0.78),
-  bazookaTube: new THREE.CylinderGeometry(0.11, 0.11, 1.3, 14).rotateX(Math.PI / 2).translate(0, 0, 0.3),
-  bazookaRim: new THREE.TorusGeometry(0.11, 0.018, 8, 16).translate(0, 0, 0.95),
-  bazookaGrip: new THREE.BoxGeometry(0.05, 0.16, 0.06).translate(0, -0.13, 0.15),
-  bazookaSight: new THREE.BoxGeometry(0.04, 0.09, 0.04).translate(0, 0.13, 0.1),
-  knifeBlade: new THREE.BoxGeometry(0.03, 0.06, 0.5),
-  knifeGuard: new THREE.BoxGeometry(0.13, 0.03, 0.05).translate(0, 0, -0.22),
-  knifeGrip: new THREE.BoxGeometry(0.045, 0.045, 0.2).translate(0, 0, -0.36)
 };
 
 export const WG = {
@@ -129,15 +71,6 @@ export const WG = {
   bow: new THREE.TorusGeometry(0.55, 0.025, 6, 20, Math.PI),
   kanabo: new THREE.CylinderGeometry(0.07, 0.14, 1.7, 10).rotateX(Math.PI / 2)
 };
-
-export const TRACER_GEO = new THREE.CylinderGeometry(0.02, 0.02, 1, 6).rotateX(Math.PI / 2);
-export const TRACER_MAT = new THREE.MeshBasicMaterial({
-  color: 0xfff2b8,
-  transparent: true,
-  opacity: 0.95,
-  depthWrite: false,
-  blending: THREE.AdditiveBlending
-});
 
 export const WAVE_GEO = new THREE.RingGeometry(1.0, 1.7, 24, 1, -Math.PI / 2 - 1.1, 2.2)
   .rotateX(-Math.PI / 2)
@@ -278,121 +211,6 @@ export function buildRig(o: { cloth: number; band: number; skin?: number; scale?
   };
 }
 
-// ----------------------------------------------------
-// ZOMBIE / INFECTED RIG BUILDER
-// ----------------------------------------------------
-export function buildZombieRig(o: {
-  cloth: number;
-  skin?: number;
-  scale?: number;
-  hunch?: number;
-  eye?: number;
-  armBend?: number;
-  armTwist?: number;
-}): RigInstance {
-  const cloth = std(o.cloth, 0.85, 0.02);
-  const skin = std(o.skin || 0x758c56, 0.8, 0.0);
-  const rot = std(0x221d18, 0.9, 0.0);
-  const wound = std(0x6e1418, 0.5, 0.05);
-  const boneM = std(0xdcd4ba, 0.65, 0.02);
-
-  const root = new THREE.Group();
-  const body = new THREE.Group();
-  root.add(body);
-
-  const add = (geo: THREE.BufferGeometry, m: THREE.Material, x: number, y: number, z: number, parent = body) => {
-    const me = mesh(geo, m);
-    me.position.set(x, y, z);
-    parent.add(me);
-    return me;
-  };
-
-  const legL = new THREE.Group();
-  legL.position.set(-0.16, 0.78, 0);
-  body.add(legL);
-  add(GEO_Z.leg, cloth, 0, 0, 0, legL);
-
-  const legR = new THREE.Group();
-  legR.position.set(0.16, 0.78, 0);
-  body.add(legR);
-  add(GEO_Z.leg, cloth, 0, 0, 0, legR);
-
-  const spine = new THREE.Group();
-  spine.position.set(0, 0.86, 0);
-  spine.rotation.x = o.hunch ?? 0.3;
-  body.add(spine);
-  add(GEO_Z.hips, cloth, 0, 0, 0, spine);
-
-  const t1 = add(GEO_Z.torsoA, cloth, -0.02, 0.42, -0.01, spine);
-  t1.rotation.z = 0.03;
-  add(GEO_Z.torsoB, rot, 0, 0.42, -0.01, spine);
-  add(GEO_Z.rib, boneM, -0.16, 0.5, 0.2, spine);
-  const wd = add(GEO_Z.wound, wound, 0.12, 0.55, 0.19, spine);
-  wd.rotation.z = 0.25;
-
-  // Toxic pustules / bio-glow
-  const pustule = add(new THREE.SphereGeometry(0.09, 8, 6), MAT.eyeZombie, 0.16, 0.65, 0.18, spine);
-  pustule.scale.set(1.2, 0.8, 1);
-
-  const head = new THREE.Group();
-  head.position.set(0.02, 1.12, 0.06);
-  spine.add(head);
-  add(GEO_Z.head, skin, 0, 0, 0, head);
-
-  const eye = mesh(GEO.eye, new THREE.MeshBasicMaterial({ color: o.eye || 0x9eff4a }));
-  eye.scale.set(0.7, 1, 1);
-  eye.position.set(0, 0.02, 0.2);
-  head.add(eye);
-  add(GEO_Z.jaw, skin, 0, -0.02, 0.06, head);
-
-  [
-    [-0.08, 0.16, -0.05, 0.35],
-    [0.06, 0.18, -0.08, -0.3],
-    [0.14, 0.15, -0.03, 0.6],
-    [-0.02, 0.2, -0.1, 0]
-  ].forEach(([x, y, z, rz]) => {
-    const hh = add(Math.random() < 0.5 ? GEO_Z.hair1 : GEO_Z.hair2, rot, x, y, z, head);
-    hh.rotation.set(rand(-0.3, 0.3), rand(-0.3, 0.3), rz);
-  });
-
-  const arm = (side: number) => {
-    const sh = new THREE.Group();
-    sh.position.set(side * 0.44, 0.8, 0);
-    spine.add(sh);
-    add(GEO_Z.armUpper, cloth, 0, 0, 0, sh);
-    const elbow = new THREE.Group();
-    elbow.position.set(0, -0.36, 0);
-    elbow.rotation.set((o.armBend ?? -0.55) * (side < 0 ? 1 : 0.4), 0, side * (o.armTwist ?? 0.35));
-    sh.add(elbow);
-    add(GEO_Z.armFore, skin, 0, 0, 0, elbow);
-    const hnd = new THREE.Group();
-    hnd.position.y = -0.34;
-    elbow.add(hnd);
-    return { sh, hnd };
-  };
-
-  const aL = arm(-1);
-  const aR = arm(1);
-  const scarf = new THREE.Group();
-  root.scale.setScalar(o.scale || 1);
-
-  return {
-    root,
-    body,
-    head,
-    eye,
-    legL,
-    legR,
-    legBaseY: legL.position.y,
-    armL: aL.sh,
-    armR: aR.sh,
-    hand: aR.hnd,
-    handL: aL.hnd,
-    scarf,
-    mats: [cloth, skin]
-  };
-}
-
 // ---------- Avatar do jogador (Texturas Faciais Originais) ----------
 export const FACE_URI =
   'data:image/jpeg;base64,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';
@@ -419,43 +237,10 @@ function crestTexture() {
   return new THREE.CanvasTexture(c);
 }
 
-export const FACE_URI2 =
-  'data:image/jpeg;base64,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';
-
-function camoTexture() {
-  const c = document.createElement('canvas');
-  c.width = c.height = 64;
-  const g = c.getContext('2d');
-  if (g) {
-    g.fillStyle = '#4a5233';
-    g.fillRect(0, 0, 64, 64);
-    const blot = (col: string, n: number) => {
-      g.fillStyle = col;
-      for (let i = 0; i < n; i++) {
-        g.save();
-        g.translate(rand(0, 64), rand(0, 64));
-        g.rotate(rand(0, TAU));
-        g.beginPath();
-        g.ellipse(0, 0, rand(4, 10), rand(3, 6), 0, 0, TAU);
-        g.fill();
-        g.restore();
-      }
-    };
-    blot('#33381f', 10);
-    blot('#6b6a42', 8);
-    blot('#232a1c', 6);
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.repeat.set(2, 2);
-  return t;
-}
-
 // ----------------------------------------------------
-// PLAYER RIG BUILDER (KAGE & BRAVO) - HIGH FIDELITY & ORIGINAL FACES
+// PLAYER RIG BUILDER (KAGE) - ORIGINAL FACE
 // ----------------------------------------------------
-export function buildPlayerRig(charId: 'kage' | 'bravo'): RigInstance {
-  const isBravo = charId === 'bravo';
+export function buildPlayerRig(_charId: 'kage' = 'kage'): RigInstance {
 
   const root = new THREE.Group();
   const body = new THREE.Group();
@@ -469,7 +254,7 @@ export function buildPlayerRig(charId: 'kage' | 'bravo'): RigInstance {
     return me;
   };
 
-  if (!isBravo) {
+  {
     // ==========================================
     // KAGE: SHINOBI COM FOTO FACIAL ORIGINAL
     // ==========================================
@@ -597,105 +382,6 @@ export function buildPlayerRig(charId: 'kage' | 'bravo'): RigInstance {
       tails,
       mats: [gi, skin, hair, trim]
     };
-  } else {
-    // ==========================================
-    // BRAVO: COM FOTO FACIAL ORIGINAL E TRAJE TÁTICO
-    // ==========================================
-    const skin = new THREE.MeshLambertMaterial({ color: 0xc08868 });
-    const band = new THREE.MeshLambertMaterial({ color: 0xb8262c });
-    const bandDk = new THREE.MeshLambertMaterial({ color: 0x7a1a1f });
-    const metal = new THREE.MeshLambertMaterial({ color: 0xc9a04a });
-    const strapMat = new THREE.MeshLambertMaterial({ color: 0x3a2e1c });
-    const boot = new THREE.MeshLambertMaterial({ color: 0x27221c });
-    const camo = new THREE.MeshLambertMaterial({ map: camoTexture() });
-    const faceMat = new THREE.MeshBasicMaterial({ color: 0xe8e8e8, map: new THREE.TextureLoader().load(FACE_URI2) });
-
-    add(B(0.7, 0.3, 0.46), camo, 0, 0.88, 0);
-    add(B(0.76, 0.84, 0.48), skin, 0, 1.34, 0);
-    add(B(0.84, 0.09, 0.5), strapMat, 0, 1.0, 0);
-    add(B(0.15, 0.1, 0.06), metal, 0, 1.0, 0.28);
-
-    // Bandolier: anchored at the shoulder and hanging down to the opposite hip
-    // (was centered on its pivot, which poked the strap up through the neck/head)
-    const bando = new THREE.Group();
-    bando.position.set(0, 1.78, 0.05);
-    bando.rotation.z = 0.55;
-    body.add(bando);
-    add(B(0.16, 1.0, 0.05), strapMat, 0, -0.5, 0.2, bando);
-    for (let i = -2; i <= 2; i++) {
-      add(B(0.09, 0.16, 0.09), metal, 0, i * 0.18 - 0.5, 0.26, bando);
-    }
-
-    const tails = new THREE.Group();
-    tails.position.set(0, 0.97, 0.3);
-    body.add(tails);
-
-    add(B(0.24, 0.12, 0.24), skin, 0, 1.8, 0);
-
-    const head = new THREE.Group();
-    head.position.y = 2.1;
-    body.add(head);
-
-    // Cabeça do Bravo com a foto original no plano frontal
-    const headBox = mesh(B(0.56, 0.6, 0.5), [skin, skin, band, skin, faceMat, skin]);
-    head.add(headBox);
-
-    add(B(0.58, 0.13, 0.53), band, 0, 0.16, 0, head);
-    const kt1 = add(B(0.06, 0.04, 0.42), bandDk, 0.08, 0.14, -0.32, head);
-    kt1.rotation.set(0.15, 0.2, 0.1);
-    const kt2 = add(B(0.06, 0.04, 0.36), bandDk, -0.06, 0.1, -0.3, head);
-    kt2.rotation.set(0.3, -0.15, -0.1);
-
-    const leg = (x: number) => {
-      const l = new THREE.Group();
-      l.position.set(x, 0.8, 0);
-      body.add(l);
-      add(B(0.28, 0.66, 0.3), camo, 0, -0.33, 0, l);
-      add(B(0.19, 0.16, 0.22), boot, 0, -0.72, 0.03, l);
-      return l;
-    };
-    const legL = leg(-0.18);
-    const legR = leg(0.18);
-
-    const arm = (x: number) => {
-      const a = new THREE.Group();
-      a.position.set(x, 1.7, 0);
-      body.add(a);
-      add(B(0.19, 0.5, 0.21), skin, 0, -0.25, 0, a);
-      add(B(0.15, 0.2, 0.17), skin, 0, -0.58, 0, a);
-      add(B(0.16, 0.13, 0.18), skin, 0, -0.72, 0, a);
-      return a;
-    };
-    const armL = arm(-0.49);
-    const armR = arm(0.49);
-
-    const hand = new THREE.Group();
-    hand.position.y = -0.74;
-    armR.add(hand);
-
-    const handL = new THREE.Group();
-    handL.position.y = -0.74;
-    armL.add(handL);
-
-    const scarf = new THREE.Group();
-    body.add(scarf);
-
-    return {
-      root,
-      body,
-      head,
-      eye: headBox,
-      legL,
-      legR,
-      legBaseY: legL.position.y,
-      armL,
-      armR,
-      hand,
-      handL,
-      scarf,
-      tails,
-      mats: [skin, band, strapMat]
-    };
   }
 }
 
@@ -796,12 +482,6 @@ export function animateRig(
         }
       }
       r.body.position.y += Math.sin(p * Math.PI) * 0.12;
-    } else if (kind === 'shoot') {
-      // Firearm shooting recoil and stance
-      const rec = Math.sin(p * Math.PI);
-      r.armR.rotation.set(-Math.PI / 2 + 0.3 * rec, 0.1, 0);
-      r.armL.rotation.set(-Math.PI / 2.3 + 0.2 * rec, 0.4, 0.1);
-      r.body.rotation.y = -0.1 * rec;
     } else if (kind === 'spin') {
       // Bō Whirlwind Staff 360 Spin
       r.body.rotation.y = p * Math.PI * 2;
@@ -867,29 +547,6 @@ export function animateRig(
 export function makeWeapon(id: string): THREE.Group {
   const g = new THREE.Group();
   if (id === 'karate') return g;
-
-  if (id === 'tracer') {
-    const m = new THREE.Mesh(TRACER_GEO, TRACER_MAT);
-    m.scale.z = 1.6;
-    g.add(m);
-    return g;
-  }
-
-  if (id === 'spit') {
-    const m = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 8), new THREE.MeshBasicMaterial({ color: 0x8fff3a }));
-    g.add(m);
-    return g;
-  }
-
-  if (id === 'club') {
-    const m = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.14, 1.5, 10), MAT.gunmetal);
-    m.position.z = 0.6;
-    g.add(m);
-    const n = new THREE.Mesh(new THREE.DodecahedronGeometry(0.18, 0), MAT.dark);
-    n.position.z = 1.3;
-    g.add(n);
-    return g;
-  }
 
   if (id === 'wave') {
     const m = new THREE.Mesh(WAVE_GEO, WAVE_MAT);
@@ -1055,140 +712,6 @@ export function makeWeapon(id: string): THREE.Group {
       break;
     }
 
-    // ================================================
-    // ARMAS DE FOGO & MILITARES DO BRAVO
-    // ================================================
-
-    // ------------------------------------------------
-    // FACA TÁTICA COMBAT TANTO
-    // ------------------------------------------------
-    case 'knife': {
-      addM(GUN_G.knifeBlade, MAT.metal, 0, 0.03, 0.4);
-      // Sawback serration spine
-      addM(new THREE.BoxGeometry(0.015, 0.02, 0.25), MAT.gunmetal, 0, 0.065, 0.3);
-      addM(GUN_G.knifeGuard, MAT.gunmetal, 0, 0, 0.22);
-      addM(GUN_G.knifeGrip, MAT.dark, 0, 0, 0.36);
-      break;
-    }
-
-    // ------------------------------------------------
-    // PISTOLA TÁTICA (DOIS TONS COM LASER VERDE)
-    // ------------------------------------------------
-    case 'pistol': {
-      // Brushed Stainless Steel Slide
-      addM(GUN_G.pistolSlide, MAT.metal, 0, 0.02, 0.14);
-      // Front slide serrations
-      addM(new THREE.BoxGeometry(0.087, 0.08, 0.08), MAT.gunmetal, 0, 0.07, 0.22);
-      // Polymer lower receiver & grip
-      addM(GUN_G.pistolFrame, MAT.dark, 0, 0.02, 0.14);
-      addM(GUN_G.pistolGrip, MAT.dark, 0, 0.02, 0.14);
-      addM(GUN_G.pistolTrigger, MAT.gunmetal);
-      addM(GUN_G.pistolSight, MAT.gunmetal);
-      // Under-barrel tactical laser module with glowing green diode
-      addM(new THREE.BoxGeometry(0.05, 0.04, 0.14), MAT.gunmetal, 0, -0.03, 0.24);
-      addM(new THREE.SphereGeometry(0.014, 6, 6), MAT.laser, 0, -0.03, 0.32);
-      break;
-    }
-
-    // ------------------------------------------------
-    // ESPINGARDA TÁTICA (SHOTGUN COM HEAT SHIELD)
-    // ------------------------------------------------
-    case 'shotgun': {
-      // Dual Barrel & Magazine Tube
-      addM(GUN_G.shotBarrel, MAT.gunmetal, 0, 0, 0.05);
-      addM(new THREE.CylinderGeometry(0.032, 0.032, 0.72, 10).rotateX(Math.PI / 2), MAT.dark, 0, -0.045, 0.35);
-      // Ventilated top heat shield rib
-      addM(new THREE.BoxGeometry(0.03, 0.02, 0.7), MAT.metal, 0, 0.075, 0.35);
-      // Ribbed pump forend grip
-      addM(GUN_G.shotPump, MAT.dark, 0, 0, 0.05);
-      // Polished walnut stock
-      addM(GUN_G.shotStock, MAT.wood, 0, 0, 0.05);
-      addM(GUN_G.shotTrigger, MAT.gunmetal);
-      break;
-    }
-
-    // ------------------------------------------------
-    // FUZIL DE ASSALTO TÁTICO COM RED-DOT HOLOGRÁFICO
-    // ------------------------------------------------
-    case 'rifle': {
-      // Main receiver & quad-rail handguard
-      addM(GUN_G.rifleBody, MAT.dark, 0, 0, 0.15);
-      addM(GUN_G.rifleBarrel, MAT.gunmetal, 0, 0, 0.15);
-      // Birdcage flash hider / muzzle brake
-      addM(new THREE.CylinderGeometry(0.035, 0.035, 0.08, 8).rotateX(Math.PI / 2), MAT.metal, 0, 0.01, 0.76);
-      // Curved 30-round magazine
-      addM(GUN_G.rifleMag, MAT.gunmetal, 0, 0, 0.15);
-      addM(GUN_G.rifleStock, MAT.dark, 0, 0, 0.15);
-      addM(GUN_G.rifleGrip, MAT.dark, 0, 0, 0.15);
-      addM(GUN_G.rifleTrigger, MAT.metal);
-
-      // Holographic Sight (EOTech style) with glowing red reticle
-      addM(new THREE.BoxGeometry(0.07, 0.09, 0.16), MAT.dark, 0, 0.12, 0.12);
-      addM(new THREE.BoxGeometry(0.05, 0.06, 0.01), MAT.redDot, 0, 0.13, 0.18);
-      break;
-    }
-
-    // ------------------------------------------------
-    // LANÇA-CHAMAS COM TANQUES E CHAMA PILOTO
-    // ------------------------------------------------
-    case 'flame': {
-      // Dual high pressure tanks with yellow hazard stripe
-      addM(GUN_G.flameTank, MAT.torii, 0, 0, 0.1);
-      addM(new THREE.CylinderGeometry(0.112, 0.112, 0.06, 12).rotateZ(Math.PI / 2), MAT.hazard, -0.15, -0.05, -0.05);
-      // Pressure gauge dial
-      addM(new THREE.CylinderGeometry(0.04, 0.04, 0.02, 10).rotateX(Math.PI / 2), MAT.chrome, -0.15, 0.08, -0.15);
-      // Shrouded flame nozzle
-      addM(GUN_G.flameNozzle, MAT.gunmetal, 0, 0, 0.25);
-      addM(new THREE.CylinderGeometry(0.07, 0.07, 0.2, 10).rotateX(Math.PI / 2), MAT.dark, 0, 0, 0.45);
-      addM(GUN_G.flameGrip, MAT.dark, 0, 0, 0.25);
-      // Brass pilot ignition flame
-      addM(new THREE.ConeGeometry(0.025, 0.08, 6).rotateX(Math.PI / 2), MAT.glow, 0, -0.04, 0.58);
-      break;
-    }
-
-    // ------------------------------------------------
-    // METRALHADORA GIRATÓRIA (MINIGUN)
-    // ------------------------------------------------
-    case 'minigun': {
-      addM(GUN_G.miniBody, MAT.dark, 0, 0, 0.1);
-      addM(GUN_G.miniDrum, MAT.gunmetal, 0, 0, 0.1);
-
-      // 6 Rotating Steel Barrels held by circular bracket rings
-      const barrelRadius = 0.065;
-      for (let b = 0; b < 6; b++) {
-        const ang = (b / 6) * TAU;
-        const bx = Math.sin(ang) * barrelRadius;
-        const by = Math.cos(ang) * barrelRadius;
-        addM(GUN_G.miniBarrel, MAT.metal, bx, by, 0.42);
-      }
-      // Support bracket rings
-      addM(new THREE.TorusGeometry(0.085, 0.015, 8, 16).rotateY(Math.PI / 2), MAT.dark, 0, 0, 0.45);
-      addM(new THREE.TorusGeometry(0.085, 0.015, 8, 16).rotateY(Math.PI / 2), MAT.dark, 0, 0, 0.72);
-
-      // Heavy Muzzle Crown
-      addM(GUN_G.miniMuzzle, MAT.gunmetal, 0, 0, 0.1);
-      break;
-    }
-
-    // ------------------------------------------------
-    // LANÇADOR DE FOGUETES M45 (BAZOOKA)
-    // ------------------------------------------------
-    case 'bazooka': {
-      // Heavy Olive Drab / Camo Tube
-      addM(GUN_G.bazookaTube, MAT.camo, 0, 0, 0.3);
-      // Warning Hazard Stripes on tube
-      addM(new THREE.TorusGeometry(0.114, 0.02, 8, 16), MAT.hazard, 0, 0, 0.5);
-      addM(GUN_G.bazookaRim, MAT.dark, 0, 0, 0.1);
-      addM(GUN_G.bazookaGrip, MAT.dark, 0, 0, 0.1);
-
-      // Targeting scope with rubber eyecup
-      addM(GUN_G.bazookaSight, MAT.dark, 0, 0, 0.1);
-      addM(new THREE.CylinderGeometry(0.03, 0.03, 0.32, 10).rotateX(Math.PI / 2), MAT.gunmetal, -0.14, 0.14, 0.35);
-
-      // Protruding Rocket Warhead Tip in muzzle
-      addM(new THREE.ConeGeometry(0.09, 0.24, 8).rotateX(Math.PI / 2), MAT.crimson, 0, 0, 1.05);
-      break;
-    }
   }
 
   return g;

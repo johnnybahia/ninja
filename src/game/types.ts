@@ -1,8 +1,8 @@
 import type * as THREE from 'three';
 
-export type CharacterId = 'kage' | 'bravo';
+export type CharacterId = 'kage';
 
-export type WeaponKind = 'melee' | 'chain' | 'proj' | 'bomb' | 'karate' | 'flame';
+export type WeaponKind = 'melee' | 'chain' | 'proj' | 'bomb' | 'karate';
 
 export interface WeaponDef {
   id: string;
@@ -17,16 +17,10 @@ export interface WeaponDef {
   anim?: string;
   dur?: number;
   stamina?: number;
-  stCost?: number;
   count?: number;
   spread?: number;
   speed?: number;
   pierce?: boolean;
-  gun?: boolean;
-  spin?: boolean;
-  cdBase?: number;
-  cdMin?: number;
-  rocket?: boolean;
   life?: number;
   pointMult?: number;
 }
@@ -78,7 +72,6 @@ export interface RigInstance {
 
 export interface EnemyInstance {
   type: 'samurai' | 'archer' | 'boss';
-  isZ: boolean;
   hp: number;
   maxHp: number;
   speed: number;
@@ -129,7 +122,6 @@ export interface ProjectileInstance {
   mesh: THREE.Object3D;
   homing?: boolean;
   speed?: number;
-  gun?: boolean;
   sp?: boolean;
   ptMult?: number;
   bomb?: boolean;

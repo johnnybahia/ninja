@@ -16,13 +16,12 @@ import {
   turnTo,
   rand,
   WEAPONS_KAGE,
-  WEAPONS_BRAVO,
   SPECIALS,
   KARATE,
   WORLD_PAL
 } from './constants';
 import { sfx } from './audio';
-import { MAT, GEO, buildRig, buildZombieRig, buildPlayerRig, animateRig, makeWeapon, mesh } from './rigs';
+import { MAT, GEO, buildRig, buildPlayerRig, animateRig, makeWeapon, mesh } from './rigs';
 
 // Scroll drop chance per kill for each loaded weapon (2 weapons -> 7.5% per kill).
 const SCROLL_RATE_PER_WEAPON = 0.0375;
@@ -89,9 +88,6 @@ export class GameEngine {
 
   private solids: { x: number; z: number; r: number; h: number }[] = [];
   private occluders: THREE.Object3D[] = [];
-  private barrelsGroup = new THREE.Group();
-  private barrelPositions: { x: number; z: number; fire: THREE.Mesh }[] = [];
-  private doomActive = false;
 
   // Particles (Gerais: poeira, faíscas, fumaça, magia)
   private PN = 700;
@@ -166,13 +162,8 @@ export class GameEngine {
     special: {} as Record<number, number>,
     tornado: 0,
     torTick: 0,
-    rush: null as { t: number; hits: number; kicked: boolean; knife?: boolean } | null,
-    recoil: 0,
-    attackHeldT: 0,
-    suppress: 0,
-    suppressTick: 0,
-    gunHoldT: 0,
-    gloryCd: 0
+    rush: null as { t: number; hits: number; kicked: boolean } | null,
+    attackHeldT: 0
   };
 
   private slash!: THREE.Mesh;
@@ -248,7 +239,7 @@ export class GameEngine {
     this.initWorld();
     this.initPlayer();
     this.initSlashEffects();
-    this.applyTheme(false);
+    this.applyTheme();
 
     this.isRunning = true;
     this.clock.start();
@@ -570,48 +561,13 @@ export class GameEngine {
       this.addSolid(tx, tz, 0.35, 2.5);
     });
 
-    // Doom Barrels
-    this.barrelsGroup.visible = false;
-    this.scene.add(this.barrelsGroup);
-    const bodyG = new THREE.CylinderGeometry(0.42, 0.46, 0.9, 10);
-    const rimG = new THREE.CylinderGeometry(0.44, 0.44, 0.06, 10);
-    const fireG = new THREE.CylinderGeometry(0.3, 0.1, 0.3, 8);
-    const rustM = new THREE.MeshLambertMaterial({ color: 0x3a2620 });
-    const rimM = new THREE.MeshLambertMaterial({ color: 0x1c1512 });
-    const fireM = new THREE.MeshBasicMaterial({ color: 0xff5a20, transparent: true, opacity: 0.85, fog: false });
-
-    const pts = [
-      [6, -6],
-      [-7, -3],
-      [9, 8],
-      [-9, 6],
-      [3, 20],
-      [-4, 22],
-      [11, -18],
-      [-12, -14]
-    ];
-    pts.forEach(([x, z]) => {
-      const g = new THREE.Group();
-      g.position.set(x, 0, z);
-      const b = mesh(bodyG, rustM);
-      b.position.y = 0.45;
-      g.add(b);
-      const r1 = mesh(rimG, rimM);
-      r1.position.y = 0.88;
-      g.add(r1);
-      const f = new THREE.Mesh(fireG, fireM);
-      f.position.y = 1.05;
-      g.add(f);
-      this.barrelsGroup.add(g);
-      this.barrelPositions.push({ x, z, fire: f });
-    });
   }
 
   private initPlayer() {
     this.player.rig = buildPlayerRig(this.charId);
     this.scene.add(this.player.rig.root);
 
-    this.weapons = this.charId === 'kage' ? WEAPONS_KAGE : WEAPONS_BRAVO;
+    this.weapons = WEAPONS_KAGE;
     this.player.weaponMeshes = [];
     this.weapons.forEach((w) => {
       const m = makeWeapon(w.id);
@@ -654,14 +610,13 @@ export class GameEngine {
 
   public setCharacter(id: CharacterId) {
     this.charId = id;
-    this.applyTheme(id === 'bravo');
     if (this.state === 'play') return;
 
     this.scene.remove(this.player.rig.root);
     this.player.rig = buildPlayerRig(id);
     this.scene.add(this.player.rig.root);
 
-    this.weapons = id === 'kage' ? WEAPONS_KAGE : WEAPONS_BRAVO;
+    this.weapons = WEAPONS_KAGE;
     this.player.weaponMeshes = [];
     this.weapons.forEach((w) => {
       const m = makeWeapon(w.id);
@@ -672,9 +627,8 @@ export class GameEngine {
     this.setWeapon(0);
   }
 
-  public applyTheme(isDoom: boolean) {
-    this.doomActive = isDoom;
-    const T = WORLD_PAL[isDoom ? 'doom' : 'ninja'];
+  public applyTheme() {
+    const T = WORLD_PAL.ninja;
     this.scene.background = new THREE.Color(T.sky);
     if (this.scene.fog && 'far' in this.scene.fog) {
       this.scene.fog.color.set(T.sky);
@@ -697,7 +651,6 @@ export class GameEngine {
     this.hemi.color.set(T.hemiSky);
     this.hemi.groundColor.set(T.hemiGround);
 
-    this.barrelsGroup.visible = isDoom;
   }
 
   public setWeapon(idx: number) {
@@ -766,7 +719,6 @@ export class GameEngine {
     this.player.special = {};
     this.player.tornado = 0;
     this.player.rush = null;
-    this.player.suppress = 0;
     this.player.dash = 0;
     this.player.dashInv = false;
     this.attackQueueT = 0;
@@ -797,10 +749,9 @@ export class GameEngine {
     this.clearedShown = false;
     this.player.tookDamage = false;
 
-    const isZ = this.charId === 'bravo';
     const boss = this.wave % 4 === 0;
-    const nS = Math.min(isZ ? 13 : 9, (isZ ? 3 : 2) + this.wave);
-    const nA = Math.min(isZ ? 6 : 4, Math.floor(this.wave / 2) + (isZ ? 1 : 0));
+    const nS = Math.min(9, 2 + this.wave);
+    const nA = Math.min(4, Math.floor(this.wave / 2));
 
     const list: ('samurai' | 'archer' | 'boss')[] = [];
     for (let i = 0; i < nS; i++) list.push('samurai');
@@ -820,18 +771,13 @@ export class GameEngine {
       }
     });
 
-    const sub = boss
-      ? isZ
-        ? 'O colosso desperta'
-        : 'O oni despertou'
-      : `${nS} ${isZ ? 'infectados' : 'samurais'}${nA ? ` e ${nA} ${isZ ? 'cuspidores' : 'arqueiros'}` : ''}`;
+    const sub = boss ? 'O oni despertou' : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
     this.callbacks.onWaveChange(this.wave, `Onda ${this.wave}`, sub);
     sfx.wave();
   }
 
   private spawnEnemy(type: 'samurai' | 'archer' | 'boss', x: number, z: number) {
     const hpMul = 1 + (this.wave - 1) * 0.15;
-    const isZ = this.charId === 'bravo';
     let rig: RigInstance;
     let hp = 60;
     let speed = 3.7;
@@ -839,42 +785,22 @@ export class GameEngine {
     let h = 2.5;
 
     if (type === 'samurai') {
-      rig = isZ
-        ? buildZombieRig({ cloth: 0x3c4230, skin: 0x7c9159, hunch: 0.34 })
-        : buildRig({ cloth: 0x7d2a2a, band: 0x1c1a22, skin: 0xd9a577 });
-      if (!isZ) {
-        const hMesh = mesh(GEO.helmet, MAT.dark);
-        hMesh.position.y = 0.26;
-        rig.head.add(hMesh);
-        rig.hand.add(makeWeapon('katana'));
-      }
-      hp = (isZ ? 46 : 60) * hpMul;
-      speed = isZ ? 3.0 : 3.7;
+      rig = buildRig({ cloth: 0x7d2a2a, band: 0x1c1a22, skin: 0xd9a577 });
+      const hMesh = mesh(GEO.helmet, MAT.dark);
+      hMesh.position.y = 0.26;
+      rig.head.add(hMesh);
+      rig.hand.add(makeWeapon('katana'));
+      hp = 60 * hpMul;
+      speed = 3.7;
     } else if (type === 'archer') {
-      rig = isZ
-        ? buildZombieRig({ cloth: 0x4a3d55, skin: 0x8aa060, hunch: 0.22, eye: 0x8fff5a })
-        : buildRig({ cloth: 0x3d5640, band: 0xb89a5a, skin: 0xd9a577 });
-      if (!isZ) rig.handL.add(makeWeapon('bow'));
-      hp = (isZ ? 34 : 40) * hpMul;
-      speed = isZ ? 2.8 : 3.3;
+      rig = buildRig({ cloth: 0x3d5640, band: 0xb89a5a, skin: 0xd9a577 });
+      rig.handL.add(makeWeapon('bow'));
+      hp = 40 * hpMul;
+      speed = 3.3;
     } else {
-      rig = isZ
-        ? buildZombieRig({
-            cloth: 0x2e3a20,
-            skin: 0x5a6b3f,
-            scale: 2.1,
-            hunch: 0.16,
-            eye: 0xc8ff6a,
-            armBend: -0.2,
-            armTwist: 0.1
-          })
-        : buildRig({ cloth: 0x3a1414, band: 0xd4a24c, skin: 0xb03a2e, scale: 2.1 });
-      if (isZ) {
-        rig.hand.add(makeWeapon('club'));
-      } else {
-        rig.hand.add(makeWeapon('kanabo'));
-      }
-      hp = (isZ ? 400 : 480) * hpMul;
+      rig = buildRig({ cloth: 0x3a1414, band: 0xd4a24c, skin: 0xb03a2e, scale: 2.1 });
+      rig.hand.add(makeWeapon('kanabo'));
+      hp = 480 * hpMul;
       speed = 3.1;
       r = 1.1;
       h = 5.2;
@@ -900,7 +826,6 @@ export class GameEngine {
 
     const enemy: EnemyInstance = {
       type,
-      isZ,
       hp,
       maxHp: hp,
       speed,
@@ -1090,7 +1015,7 @@ export class GameEngine {
     this.rings.push({ m, t: 0, dur, maxR, startR: 0.2 });
   }
 
-  // AoE burst for bomb-flagged projectiles (grenades, bazooka rockets). Damage falls
+  // AoE burst for bomb-flagged projectiles (grenades). Damage falls
   // off with distance from the blast center; the player's own explosives never hurt them.
   private explodeAt(x: number, y: number, z: number, radius: number, dmg: number, kb: number) {
     for (const e of this.enemies) {
@@ -1285,17 +1210,16 @@ export class GameEngine {
 
   private updateReticle(dt: number) {
     const w = this.weapons[this.activeWeaponIdx];
-    const straight = w && (w.kind === 'proj' || w.kind === 'flame' || !!w.rocket);
+    const straight = w && w.kind === 'proj';
     if (!straight || this.player.hp <= 0) {
       this.reticle.visible = false;
       return;
     }
     const fx = Math.sin(this.player.yaw);
     const fz = Math.cos(this.player.yaw);
-    const reach =
-      w.kind === 'flame' ? w.range || 4.6 : Math.min(18, (w.rocket ? 26 : w.speed || 30) * (w.rocket ? 2.2 : w.life || 1.2));
+    const reach = Math.min(18, (w.speed || 30) * (w.life || 1.2));
     const n = w.count || 1;
-    const halfSpread = ((n - 1) / 2) * (w.spread || 0) + (w.kind === 'flame' ? (w.arc || 1.3) / 2 : 0);
+    const halfSpread = ((n - 1) / 2) * (w.spread || 0);
 
     // Nearest enemy inside the line of fire (feedback only; the shot direction is unchanged)
     let lock: EnemyInstance | null = null;
@@ -1384,7 +1308,6 @@ export class GameEngine {
     this.player.comboT = 0;
     this.player.tornado = 0;
     this.player.rush = null;
-    this.player.suppress = 0;
 
     if (this.lastMove.lengthSq() > 0.01 && this.player.moveAmt > 0.1) {
       this.player.dashDir.copy(this.lastMove).normalize();
@@ -1453,11 +1376,7 @@ export class GameEngine {
       this.player.comboT = 0.75;
     }
     const heavy = step === 2 || w.id === 'bo';
-    if (!w.gun) {
-      this.player.anim = { kind: w.anim || 'slash', t: 0, dur: w.dur || 0.2, side: step };
-    } else {
-      this.player.anim = { kind: 'shoot', t: 0, dur: Math.min(w.cd, 0.16), side: 0 };
-    }
+    this.player.anim = { kind: w.anim || 'slash', t: 0, dur: w.dur || 0.2, side: step };
     this.player.atkCd = w.cd + (step === 2 ? 0.15 : 0);
     this.ptMult = w.pointMult || 1;
 
@@ -1480,11 +1399,10 @@ export class GameEngine {
     } else if (w.kind === 'proj') {
       const n = w.count || 1;
       for (let i = 0; i < n; i++) {
-        const a = this.player.yaw + (i - (n - 1) / 2) * (w.spread || 0) + (w.gun ? rand(-0.03, 0.03) : 0);
+        const a = this.player.yaw + (i - (n - 1) / 2) * (w.spread || 0);
         this.spawnProj({
-          type: w.gun ? 'tracer' : w.id,
+          type: w.id,
           friendly: true,
-          gun: !!w.gun,
           ptMult: w.pointMult || 1,
           pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
           vel: new THREE.Vector3(Math.sin(a) * (w.speed || 30), 0, Math.cos(a) * (w.speed || 30)),
@@ -1493,52 +1411,19 @@ export class GameEngine {
           life: w.life || 1.2
         });
       }
-      if (w.gun) {
-        this.emitParticles(this.tmpH.x, this.tmpH.y, this.tmpH.z, w.id === 'shotgun' ? 14 : 6, 0xffe3a0, 3.5, 1, 6, 0.16);
-        this.player.recoil = 0.12;
-        if (w.id === 'shotgun') sfx.shotgun();
-        else if (w.id === 'rifle') sfx.rifle();
-        else if (w.id === 'minigun') sfx.minigun();
-        else sfx.pistol();
-      } else {
-        sfx.throw();
-      }
+      sfx.throw();
     } else if (w.kind === 'bomb') {
-      if (w.rocket) {
-        this.spawnProj({
-          type: 'tracer',
-          gun: true,
-          ptMult: w.pointMult || 1,
-          friendly: true,
-          bomb: true,
-          pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-          vel: new THREE.Vector3(fx * 26, 0, fz * 26),
-          dmg: w.dmg[0],
-          life: 2.2
-        });
-        this.player.recoil = 0.2;
-        sfx.bazooka();
-      } else {
-        this.spawnProj({
-          type: 'bomb',
-          friendly: true,
-          pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-          vel: new THREE.Vector3(fx * 14, 7.5, fz * 14),
-          grav: 16,
-          dmg: w.dmg[0],
-          life: 3,
-          bomb: true
-        });
-        sfx.throw();
-      }
-    } else if (w.kind === 'flame') {
-      this.meleeHit(w.range || 4.6, w.arc || 1.3, w.dmg[0], 1, false);
-      for (let i = 0; i < 4; i++) {
-        const a = this.player.yaw + rand(-0.35, 0.35);
-        const d = rand(0.5, w.range || 4.6);
-        this.emitParticles(this.tmpH.x + Math.sin(a) * d, this.tmpH.y, this.tmpH.z + Math.cos(a) * d, 2, 0xff7a2e, 1.5, 1.2, 3, 0.3);
-      }
-      sfx.flame();
+      this.spawnProj({
+        type: 'bomb',
+        friendly: true,
+        pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
+        vel: new THREE.Vector3(fx * 14, 7.5, fz * 14),
+        grav: 16,
+        dmg: w.dmg[0],
+        life: 3,
+        bomb: true
+      });
+      sfx.throw();
     }
   }
 
@@ -1653,152 +1538,6 @@ export class GameEngine {
         sfx.throw();
         break;
       }
-      case 'knife':
-        // Retalho Relâmpago: one wide, hard slash rather than the default gunfire
-        this.player.anim = { kind: 'slash', t: 0, dur: 0.22, side: 0 };
-        this.slash.geometry = this.slashGeos.katana;
-        this.slashT = 0;
-        this.slashDur = 0.18;
-        this.spHit = true;
-        this.meleeHit(2.6, 2.6, 64, 7, true);
-        this.spHit = false;
-        sfx.heavy();
-        break;
-      case 'pistol':
-        // Duplo Cano: two precise, piercing high-damage shots instead of a weak spread
-        for (let i = 0; i < 2; i++) {
-          this.spawnProj({
-            type: 'tracer',
-            gun: true,
-            sp: true,
-            friendly: true,
-            pierce: true,
-            pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-            vel: new THREE.Vector3(fx * 60, 0, fz * 60),
-            dmg: 31,
-            life: 0.9
-          });
-        }
-        this.player.recoil = 0.16;
-        sfx.pistol();
-        break;
-      case 'shotgun':
-        // Rajada Dupla: two full pellet blasts back to back
-        for (let blast = 0; blast < 2; blast++) {
-          for (let i = 0; i < (w.count || 7); i++) {
-            const a =
-              this.player.yaw + (i - ((w.count || 7) - 1) / 2) * (w.spread || 0.32) + rand(-0.02, 0.02);
-            this.spawnProj({
-              type: 'tracer',
-              gun: true,
-              sp: true,
-              friendly: true,
-              pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-              vel: new THREE.Vector3(Math.sin(a) * (w.speed || 40), 0, Math.cos(a) * (w.speed || 40)),
-              dmg: w.dmg[0] || 8,
-              life: w.life || 0.22
-            });
-          }
-        }
-        this.player.recoil = 0.22;
-        sfx.shotgun();
-        break;
-      case 'rifle':
-        // Fogo Supressivo: a big rapid burst, not the same 5 shots every other gun gets
-        for (let i = 0; i < 14; i++) {
-          const a = this.player.yaw + rand(-0.05, 0.05);
-          this.spawnProj({
-            type: 'tracer',
-            gun: true,
-            sp: true,
-            friendly: true,
-            pierce: true,
-            pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-            vel: new THREE.Vector3(Math.sin(a) * 58, 0, Math.cos(a) * 58),
-            dmg: 11,
-            life: 1.1
-          });
-        }
-        this.player.recoil = 0.15;
-        sfx.rifle();
-        break;
-      case 'flame':
-        // Parede de Fogo: a wide fire AoE — the default gunfire made zero sense on a flamethrower
-        this.meleeHit((w.range || 4.6) * 1.5, TAU * 0.6, 52, 2, false);
-        for (let i = 0; i < 16; i++) {
-          const a = this.player.yaw + rand(-1.0, 1.0);
-          const d = rand(1, (w.range || 4.6) * 1.4);
-          this.emitParticles(
-            this.tmpH.x + Math.sin(a) * d,
-            this.tmpH.y,
-            this.tmpH.z + Math.cos(a) * d,
-            3,
-            0xff7a2e,
-            2,
-            1.5,
-            4,
-            0.4
-          );
-        }
-        sfx.flame();
-        break;
-      case 'minigun':
-        // Chuva de Chumbo: a much wider, denser spray than the generic burst
-        for (let i = 0; i < 28; i++) {
-          const a = this.player.yaw + rand(-0.12, 0.12);
-          this.spawnProj({
-            type: 'tracer',
-            gun: true,
-            sp: true,
-            friendly: true,
-            pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-            vel: new THREE.Vector3(Math.sin(a) * 62, 0, Math.cos(a) * 62),
-            dmg: 10,
-            life: 1.0
-          });
-        }
-        this.player.recoil = 0.18;
-        sfx.minigun();
-        break;
-      case 'bazooka':
-        // Bombardeio Aéreo: a volley of explosive rockets instead of a handful of bullets
-        for (let i = 0; i < 3; i++) {
-          const a = this.player.yaw + (i - 1) * 0.18;
-          this.spawnProj({
-            type: 'tracer',
-            gun: true,
-            sp: true,
-            friendly: true,
-            bomb: true,
-            pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-            vel: new THREE.Vector3(Math.sin(a) * 26, 0, Math.cos(a) * 26),
-            dmg: 70,
-            aoeR: 4.5,
-            kb: 10,
-            life: 2.2
-          });
-        }
-        this.player.recoil = 0.3;
-        sfx.bazooka();
-        break;
-      default:
-        // Firearms default burst
-        for (let i = -2; i <= 2; i++) {
-          const a = this.player.yaw + i * 0.08;
-          this.spawnProj({
-            type: 'tracer',
-            gun: true,
-            sp: true,
-            friendly: true,
-            pierce: true,
-            pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-            vel: new THREE.Vector3(Math.sin(a) * 60, 0, Math.cos(a) * 60),
-            dmg: 24,
-            life: 0.9
-          });
-        }
-        sfx.pistol();
-        break;
     }
   }
 
@@ -2124,7 +1863,6 @@ export class GameEngine {
       life: o.life,
       mesh: m,
       pierce: o.pierce,
-      gun: o.gun,
       sp: o.sp,
       ptMult: o.ptMult,
       bomb: o.bomb,
@@ -2459,7 +2197,7 @@ export class GameEngine {
         } else if (e.cd <= 0) {
           e.cd = 2.4;
           this.spawnProj({
-            type: e.isZ ? 'spit' : 'arrow',
+            type: 'arrow',
             friendly: false,
             pos: new THREE.Vector3(e.pos.x + nx * 0.6, 1.5, e.pos.z + nz * 0.6),
             vel: new THREE.Vector3(nx * 22, 0, nz * 22),
