@@ -72,7 +72,8 @@ KEYWORDS = {
 # fill in a slug (from --list-candidates) to skip the automatic search for that surface
 OVERRIDE_SLUG = {
     # picked by hand from --list-candidates output, not the automatic ranking:
-    'flag': 'precast_stone_paving',  # tied vs. concrete/hex/brick paving - only real stone of the lot
+    'flag': 'mixed_rock_tiles',  # precast_stone_paving's grid read as a modern concrete patio, not worn flagstone
+    # 'flag': 'precast_stone_paving',  # fallback if mixed_rock_tiles doesn't look right either
     'rock': 'lichen_rock',  # matches the original brief directly: granite, strata, lichen, moss
 }
 
