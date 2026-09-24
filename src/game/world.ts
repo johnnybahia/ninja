@@ -455,6 +455,12 @@ export class World {
   private atmBlending = false;
   atmIndex = 0;
   private garden: Garden;
+  // image-based lighting baked from the live sky (re-baked when the atmosphere moves)
+  private pmrem: THREE.PMREMGenerator;
+  private envScene = new THREE.Scene();
+  private envGround: THREE.Mesh;
+  private envRT: THREE.WebGLRenderTarget | null = null;
+  private envT = 0;
 
   constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene) {
     this.scene = scene;
@@ -489,6 +495,13 @@ export class World {
 
     this.sky = buildSky(atm);
     scene.add(this.sky);
+    this.pmrem = new THREE.PMREMGenerator(renderer);
+    const envSky = new THREE.Mesh(this.sky.geometry, this.sky.material);
+    envSky.frustumCulled = false;
+    this.envGround = new THREE.Mesh(new THREE.CircleGeometry(250, 32).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ fog: false }));
+    this.envGround.position.y = -3;
+    this.envScene.add(envSky, this.envGround);
+    scene.environmentIntensity = 0.6;
     const mFar = buildMountains(175, 26, 58, atm.ridgeFar, 1.7, atm.fog);
     const mNear = buildMountains(140, 14, 34, atm.ridgeNear, 4.2, atm.fog);
     this.root.add(mFar, mNear);
@@ -508,6 +521,7 @@ export class World {
     batch.build(this.root);
 
     this.garden = new Garden(this.root, atm, WIND_TIME, (x, z, pad) => this.isFree(x, z, pad));
+    this.updateEnv();
     this.solids.push(...this.garden.solids);
     this.shojiMat = this.root.userData.shoji as THREE.MeshBasicMaterial;
     this.buildMist();
@@ -1012,10 +1026,20 @@ export class World {
       // copy in place: shaders hold references to these color/vector objects
       blendAtmos(this.atm, this.atmTarget, 1);
       this.applyAtmos();
+      this.updateEnv();
       this.atmBlending = false;
     } else {
       this.atmBlending = true;
     }
+  }
+
+  private updateEnv() {
+    const a = this.atm;
+    (this.envGround.material as THREE.MeshBasicMaterial).color.copy(a.groundFill).lerp(a.fog, 0.4).multiplyScalar(0.7);
+    const rt = this.pmrem.fromScene(this.envScene, 0.02, 0.1, 1000);
+    this.envRT?.dispose();
+    this.envRT = rt;
+    this.scene.environment = rt.texture;
   }
 
   private applyAtmos() {
@@ -1027,7 +1051,7 @@ export class World {
     (this.scene.background as THREE.Color).copy(a.fog);
     this.hemi.color.copy(a.skyFill);
     this.hemi.groundColor.copy(a.groundFill);
-    this.hemi.intensity = a.hemiI;
+    this.hemi.intensity = a.hemiI * 0.7;
     this.sun.color.copy(a.sunLight);
     this.sun.intensity = a.sunI;
     this.front.color.copy(a.front);
@@ -1122,6 +1146,11 @@ export class World {
     if (this.atmBlending) {
       const done = blendAtmos(this.atm, this.atmTarget, 1 - Math.exp(-dt * 0.9));
       this.applyAtmos();
+      this.envT -= dt;
+      if (done || this.envT <= 0) {
+        this.envT = 0.4;
+        this.updateEnv();
+      }
       if (done) this.atmBlending = false;
     }
     this.petals.count = Math.floor(this.petalMax * Math.min(1, this.petalQuality * this.atm.petals));
