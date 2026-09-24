@@ -714,7 +714,7 @@ export class World {
           }
         }
         const canopy = pads.reduce((acc, l) => acc.add(l.c), new THREE.Vector3()).divideScalar(pads.length);
-        pineCards.push(foliageCards(pads, canopy, 20, [0.85, 1.25], pineTint, rng, 0.75));
+        pineCards.push(foliageCards(pads, canopy, 30, [1.0, 1.45], pineTint, rng, 0.7));
       }
       this.addSolid(x, z, 0.7, 9);
     }
@@ -1108,6 +1108,7 @@ export class World {
       (this.grass.material as THREE.Material).needsUpdate = true;
     }
     this.petalQuality = p.ambientParticles;
+    this.garden.setReflections(p.reflections);
     this.mist.forEach((m, i) => (m.visible = i < p.mistLayers));
     this.petals.count = Math.floor(this.petalMax * p.ambientParticles);
     const lights = p.composer ? (p.shadowMap >= 2048 ? 4 : 2) : 0;

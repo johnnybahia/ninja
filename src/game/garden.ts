@@ -13,6 +13,17 @@ import { applySurface } from './surfaces';
 export type Solid = { x: number; z: number; r: number; h: number };
 
 const POND = { x: -21, z: -6, r: 4.4 };
+const UP = new THREE.Vector3(0, 1, 0);
+const RV2 = new THREE.Vector2();
+const RV4 = new THREE.Vector4();
+const RQ = new THREE.Vector4();
+const RP = new THREE.Vector3();
+const RC = new THREE.Vector3();
+const RL = new THREE.Vector3();
+const RM = new THREE.Matrix4();
+const RPL = new THREE.Plane();
+const flatNormal = new THREE.DataTexture(new Uint8Array([128, 128, 255, 255]), 1, 1);
+flatNormal.needsUpdate = true;
 const GROVE = { x: 24.5, z: -4 };
 
 function pondRadius(a: number) {
@@ -26,6 +37,8 @@ export class Garden {
   private koi: THREE.InstancedMesh;
   private koiData: { r: number; speed: number; ph: number; depth: number; wob: number }[] = [];
   private dummy = new THREE.Object3D();
+  private reflOn = false;
+  private refl: { target: THREE.WebGLRenderTarget; cam: THREE.PerspectiveCamera } | null = null;
 
   constructor(root: THREE.Object3D, atm: Atmos, windTime: { value: number }, isFree: (x: number, z: number, pad: number) => boolean) {
     this.water = this.buildPond(root, atm);
@@ -123,15 +136,22 @@ export class Garden {
           uSunDir: { value: new THREE.Vector3() },
           uSunCol: { value: new THREE.Color() },
           uCenter: { value: new THREE.Vector2(POND.x, POND.z) },
-          uRadius: { value: POND.r }
+          uRadius: { value: POND.r },
+          tNormal: { value: flatNormal },
+          tRefl: { value: null },
+          uRefl: { value: 0 },
+          uTexMat: { value: new THREE.Matrix4() }
         }
       ]),
       vertexShader: /* glsl */ `
         #include <fog_pars_vertex>
+        uniform mat4 uTexMat;
         varying vec3 vW;
+        varying vec4 vRefUv;
         void main() {
           vec4 w = modelMatrix * vec4(position, 1.0);
           vW = w.xyz;
+          vRefUv = uTexMat * vec4(position, 1.0);
           vec4 mvPosition = viewMatrix * w;
           gl_Position = projectionMatrix * mvPosition;
           #include <fog_vertex>
@@ -141,22 +161,34 @@ export class Garden {
         #include <fog_pars_fragment>
         uniform float uTime; uniform vec3 uZenith; uniform vec3 uHorizon; uniform vec3 uSunDir; uniform vec3 uSunCol;
         uniform vec2 uCenter; uniform float uRadius;
+        uniform sampler2D tNormal; uniform sampler2D tRefl; uniform float uRefl;
         varying vec3 vW;
+        varying vec4 vRefUv;
         void main() {
           vec2 p = vW.xz;
-          // two layers of travelling ripples -> perturbed normal
-          float w1 = sin(p.x * 3.1 + uTime * 1.4) * cos(p.y * 2.7 - uTime * 1.1);
-          float w2 = sin((p.x + p.y) * 5.3 - uTime * 2.2) * 0.5;
-          vec3 n = normalize(vec3(w1 * 0.07 + w2 * 0.04, 1.0, cos(p.x * 2.3 - uTime) * 0.06 + w2 * 0.03));
+          // two scrolling ripple maps crossing each other + a slow analytic swell
+          vec3 n1 = texture2D(tNormal, p * 0.42 + uTime * vec2(0.021, 0.013)).xyz * 2.0 - 1.0;
+          vec3 n2 = texture2D(tNormal, mat2(0.8, -0.6, 0.6, 0.8) * p * 0.71 - uTime * vec2(0.017, 0.026)).xyz * 2.0 - 1.0;
+          vec2 t = (n1.xy + n2.xy) * 0.5;
+          float sw = sin(p.x * 1.3 + uTime * 0.9) * cos(p.y * 1.1 - uTime * 0.7);
+          vec3 n = normalize(vec3(t.x * 0.55 + sw * 0.03, 1.0, t.y * 0.55));
           vec3 v = normalize(cameraPosition - vW);
-          float fres = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+          float fres = 0.02 + 0.98 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
           vec3 r = reflect(-v, n);
+          r.y = abs(r.y) + 0.002;
           vec3 sky = mix(uHorizon, uZenith, smoothstep(0.0, 0.6, r.y));
-          float spec = pow(max(dot(r, normalize(uSunDir)), 0.0), 420.0);
-          vec3 deep = vec3(0.02, 0.07, 0.07);
-          vec3 col = mix(deep, sky, 0.25 + fres * 0.6) + uSunCol * min(spec * 1.4, 1.2);
+          if (uRefl > 0.5) {
+            // mirrored scene, nudged by the ripples
+            vec4 ru = vRefUv;
+            ru.xy += n.xz * 0.06 * ru.w;
+            sky = texture2DProj(tRefl, ru).rgb;
+          }
+          float sd = max(dot(r, normalize(uSunDir)), 0.0);
+          float spec = pow(sd, 600.0) * 6.0 + pow(sd, 60.0) * 0.08;
+          vec3 deep = vec3(0.015, 0.05, 0.05);
+          vec3 col = mix(deep, sky, clamp(0.18 + fres * 0.9, 0.0, 1.0)) + uSunCol * min(spec, 2.0);
           float edge = length(p - uCenter) / uRadius;
-          float a = mix(0.5, 0.95, fres) * smoothstep(1.08, 0.9, edge);
+          float a = mix(0.55, 0.97, fres) * smoothstep(1.08, 0.9, edge);
           gl_FragColor = vec4(col, a);
           #include <tonemapping_fragment>
           #include <colorspace_fragment>
@@ -164,8 +196,13 @@ export class Garden {
         }
       `
     });
+    new THREE.TextureLoader().load(`${import.meta.env.BASE_URL}tex/water_n.webp`, (t) => {
+      t.wrapS = t.wrapT = THREE.RepeatWrapping;
+      mat.uniforms.tNormal.value = t;
+    });
     const water = new THREE.Mesh(new THREE.ShapeGeometry(shape, 12).rotateX(-Math.PI / 2), mat);
     water.position.set(POND.x, 0.14, POND.z);
+    water.onBeforeRender = (renderer, scene, camera) => this.renderReflection(renderer, scene, camera as THREE.PerspectiveCamera);
     water.renderOrder = 4;
     root.add(water);
     this.solids.push({ x: POND.x, z: POND.z, r: POND.r - 0.2, h: 6 });
@@ -429,6 +466,70 @@ export class Garden {
   }
 
   // ---------------------------------------------------------------------------
+  // Planar reflection (high quality): the scene mirrored about the water plane,
+  // rendered at half resolution just before the pond itself is drawn. Oblique
+  // near-plane clipping keeps the koi and pond bed out of the mirror.
+  setReflections(on: boolean) {
+    this.reflOn = on;
+    this.waterU.uRefl.value = 0;
+    if (!on && this.refl) {
+      this.refl.target.dispose();
+      this.refl = null;
+    }
+  }
+
+  private renderReflection(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.PerspectiveCamera) {
+    if (!this.reflOn || !camera.isPerspectiveCamera) return;
+    const size = renderer.getDrawingBufferSize(RV2);
+    const w = Math.max(64, Math.floor(size.x / 2));
+    const h = Math.max(64, Math.floor(size.y / 2));
+    if (!this.refl) {
+      this.refl = { target: new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType }), cam: new THREE.PerspectiveCamera() };
+    } else if (this.refl.target.width !== w || this.refl.target.height !== h) this.refl.target.setSize(w, h);
+    const { target, cam } = this.refl;
+    const water = this.water;
+    RP.setFromMatrixPosition(water.matrixWorld);
+    RC.setFromMatrixPosition(camera.matrixWorld);
+    if (RC.y <= RP.y) return;
+    // mirror the camera position and its look direction about the plane y = RP.y
+    RM.extractRotation(camera.matrixWorld);
+    RL.set(0, 0, -1).applyMatrix4(RM).add(RC);
+    cam.position.set(RC.x, 2 * RP.y - RC.y, RC.z);
+    cam.up.set(0, 1, 0).applyMatrix4(RM).reflect(UP);
+    cam.lookAt(RL.x, 2 * RP.y - RL.y, RL.z);
+    cam.far = camera.far;
+    cam.near = camera.near;
+    cam.updateMatrixWorld();
+    cam.projectionMatrix.copy(camera.projectionMatrix);
+    const tm = this.waterU.uTexMat.value as THREE.Matrix4;
+    tm.set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1);
+    tm.multiply(cam.projectionMatrix).multiply(cam.matrixWorldInverse).multiply(water.matrixWorld);
+    // oblique clip plane (Lengyel) so nothing below the surface is reflected
+    RPL.setFromNormalAndCoplanarPoint(UP, RP).applyMatrix4(cam.matrixWorldInverse);
+    RV4.set(RPL.normal.x, RPL.normal.y, RPL.normal.z, RPL.constant);
+    const e = cam.projectionMatrix.elements;
+    RQ.set((Math.sign(RV4.x) + e[8]) / e[0], (Math.sign(RV4.y) + e[9]) / e[5], -1, (1 + e[10]) / e[14]);
+    RV4.multiplyScalar(2 / RV4.dot(RQ));
+    e[2] = RV4.x;
+    e[6] = RV4.y;
+    e[10] = RV4.z + 1 - 0.003;
+    e[14] = RV4.w;
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevShadow = renderer.shadowMap.autoUpdate;
+    water.visible = false;
+    renderer.shadowMap.autoUpdate = false;
+    renderer.setRenderTarget(target);
+    renderer.state.buffers.depth.setMask(true);
+    if (renderer.autoClear === false) renderer.clear();
+    renderer.render(scene, cam);
+    renderer.shadowMap.autoUpdate = prevShadow;
+    renderer.setRenderTarget(prevTarget);
+    water.visible = true;
+    this.waterU.tRefl.value = target.texture;
+    this.waterU.uRefl.value = 1;
+  }
+
   syncWater(atm: Atmos) {
     const u = (this.water?.material as THREE.ShaderMaterial | undefined)?.uniforms;
     if (!u) return;
