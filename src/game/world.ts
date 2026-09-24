@@ -4,6 +4,7 @@ import { MAT } from './rigs';
 import { TAU, rand } from './constants';
 import type { QualityProfile } from './postfx';
 import { ATMOSPHERES, Atmos, blendAtmos, cloneAtmos } from './atmosphere';
+import { Garden } from './garden';
 
 export type Solid = { x: number; z: number; r: number; h: number };
 
@@ -533,6 +534,7 @@ export class World {
   private atmTarget: Atmos = ATMOSPHERES[0];
   private atmBlending = false;
   atmIndex = 0;
+  private garden: Garden;
 
   constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene) {
     this.scene = scene;
@@ -578,6 +580,8 @@ export class World {
     this.buildTorches(batch);
     batch.build(this.root);
 
+    this.garden = new Garden(this.root, atm, WIND_TIME, (x, z, pad) => this.isFree(x, z, pad));
+    this.solids.push(...this.garden.solids);
     this.shojiMat = this.root.userData.shoji as THREE.MeshBasicMaterial;
     this.buildMist();
     this.grass = this.buildGrass();
@@ -586,6 +590,13 @@ export class World {
     this.motes = motes.points;
     this.motePos = motes.pos;
     this.moteCol = motes.col;
+  }
+
+  // open ground: off the temple podium, the pond/grove and every solid prop
+  private isFree(x: number, z: number, pad: number) {
+    if (z < -21.5 && Math.abs(x) < 10) return false;
+    if (Garden.blocked(x, z)) return false;
+    return !this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r + pad);
   }
 
   private addSolid(x: number, z: number, r: number, h: number) {
@@ -958,6 +969,7 @@ export class World {
       if (Math.abs(x) < 2.1 && z < -12 && z > -23.5) continue; // stone path
       if (Math.abs(x) < 2 && z > 13 && z < 17) continue;
       if (this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r * 0.8)) continue;
+      if (Garden.blocked(x, z)) continue;
       const s = rand(0.7, 1.35) * (r > 36 ? 1.2 : 1);
       d.position.set(x, 0, z);
       d.rotation.set(rand(-0.15, 0.15), rand(0, TAU), rand(-0.15, 0.15));
@@ -1158,6 +1170,7 @@ export class World {
       m.position.x = focus.x;
       m.position.z = focus.z;
     }
+    this.garden.update(dt, time, this.atm);
     this.sky.position.copy(camPos);
     (this.sky.material as THREE.ShaderMaterial).uniforms.uTime.value = time;
 
