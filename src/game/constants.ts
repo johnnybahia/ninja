@@ -58,7 +58,7 @@ export const WORLD_PAL = {
   ninja: {
     sky: 0x3b2b4f, fogFar: 85, ground: 0x55603f, stone: 0x7a7064, stoneDark: 0x564e47,
     wood: 0x6b3a2a, roof: 0x2f2a33, torii: 0xb8392f, trunk: 0x4a3326, pine: 0x2f4a36,
-    sakura: 0xe3a3b8, glow: 0xffc070, sun: 0xffb27a, sunI: 0.95, sunDisc: 0xffc98a,
+    sakura: 0xe3a3b8, glow: 0xff9a3c, sun: 0xffb27a, sunI: 0.95, sunDisc: 0xffc98a,
     hemiSky: 0xffd6b0, hemiGround: 0x2a2040
   }
 };

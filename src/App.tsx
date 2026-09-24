@@ -4,6 +4,7 @@ import { CharacterId, WeaponDef } from './game/types';
 import { WEAPONS_KAGE, WEAPON_INFO, KARATE, SPECIALS } from './game/constants';
 import { ICON_URLS } from './game/icons';
 import { initAudio } from './game/audio';
+import type { Quality, QualitySetting } from './game/postfx';
 import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft } from 'lucide-react';
 
 const SLOT_COUNT = 2;
@@ -141,6 +142,16 @@ export default function App() {
 
   // Settings Modal
   const [showSettings, setShowSettings] = useState(false);
+  const [qualitySetting, setQualitySetting] = useState<QualitySetting>(() => {
+    try {
+      const v = localStorage.getItem('kage_quality');
+      return v === 'high' || v === 'medium' || v === 'low' ? v : 'auto';
+    } catch {
+      return 'auto';
+    }
+  });
+  const [effectiveQuality, setEffectiveQuality] = useState<Quality>('high');
+  const qualityRef = useRef(qualitySetting);
   const [sensitivity, setSensitivity] = useState(1.0);
   const [autoCamera, setAutoCamera] = useState(true);
   const [autoTurnStick, setAutoTurnStick] = useState(true);
@@ -184,6 +195,7 @@ export default function App() {
         setActiveWeapon(w);
       },
       onSpecialsUpdate: (sp) => setSpecials(sp),
+      onQualityChange: (_setting, effective) => setEffectiveQuality(effective),
       onGameOver: (finalScore) => {
         setGameState('over');
         if (finalScore > bestScore) {
@@ -199,6 +211,7 @@ export default function App() {
     // Dev-only handle for automated visual checks; stripped from production builds
     if (import.meta.env.DEV) (window as any).__engine = engine;
     engine.loadout = slotsRef.current;
+    engine.setQuality(qualityRef.current);
     setActiveWeapon(engine.weapons[0]);
 
     const handleResize = () => engine.resize();
@@ -824,7 +837,7 @@ export default function App() {
         <div className="fixed inset-0 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 z-40">
           <div className="bg-[var(--ink)] border border-[rgba(239,230,210,0.3)] rounded-xl max-w-sm w-full p-5 shadow-2xl">
             <h3 className="font-serif text-lg font-bold text-[var(--ember)] mb-4 flex items-center gap-2">
-              <Settings className="w-5 h-5" /> Configurações de Rotação
+              <Settings className="w-5 h-5" /> Configurações
             </h3>
 
             <div className="space-y-4 text-xs text-[var(--paper)]">
@@ -865,6 +878,47 @@ export default function App() {
                   onChange={(e) => setAutoCamera(e.target.checked)}
                   className="w-4 h-4 accent-[var(--ember)]"
                 />
+              </div>
+
+              <div className="py-1 border-t border-[rgba(239,230,210,0.1)]">
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="font-bold">Qualidade gráfica:</span>
+                  {qualitySetting === 'auto' && (
+                    <span className="text-[10px] text-[var(--paper)]/60">
+                      agora: {effectiveQuality === 'high' ? 'Alta' : effectiveQuality === 'medium' ? 'Média' : 'Baixa'}
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-4 gap-1">
+                  {(
+                    [
+                      ['auto', 'Auto'],
+                      ['high', 'Alta'],
+                      ['medium', 'Média'],
+                      ['low', 'Baixa']
+                    ] as [QualitySetting, string][]
+                  ).map(([q, label]) => (
+                    <button
+                      key={q}
+                      onClick={() => {
+                        setQualitySetting(q);
+                        qualityRef.current = q;
+                        engineRef.current?.setQuality(q);
+                        try {
+                          localStorage.setItem('kage_quality', q);
+                        } catch {}
+                      }}
+                      className={`py-1.5 rounded border text-[11px] font-bold cursor-pointer ${
+                        qualitySetting === q
+                          ? 'border-[var(--ember)] bg-[rgba(242,166,90,0.25)] text-[var(--paper)]'
+                          : 'border-[rgba(239,230,210,0.2)] text-[var(--paper)]/70'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-[var(--paper)]/50 mt-1">Auto reduz a qualidade se o jogo ficar lento.</p>
               </div>
 
             </div>

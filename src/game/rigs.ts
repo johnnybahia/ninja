@@ -30,9 +30,9 @@ export const MAT = {
   blood: std(0x820e15, 0.45, 0.1),
   skin: std(0xdca880, 0.68, 0.0),
   skinDemon: std(0xb33026, 0.62, 0.02),
-  eyeCyan: new THREE.MeshBasicMaterial({ color: 0x36e2ff }),
-  eyeAmber: new THREE.MeshBasicMaterial({ color: 0xffb326 }),
-  eyeDemon: new THREE.MeshBasicMaterial({ color: 0xff3b1f }),
+  eyeCyan: new THREE.MeshBasicMaterial({ color: new THREE.Color(0x36e2ff).multiplyScalar(2.5) }),
+  eyeAmber: new THREE.MeshBasicMaterial({ color: new THREE.Color(0xffb326).multiplyScalar(2.5) }),
+  eyeDemon: new THREE.MeshBasicMaterial({ color: new THREE.Color(0xff3b1f).multiplyScalar(3) }),
   arrowFeather: std(0xdedede, 0.8, 0.0)
 };
 
@@ -76,7 +76,7 @@ export const WAVE_GEO = new THREE.RingGeometry(1.0, 1.7, 24, 1, -Math.PI / 2 - 1
   .rotateX(-Math.PI / 2)
   .translate(0, 0, -1.3);
 export const WAVE_MAT = new THREE.MeshBasicMaterial({
-  color: 0xffd166,
+  color: new THREE.Color(0xffd166).multiplyScalar(2.2),
   transparent: true,
   opacity: 0.85,
   side: THREE.DoubleSide,

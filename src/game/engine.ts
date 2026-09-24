@@ -21,6 +21,7 @@ import {
   WORLD_PAL
 } from './constants';
 import { sfx } from './audio';
+import { PostFX, NINJA_LOOK, Quality, QualitySetting, qualityProfile, detectQuality } from './postfx';
 import { MAT, GEO, buildRig, buildPlayerRig, animateRig, makeWeapon, mesh } from './rigs';
 
 // Scroll drop chance per kill for each loaded weapon (2 weapons -> 7.5% per kill).
@@ -64,6 +65,7 @@ export interface GameEngineCallbacks {
   onWeaponChange: (weaponIdx: number, weapon: WeaponDef) => void;
   onSpecialsUpdate: (specials: Record<number, number>) => void;
   onGameOver: (score: number, wave: number, level: number, kills: number, bestCombo: number) => void;
+  onQualityChange?: (setting: QualitySetting, effective: Quality) => void;
 }
 
 export class GameEngine {
@@ -229,6 +231,16 @@ export class GameEngine {
   private tmpV = new THREE.Vector3();
   private tmpH = new THREE.Vector3();
 
+  // Rendering quality & post-processing
+  private fx: PostFX | null = null;
+  public qualitySetting: QualitySetting = 'auto';
+  public quality: Quality = 'high';
+  private fpsAcc = 0;
+  private fpsFrames = 0;
+  private slowWindows = 0;
+  private hurtFx = 0;
+  private desatFx = 0;
+
   constructor(canvas: HTMLCanvasElement, minimapCanvas: HTMLCanvasElement, callbacks: GameEngineCallbacks) {
     this.canvas = canvas;
     this.minimapCanvas = minimapCanvas;
@@ -240,6 +252,7 @@ export class GameEngine {
     this.initPlayer();
     this.initSlashEffects();
     this.applyTheme();
+    this.setQuality(this.qualitySetting);
 
     this.isRunning = true;
     this.clock.start();
@@ -259,6 +272,7 @@ export class GameEngine {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.info.autoReset = false;
 
     this.scene = new THREE.Scene();
     const SKY = 0x3b2b4f;
@@ -298,6 +312,7 @@ export class GameEngine {
       this.pGeo,
       new THREE.PointsMaterial({
         size: 0.24,
+        color: new THREE.Color(2.2, 2.2, 2.2),
         vertexColors: true,
         transparent: true,
         depthWrite: false,
@@ -553,7 +568,7 @@ export class GameEngine {
       // Fire flame glow
       const fire = new THREE.Mesh(
         new THREE.ConeGeometry(0.22, 0.45, 8),
-        new THREE.MeshBasicMaterial({ color: 0xff7a18, transparent: true, opacity: 0.9, fog: false })
+        new THREE.MeshBasicMaterial({ color: new THREE.Color(0xff7a18).multiplyScalar(3), transparent: true, opacity: 0.9, fog: false })
       );
       fire.position.y = 2.45;
       tg.add(fire);
@@ -586,7 +601,7 @@ export class GameEngine {
     };
 
     const slashMat = new THREE.MeshBasicMaterial({
-      color: 0xfff0d8,
+      color: new THREE.Color(0xfff0d8).multiplyScalar(1.8),
       transparent: true,
       side: THREE.DoubleSide,
       depthWrite: false,
@@ -643,11 +658,11 @@ export class GameEngine {
     MAT.trunk.color.set(T.trunk);
     MAT.pine.color.set(T.pine);
     MAT.sakura.color.set(T.sakura);
-    MAT.glow.color.set(T.glow);
+    MAT.glow.color.set(T.glow).multiplyScalar(3);
 
     this.sun.color.set(T.sun);
     this.sun.intensity = T.sunI;
-    (this.sunDisc.material as THREE.MeshBasicMaterial).color.set(T.sunDisc);
+    (this.sunDisc.material as THREE.MeshBasicMaterial).color.set(T.sunDisc).multiplyScalar(2.6);
     this.hemi.color.set(T.hemiSky);
     this.hemi.groundColor.set(T.hemiGround);
 
@@ -1782,6 +1797,7 @@ export class GameEngine {
     dmg = rolled.dmg;
     this.player.hp = Math.max(0, this.player.hp - dmg);
     this.player.inv = 0.6;
+    this.hurtFx = 1;
     this.player.dashInv = false;
     this.player.killCombo = 0;
     this.player.hitCombo = 0;
@@ -2410,6 +2426,7 @@ export class GameEngine {
 
   public resize() {
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+    this.fx?.setSize(window.innerWidth, window.innerHeight);
     this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.fov = this.camera.aspect < 1 ? 72 : 60;
     this.camera.updateProjectionMatrix();
@@ -2419,7 +2436,7 @@ export class GameEngine {
     this.reqId = requestAnimationFrame(this.loop);
     const real = Math.min(this.clock.getDelta(), 0.05);
     if (this.paused && this.state === 'play') {
-      this.renderer.render(this.scene, this.camera);
+      this.render();
       return;
     }
     let dt = real;
@@ -2470,9 +2487,73 @@ export class GameEngine {
     this.sun.position.set(this.player.pos.x - 30, 40, this.player.pos.z - 25);
     this.sun.target.position.set(this.player.pos.x, 0, this.player.pos.z);
 
-    this.renderer.render(this.scene, this.camera);
+    this.updateFx(real);
+    this.render();
     this.drawMinimap();
   };
+
+  private render() {
+    this.renderer.info.reset();
+    if (this.fx) this.fx.render();
+    else this.renderer.render(this.scene, this.camera);
+  }
+
+  // Grade uniforms driven by gameplay: desaturate in slow motion, red edge pulse on hits
+  // (plus a faint persistent one at low health). Also watches frame rate for 'auto'.
+  private updateFx(real: number) {
+    this.hurtFx = Math.max(0, this.hurtFx - real * 2.2);
+    const low = this.state === 'play' && this.player.hp > 0 && this.player.hp / this.player.maxHp < 0.3 ? 0.35 + Math.sin(this.time * 5) * 0.1 : 0;
+    const wantDesat = this.slowmoT > 0 ? 1 : 0;
+    this.desatFx += (wantDesat - this.desatFx) * Math.min(1, real * 10);
+    if (this.fx) this.fx.update(this.time, this.desatFx, Math.max(this.hurtFx, low));
+
+    if (this.qualitySetting !== 'auto' || this.state !== 'play' || this.quality === 'low') return;
+    this.fpsAcc += real;
+    this.fpsFrames++;
+    if (this.fpsAcc >= 4) {
+      const fps = this.fpsFrames / this.fpsAcc;
+      this.fpsAcc = 0;
+      this.fpsFrames = 0;
+      this.slowWindows = fps < 38 ? this.slowWindows + 1 : 0;
+      if (this.slowWindows >= 2) {
+        this.slowWindows = 0;
+        this.applyQuality(this.quality === 'high' ? 'medium' : 'low');
+      }
+    }
+  }
+
+  public setQuality(setting: QualitySetting) {
+    this.qualitySetting = setting;
+    this.fpsAcc = 0;
+    this.fpsFrames = 0;
+    this.slowWindows = 0;
+    this.applyQuality(setting === 'auto' ? detectQuality() : setting);
+  }
+
+  private applyQuality(q: Quality) {
+    this.quality = q;
+    const prof = qualityProfile(q);
+    this.renderer.setPixelRatio(prof.pixelRatio);
+    this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+
+    const shadowType = prof.softShadows ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+    if (this.sun.shadow.mapSize.x !== prof.shadowMap || this.renderer.shadowMap.type !== shadowType) {
+      this.renderer.shadowMap.type = shadowType;
+      this.sun.shadow.mapSize.set(prof.shadowMap, prof.shadowMap);
+      this.sun.shadow.map?.dispose();
+      (this.sun.shadow as { map: THREE.WebGLRenderTarget | null }).map = null;
+      this.renderer.shadowMap.needsUpdate = true;
+    }
+
+    this.fx?.dispose();
+    this.fx = null;
+    if (prof.composer) {
+      this.fx = new PostFX(this.renderer, this.scene, this.camera, prof.msaa, prof.bloom);
+      this.fx.setLook(NINJA_LOOK);
+      this.fx.setSize(window.innerWidth, window.innerHeight);
+    }
+    this.callbacks.onQualityChange?.(this.qualitySetting, q);
+  }
 
   public destroy() {
     if (this.reqId) cancelAnimationFrame(this.reqId);
@@ -2483,6 +2564,7 @@ export class GameEngine {
     this.rings = [];
     this.pGeo.dispose();
     this.bGeo.dispose();
+    this.fx?.dispose();
     this.renderer.dispose();
   }
 }
