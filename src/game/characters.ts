@@ -139,13 +139,13 @@ class RigBuilder {
 // --------------------------------------------------------------------------
 // Shape helpers (all hang from the bone origin downward unless noted)
 // --------------------------------------------------------------------------
-const limb = (rTop: number, rBot: number, len: number, seg = 12) =>
+const limb = (rTop: number, rBot: number, len: number, seg = 9) =>
   new THREE.CylinderGeometry(rTop, rBot, len, seg, 1).translate(0, -len / 2, 0);
-const ball = (r: number, w = 14, h = 10) => new THREE.SphereGeometry(r, w, h);
-const rbox = (w: number, h: number, d: number, r: number) => new RoundedBoxGeometry(w, h, d, 3, Math.min(r, w / 2 - 0.001, h / 2 - 0.001, d / 2 - 0.001));
+const ball = (r: number, w = 10, h = 7) => new THREE.SphereGeometry(r, w, h);
+const rbox = (w: number, h: number, d: number, r: number) => new RoundedBoxGeometry(w, h, d, 2, Math.min(r, w / 2 - 0.001, h / 2 - 0.001, d / 2 - 0.001));
 const box = (w: number, h: number, d: number) => new THREE.BoxGeometry(w, h, d);
-const lathe = (pts: [number, number][], seg = 18) => new THREE.LatheGeometry(pts.map(([r, y]) => new THREE.Vector2(r, y)), seg);
-const ring = (r: number, h: number, seg = 18) => new THREE.CylinderGeometry(r, r, h, seg, 1, true);
+const lathe = (pts: [number, number][], seg = 14) => new THREE.LatheGeometry(pts.map(([r, y]) => new THREE.Vector2(r, y)), seg);
+const ring = (r: number, h: number, seg = 12) => new THREE.CylinderGeometry(r, r, h, seg, 1, true);
 
 // --------------------------------------------------------------------------
 // Materials: rim light (warm sunset backlight) + white hit flash, per rig
@@ -160,7 +160,7 @@ function patchCharacter(mat: THREE.Material, flash: { value: number }, rim: THRE
         '#include <emissivemap_fragment>',
         `#include <emissivemap_fragment>
         float rimF = 1.0 - clamp(dot(normalize(normal), normalize(vViewPosition)), 0.0, 1.0);
-        totalEmissiveRadiance += uRim * pow(rimF, 2.8) + vec3(1.0, 0.9, 0.82) * uFlash * 1.5;`
+        totalEmissiveRadiance += uRim * pow(rimF, 2.8) + vec3(1.0, 0.88, 0.8) * uFlash * 0.75;`
       );
   };
   mat.customProgramCacheKey = () => 'char';

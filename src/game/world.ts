@@ -564,8 +564,8 @@ export class World {
     this.buildLanterns(batch);
     this.buildRocks(batch);
     this.buildDistantForest();
-    this.buildBanners();
-    this.buildTorches();
+    this.buildBanners(batch);
+    this.buildTorches(batch);
     batch.build(this.root);
 
     this.shojiMat = this.root.userData.shoji as THREE.MeshBasicMaterial;
@@ -825,7 +825,7 @@ export class World {
     this.root.add(m);
   }
 
-  private buildBanners() {
+  private buildBanners(b: Batcher) {
     const pts = [
       [-12, -22, 0.1], [12, -22, -0.1],
       [-15, 8, 0.15], [15, 8, -0.15],
@@ -848,25 +848,23 @@ export class World {
     };
     cloth.customProgramCacheKey = () => 'banner';
     const clothG = new THREE.PlaneGeometry(1.0, 3.4, 8, 14).translate(0.5, 0, 0);
+    const poleG = new THREE.CylinderGeometry(0.06, 0.08, 5.6, 8);
+    const barG = new THREE.CylinderGeometry(0.04, 0.04, 1.15, 6).rotateZ(Math.PI / 2);
     for (const [bx, bz, ry] of pts) {
-      const g = new THREE.Group();
-      g.position.set(bx, 0, bz);
-      g.rotation.y = ry;
-      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 5.6, 8), MAT.woodDark);
-      pole.position.y = 2.8;
-      pole.castShadow = true;
-      const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.15, 6).rotateZ(Math.PI / 2), MAT.woodDark);
-      bar.position.set(0.55, 5.2, 0);
+      const base = new THREE.Matrix4().compose(new THREE.Vector3(bx, 0, bz), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), ry), new THREE.Vector3(1, 1, 1));
+      b.add(poleG, MAT.woodDark, base.clone().multiply(mtx(0, 2.8, 0)));
+      b.add(barG, MAT.woodDark, base.clone().multiply(mtx(0.55, 5.2, 0)));
       const c = new THREE.Mesh(clothG, cloth);
-      c.position.set(0.04, 3.45, 0);
+      c.position.set(bx, 3.45, bz);
+      c.rotation.y = ry;
+      c.translateX(0.04);
       c.castShadow = true;
-      g.add(pole, bar, c);
-      this.root.add(g);
+      this.root.add(c);
       this.addSolid(bx, bz, 0.3, 5.5);
     }
   }
 
-  private buildTorches() {
+  private buildTorches(b: Batcher) {
     const pts = [
       [-5.8, -23], [5.8, -23],
       [-2.2, 14.2], [2.2, 14.2]
@@ -882,23 +880,16 @@ export class World {
       g.position.set(tx, 0, tz);
       for (let i = 0; i < 3; i++) {
         const ang = (i / 3) * TAU;
-        const leg = new THREE.Mesh(legG, MAT.woodDark);
-        leg.position.set(Math.sin(ang) * 0.28, 1.12, Math.cos(ang) * 0.28);
-        leg.rotation.x = Math.cos(ang) * 0.18;
-        leg.rotation.z = -Math.sin(ang) * 0.18;
-        leg.castShadow = true;
-        g.add(leg);
+        b.add(legG, MAT.woodDark, mtx(tx + Math.sin(ang) * 0.28, 1.12, tz + Math.cos(ang) * 0.28, Math.cos(ang) * 0.18, 0, -Math.sin(ang) * 0.18));
       }
-      const bowl = new THREE.Mesh(bowlG, MAT.dark);
-      bowl.position.y = 2.2;
-      bowl.castShadow = true;
+      b.add(bowlG, MAT.dark, mtx(tx, 2.2, tz));
       const outer = new THREE.Mesh(outerG, outerM);
       outer.position.y = 2.3;
       const inner = new THREE.Mesh(innerG, innerM);
       inner.position.y = 2.3;
       const light = new THREE.PointLight(0xff7a2a, 9, 12, 1.6);
       light.position.set(0, 2.9, 0);
-      g.add(bowl, outer, inner, light);
+      g.add(outer, inner, light);
       this.root.add(g);
       this.flames.push({ outer, inner, ph: rand(0, 10), light });
       this.addSolid(tx, tz, 0.35, 2.5);

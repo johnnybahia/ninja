@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 const std = (color: number, roughness = 0.5, metalness = 0.0) =>
   new THREE.MeshStandardMaterial({ color, roughness, metalness });
@@ -81,7 +82,7 @@ export const FACE_URI =
 // ----------------------------------------------------
 // WEAPONS 3D BUILDER - HIGH DETAIL & POLISH
 // ----------------------------------------------------
-export function makeWeapon(id: string): THREE.Group {
+function buildWeaponGroup(id: string): THREE.Group {
   const g = new THREE.Group();
   if (id === 'karate') return g;
 
@@ -251,5 +252,58 @@ export function makeWeapon(id: string): THREE.Group {
 
   }
 
+  return g;
+}
+
+// Weapons are authored as many small parts; merge them once per weapon type into one
+// mesh per material (a katana goes from 9 draw calls to 4) and share the result.
+const weaponCache = new Map<string, { geo: THREE.BufferGeometry; mat: THREE.Material; cast: boolean }[]>();
+
+function mergeByMaterial(g: THREE.Group) {
+  g.updateMatrixWorld(true);
+  const buckets = new Map<THREE.Material, { list: THREE.BufferGeometry[]; cast: boolean }>();
+  g.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    const mat = m.material as THREE.Material;
+    const geo = m.geometry.clone().applyMatrix4(m.matrixWorld);
+    if (!geo.index) {
+      const n = geo.attributes.position.count;
+      const idx = new Uint32Array(n);
+      for (let i = 0; i < n; i++) idx[i] = i;
+      geo.setIndex(new THREE.BufferAttribute(idx, 1));
+    }
+    for (const k of Object.keys(geo.attributes)) if (k !== 'position' && k !== 'normal' && k !== 'uv') geo.deleteAttribute(k);
+    if (!geo.attributes.uv) geo.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(geo.attributes.position.count * 2), 2));
+    if (!geo.attributes.normal) geo.computeVertexNormals();
+    const b = buckets.get(mat) || { list: [], cast: false };
+    b.list.push(geo);
+    b.cast = b.cast || m.castShadow;
+    buckets.set(mat, b);
+  });
+  const out: { geo: THREE.BufferGeometry; mat: THREE.Material; cast: boolean }[] = [];
+  for (const [mat, b] of buckets) {
+    const merged = mergeGeometries(b.list, false);
+    b.list.forEach((x) => x.dispose());
+    if (merged) {
+      merged.computeBoundingSphere();
+      out.push({ geo: merged, mat, cast: b.cast });
+    }
+  }
+  return out;
+}
+
+export function makeWeapon(id: string): THREE.Group {
+  let parts = weaponCache.get(id);
+  if (!parts) {
+    parts = mergeByMaterial(buildWeaponGroup(id));
+    weaponCache.set(id, parts);
+  }
+  const g = new THREE.Group();
+  for (const p of parts) {
+    const m = new THREE.Mesh(p.geo, p.mat);
+    m.castShadow = p.cast;
+    g.add(m);
+  }
   return g;
 }

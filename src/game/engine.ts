@@ -1882,7 +1882,7 @@ export class GameEngine {
     this.player.phase += dt * 11 * this.player.moveAmt;
     const yawRate = dt > 0 ? wrap(this.player.yaw - this.prevYaw) / dt : 0;
     this.prevYaw = this.player.yaw;
-    if (this.player.rig.flash) this.player.rig.flash.value = this.hurtFx * 0.5;
+    if (this.player.rig.flash) this.player.rig.flash.value = this.hurtFx * this.hurtFx * 0.35;
     animateCharacter(this.player.rig, {
       moveAmt: this.player.moveAmt,
       phase: this.player.phase,
@@ -2078,7 +2078,7 @@ export class GameEngine {
       const wind =
         e.windup && e.windup > 0 ? 1 - e.windup / (e.type === 'boss' ? 0.55 : 0.42) : 0;
       const hitK = Math.max(0, e.flash) / 0.14;
-      if (e.rig.flash) e.rig.flash.value = hitK;
+      if (e.rig.flash) e.rig.flash.value = hitK * hitK;
       animateCharacter(e.rig, {
         moveAmt: e.moveAmt,
         phase: e.phase,
