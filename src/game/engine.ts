@@ -22,7 +22,9 @@ import {
 import { sfx } from './audio';
 import { World } from './world';
 import { PostFX, NINJA_LOOK, Quality, QualitySetting, qualityProfile, detectQuality } from './postfx';
-import { MAT, GEO, buildRig, buildPlayerRig, animateRig, makeWeapon, mesh } from './rigs';
+import { MAT, makeWeapon, mesh } from './rigs';
+import { buildCharacter } from './characters';
+import { animateCharacter, animateDeath } from './animation';
 
 // Scroll drop chance per kill for each loaded weapon (2 weapons -> 7.5% per kill).
 const SCROLL_RATE_PER_WEAPON = 0.0375;
@@ -191,6 +193,8 @@ export class GameEngine {
   public camYaw = Math.PI;
   public camPitch = 0.35;
   public camDist = 7.2;
+  // optional fixed camera distance (close-ups / cinematics); null = automatic
+  public camDistOverride: number | null = null;
   private shake = 0;
   private hitstop = 0;
   private spHit = false;
@@ -236,6 +240,7 @@ export class GameEngine {
   private fpsFrames = 0;
   private slowWindows = 0;
   private hurtFx = 0;
+  private prevYaw = Math.PI;
   private desatFx = 0;
 
   constructor(canvas: HTMLCanvasElement, minimapCanvas: HTMLCanvasElement, callbacks: GameEngineCallbacks) {
@@ -333,7 +338,7 @@ export class GameEngine {
   }
 
   private initPlayer() {
-    this.player.rig = buildPlayerRig(this.charId);
+    this.player.rig = buildCharacter('ninja');
     this.scene.add(this.player.rig.root);
 
     this.weapons = WEAPONS_KAGE;
@@ -382,7 +387,8 @@ export class GameEngine {
     if (this.state === 'play') return;
 
     this.scene.remove(this.player.rig.root);
-    this.player.rig = buildPlayerRig(id);
+    this.player.rig.dispose?.();
+    this.player.rig = buildCharacter('ninja');
     this.scene.add(this.player.rig.root);
 
     this.weapons = WEAPONS_KAGE;
@@ -528,20 +534,17 @@ export class GameEngine {
     let h = 2.5;
 
     if (type === 'samurai') {
-      rig = buildRig({ cloth: 0x7d2a2a, band: 0x1c1a22, skin: 0xd9a577 });
-      const hMesh = mesh(GEO.helmet, MAT.dark);
-      hMesh.position.y = 0.26;
-      rig.head.add(hMesh);
+      rig = buildCharacter('samurai');
       rig.hand.add(makeWeapon('katana'));
       hp = 60 * hpMul;
       speed = 3.7;
     } else if (type === 'archer') {
-      rig = buildRig({ cloth: 0x3d5640, band: 0xb89a5a, skin: 0xd9a577 });
+      rig = buildCharacter('archer');
       rig.handL.add(makeWeapon('bow'));
       hp = 40 * hpMul;
       speed = 3.3;
     } else {
-      rig = buildRig({ cloth: 0x3a1414, band: 0xd4a24c, skin: 0xb03a2e, scale: 2.1 });
+      rig = buildCharacter('oni', 2.1);
       rig.hand.add(makeWeapon('kanabo'));
       hp = 480 * hpMul;
       speed = 3.1;
@@ -619,7 +622,7 @@ export class GameEngine {
     this.scene.remove(e.rig.root);
     this.scene.remove(e.bar);
     if (e.tele) this.scene.remove(e.tele);
-    e.rig.mats.forEach((m) => m.dispose());
+    e.rig.dispose?.();
   }
 
   private emitParticles(
@@ -1834,14 +1837,21 @@ export class GameEngine {
 
     // Animation updates
     this.player.phase += dt * 11 * this.player.moveAmt;
-    animateRig(
-      this.player.rig,
-      this.player.moveAmt,
-      this.player.phase,
-      !this.player.grounded,
-      this.time,
-      this.player.anim
-    );
+    const yawRate = dt > 0 ? wrap(this.player.yaw - this.prevYaw) / dt : 0;
+    this.prevYaw = this.player.yaw;
+    if (this.player.rig.flash) this.player.rig.flash.value = this.hurtFx * 0.5;
+    animateCharacter(this.player.rig, {
+      moveAmt: this.player.moveAmt,
+      phase: this.player.phase,
+      air: !this.player.grounded,
+      t: this.time,
+      dt,
+      anim: this.player.anim,
+      weapon: this.weapons[this.activeWeaponIdx]?.id,
+      dash: this.player.dash > 0,
+      turn: yawRate,
+      hit: this.hurtFx * 0.8
+    });
 
     this.player.rig.root.position.copy(this.player.pos);
     this.player.rig.root.rotation.y = this.player.yaw;
@@ -1857,7 +1867,7 @@ export class GameEngine {
       Math.cos(this.camYaw) * cp
     );
 
-    let want = this.camera.aspect < 1 ? 10.5 : 7.2;
+    const want = this.camDistOverride ?? (this.camera.aspect < 1 ? 10.5 : 7.2);
     this.camDist += (want - this.camDist) * Math.min(1, dt * 8);
 
     this.camera.position.copy(camTarget).addScaledVector(camDir, this.camDist);
@@ -1874,8 +1884,9 @@ export class GameEngine {
       const e = this.enemies[i];
       if (e.dead) {
         e.deathT += dt;
-        e.rig.body.rotation.x = -Math.min(Math.PI / 2, e.deathT * 5);
-        e.rig.root.position.y = -Math.max(0, e.deathT - 0.7) * 1.4;
+        if (e.rig.flash) e.rig.flash.value = Math.max(0, 0.6 - e.deathT * 2);
+        animateDeath(e.rig, e.deathT, dt);
+        e.rig.root.position.y = -Math.max(0, e.deathT - 0.8) * 1.4;
         if (e.deathT > 1.8) {
           this.removeEnemy(e);
           this.enemies.splice(i, 1);
@@ -1912,6 +1923,7 @@ export class GameEngine {
             if (e.tele) e.tele.visible = false;
             e.cd = 1.4;
             const dNow = Math.hypot(this.player.pos.x - e.pos.x, this.player.pos.z - e.pos.z);
+            e.anim = { kind: 'eslash', t: 0, dur: 0.42, side: 0 };
             if (dNow <= 2.1) this.resolveEnemyMeleeHit(12, nx, nz);
           }
         } else if (d > 1.8) {
@@ -1938,8 +1950,14 @@ export class GameEngine {
           mvx = nx;
           mvz = nz;
           spd = e.speed;
-        } else if (e.cd <= 0) {
+        } else if (e.cd <= 0 && !e.anim) {
+          // draw the bow first (readable telegraph), release partway through
           e.cd = 2.4;
+          e.anim = { kind: 'eshoot', t: 0, dur: 0.75, side: 0 };
+          e.shotPending = true;
+        }
+        if (e.shotPending && e.anim && e.anim.t >= 0.45) {
+          e.shotPending = false;
           this.spawnProj({
             type: 'arrow',
             friendly: false,
@@ -1966,6 +1984,7 @@ export class GameEngine {
             if (e.tele) e.tele.visible = false;
             e.cd = 2.0;
             const dNow = Math.hypot(this.player.pos.x - e.pos.x, this.player.pos.z - e.pos.z);
+            e.anim = { kind: 'esmash', t: 0, dur: 0.55, side: 0 };
             if (dNow <= 3.6) {
               this.resolveEnemyMeleeHit(24, nx, nz);
               sfx.boom();
@@ -1996,7 +2015,24 @@ export class GameEngine {
       const moving = spd > 0 ? Math.min(1, spd / e.speed) : 0;
       e.moveAmt += (moving - e.moveAmt) * Math.min(1, dt * 8);
       e.phase += dt * 10 * e.moveAmt;
-      animateRig(e.rig, e.moveAmt, e.phase, false, this.time + i);
+      if (e.anim) {
+        e.anim.t += dt;
+        if (e.anim.t >= e.anim.dur) e.anim = undefined;
+      }
+      const wind =
+        e.windup && e.windup > 0 ? 1 - e.windup / (e.type === 'boss' ? 0.55 : 0.42) : 0;
+      const hitK = Math.max(0, e.flash) / 0.14;
+      if (e.rig.flash) e.rig.flash.value = hitK;
+      animateCharacter(e.rig, {
+        moveAmt: e.moveAmt,
+        phase: e.phase,
+        air: false,
+        t: this.time + i * 1.7,
+        dt,
+        anim: e.anim,
+        windup: wind,
+        hit: hitK
+      });
 
       e.rig.root.position.copy(e.pos);
       e.rig.root.rotation.y = e.yaw;
@@ -2203,7 +2239,14 @@ export class GameEngine {
       this.reticle.visible = false;
       this.camYaw += real * 0.12;
       this.player.phase += real * 2;
-      animateRig(this.player.rig, 0, this.player.phase, false, this.time, null);
+      animateCharacter(this.player.rig, {
+        moveAmt: 0,
+        phase: this.player.phase,
+        air: false,
+        t: this.time,
+        dt: real,
+        weapon: this.weapons[this.activeWeaponIdx]?.id
+      });
       this.player.rig.root.position.copy(this.player.pos);
       this.player.rig.root.rotation.y = this.player.yaw;
     }
