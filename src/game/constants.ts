@@ -53,12 +53,3 @@ export const KARATE: KarateMove[] = [
   { name: 'Mae-geri', range: 2.6, arc: 1.05, dmg: 22, kb: 9, cd: 0.3, dur: 0.28, anim: 'frontKick', lunge: 0.5 },
   { name: 'Mawashi-geri', range: 2.8, arc: 3.0, dmg: 32, kb: 11, cd: 0.45, dur: 0.38, anim: 'roundKick', lunge: 0.3, heavy: true }
 ];
-
-export const WORLD_PAL = {
-  ninja: {
-    sky: 0x3b2b4f, fogFar: 85, ground: 0x55603f, stone: 0x7a7064, stoneDark: 0x564e47,
-    wood: 0x6b3a2a, roof: 0x2f2a33, torii: 0xb8392f, trunk: 0x4a3326, pine: 0x2f4a36,
-    sakura: 0xe3a3b8, glow: 0xff9a3c, sun: 0xffb27a, sunI: 0.95, sunDisc: 0xffc98a,
-    hemiSky: 0xffd6b0, hemiGround: 0x2a2040
-  }
-};

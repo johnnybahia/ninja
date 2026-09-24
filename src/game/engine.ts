@@ -17,10 +17,10 @@ import {
   rand,
   WEAPONS_KAGE,
   SPECIALS,
-  KARATE,
-  WORLD_PAL
+  KARATE
 } from './constants';
 import { sfx } from './audio';
+import { World } from './world';
 import { PostFX, NINJA_LOOK, Quality, QualitySetting, qualityProfile, detectQuality } from './postfx';
 import { MAT, GEO, buildRig, buildPlayerRig, animateRig, makeWeapon, mesh } from './rigs';
 
@@ -84,12 +84,9 @@ export class GameEngine {
   private scene!: THREE.Scene;
   private camera!: THREE.PerspectiveCamera;
   private sun!: THREE.DirectionalLight;
-  private sunDisc!: THREE.Mesh;
-  private hemi!: THREE.HemisphereLight;
-  private ground!: THREE.Mesh;
+  private world!: World;
 
   private solids: { x: number; z: number; r: number; h: number }[] = [];
-  private occluders: THREE.Object3D[] = [];
 
   // Particles (Gerais: poeira, faíscas, fumaça, magia)
   private PN = 700;
@@ -251,7 +248,6 @@ export class GameEngine {
     this.initWorld();
     this.initPlayer();
     this.initSlashEffects();
-    this.applyTheme();
     this.setQuality(this.qualitySetting);
 
     this.isRunning = true;
@@ -275,34 +271,7 @@ export class GameEngine {
     this.renderer.info.autoReset = false;
 
     this.scene = new THREE.Scene();
-    const SKY = 0x3b2b4f;
-    this.scene.background = new THREE.Color(SKY);
-    this.scene.fog = new THREE.Fog(SKY, 30, 85);
-
-    this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 220);
-
-    this.hemi = new THREE.HemisphereLight(0xffd6b0, 0x2a2040, 0.78);
-    this.scene.add(this.hemi);
-
-    this.sun = new THREE.DirectionalLight(0xffb27a, 0.95);
-    this.sun.position.set(-30, 40, -25);
-    this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(1024, 1024);
-    Object.assign(this.sun.shadow.camera, { left: -45, right: 45, top: 45, bottom: -45, near: 1, far: 130 });
-    this.sun.shadow.bias = -0.0015;
-    this.scene.add(this.sun, this.sun.target);
-
-    // Rim / Fill light for specular highlights on metal and character silhouettes
-    const rimLight = new THREE.DirectionalLight(0x7590b8, 0.45);
-    rimLight.position.set(30, 25, 30);
-    this.scene.add(rimLight);
-
-    this.sunDisc = new THREE.Mesh(
-      new THREE.SphereGeometry(7, 20, 14),
-      new THREE.MeshBasicMaterial({ color: 0xffc98a, fog: false })
-    );
-    this.sunDisc.position.set(-80, 22, -120);
-    this.scene.add(this.sunDisc);
+    this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 420);
 
     // General Particle Buffer
     for (let i = 0; i < this.PN; i++) this.pPos[i * 3 + 1] = -999;
@@ -357,225 +326,10 @@ export class GameEngine {
     this.scene.add(this.bloodPoints);
   }
 
-  private addSolid(x: number, z: number, r: number, h: number) {
-    this.solids.push({ x, z, r, h });
-  }
-
   private initWorld() {
-    this.ground = mesh(new THREE.CircleGeometry(95, 48).rotateX(-Math.PI / 2), MAT.ground, false, true);
-    this.scene.add(this.ground);
-
-    const plaza = mesh(new THREE.CircleGeometry(13, 40).rotateX(-Math.PI / 2), MAT.stone, false, true);
-    plaza.position.y = 0.02;
-    this.scene.add(plaza);
-
-    const path = mesh(new THREE.BoxGeometry(3.2, 0.04, 12), MAT.stoneDark, false, true);
-    path.position.set(0, 0.02, -17);
-    this.scene.add(path);
-
-    // Temple
-    const tg = new THREE.Group();
-    tg.position.set(0, 0, -29);
-    const base = mesh(new THREE.BoxGeometry(16, 1.2, 11), MAT.stone, true, true);
-    base.position.y = 0.6;
-    tg.add(base);
-
-    const floor = mesh(new THREE.BoxGeometry(14, 0.3, 9), MAT.wood, true, true);
-    floor.position.y = 1.35;
-    tg.add(floor);
-
-    const pg = new THREE.CylinderGeometry(0.35, 0.35, 4.5, 10);
-    [-6, -2, 2, 6].forEach((x) => {
-      const p = mesh(pg, MAT.torii);
-      p.position.set(x, 3.75, 4.2);
-      tg.add(p);
-      this.occluders.push(p);
-    });
-
-    const wall = mesh(new THREE.BoxGeometry(13, 4.5, 0.4), MAT.wood);
-    wall.position.set(0, 3.75, -4);
-    tg.add(wall);
-
-    const sideG = new THREE.BoxGeometry(0.4, 4.5, 8);
-    [-6.5, 6.5].forEach((x) => {
-      const s = mesh(sideG, MAT.wood);
-      s.position.set(x, 3.75, 0);
-      tg.add(s);
-      this.occluders.push(s);
-    });
-
-    const roof = mesh(new THREE.ConeGeometry(12, 4.5, 4), MAT.roof);
-    roof.rotation.y = Math.PI / 4;
-    roof.scale.z = 0.78;
-    roof.position.y = 8.2;
-    tg.add(roof);
-
-    const eave = mesh(new THREE.BoxGeometry(17.5, 0.35, 12.5), MAT.roof);
-    eave.position.y = 6.05;
-    tg.add(eave);
-
-    this.scene.add(tg);
-    this.occluders.push(base, wall, roof, eave);
-    this.addSolid(-4, -29, 5.8, 10);
-    this.addSolid(4, -29, 5.8, 10);
-
-    // Torii Gate
-    const toriiG = new THREE.Group();
-    toriiG.position.set(0, 0, 17);
-    const toriiP = new THREE.CylinderGeometry(0.28, 0.32, 6, 10);
-    [-3.2, 3.2].forEach((x) => {
-      const p = mesh(toriiP, MAT.torii);
-      p.position.set(x, 3, 0);
-      toriiG.add(p);
-      this.occluders.push(p);
-      this.addSolid(x, 17, 0.55, 7);
-    });
-    const tTop = mesh(new THREE.BoxGeometry(9.2, 0.5, 0.7), MAT.dark);
-    tTop.position.y = 6.3;
-    toriiG.add(tTop);
-    const tTop2 = mesh(new THREE.BoxGeometry(8.4, 0.35, 0.5), MAT.torii);
-    tTop2.position.y = 5.9;
-    toriiG.add(tTop2);
-    const tMid = mesh(new THREE.BoxGeometry(7.4, 0.3, 0.4), MAT.torii);
-    tMid.position.y = 5;
-    toriiG.add(tMid);
-    this.scene.add(toriiG);
-
-    // Trees & Rocks
-    const trunkG = new THREE.CylinderGeometry(0.3, 0.42, 3.2, 7);
-    const pineG = new THREE.ConeGeometry(2.1, 5.2, 7);
-    const sakG = new THREE.IcosahedronGeometry(2.3, 0);
-
-    for (let i = 0; i < 26; i++) {
-      const a = (i / 26) * TAU + rand(0, 0.15);
-      const r = 30 + rand(0, 8);
-      const x = Math.sin(a) * r;
-      const z = Math.cos(a) * r;
-      if (z < -19 && Math.abs(x) < 13) continue;
-      if (z > 13 && Math.abs(x) < 6) continue;
-
-      const g = new THREE.Group();
-      g.position.set(x, 0, z);
-      const t = mesh(trunkG, MAT.trunk);
-      t.position.y = 1.6;
-      g.add(t);
-
-      const s = 0.8 + rand(0, 0.5);
-      const top = Math.random() < 0.4 ? mesh(sakG, MAT.sakura) : mesh(pineG, MAT.pine);
-      top.position.y = 4.8;
-      top.scale.setScalar(s);
-      g.add(top);
-
-      this.scene.add(g);
-      this.occluders.push(t, top);
-      this.addSolid(x, z, 0.9, 9);
-    }
-
-    // Japanese Stone Lanterns (Tōrō) along path and courtyard
-    const lanternPts = [
-      [-3.2, -6], [3.2, -6],
-      [-3.2, -14], [3.2, -14],
-      [-3.8, 12], [3.8, 12],
-      [-9, 0], [9, 0]
-    ];
-    lanternPts.forEach(([lx, lz]) => {
-      const lg = new THREE.Group();
-      lg.position.set(lx, 0, lz);
-      const lBase = mesh(new THREE.BoxGeometry(0.7, 0.35, 0.7), MAT.stone);
-      lBase.position.y = 0.175;
-      lg.add(lBase);
-      const lPillar = mesh(new THREE.CylinderGeometry(0.18, 0.22, 0.8, 8), MAT.stone);
-      lPillar.position.y = 0.75;
-      lg.add(lPillar);
-      const lShelf = mesh(new THREE.BoxGeometry(0.65, 0.15, 0.65), MAT.stone);
-      lShelf.position.y = 1.2;
-      lg.add(lShelf);
-      const lGlow = mesh(new THREE.BoxGeometry(0.45, 0.45, 0.45), MAT.glow);
-      lGlow.position.y = 1.48;
-      lg.add(lGlow);
-      const lRoof = mesh(new THREE.ConeGeometry(0.62, 0.35, 4), MAT.roof);
-      lRoof.rotation.y = Math.PI / 4;
-      lRoof.position.y = 1.88;
-      lg.add(lRoof);
-      this.scene.add(lg);
-      this.occluders.push(lBase, lRoof);
-      this.addSolid(lx, lz, 0.45, 2.2);
-    });
-
-    // Japanese War Banners (Sashimono)
-    const bannerPts = [
-      [-12, -22, 0.1], [12, -22, -0.1],
-      [-15, 8, 0.15], [15, 8, -0.15],
-      [-7, 22, 0.05], [7, 22, -0.05]
-    ];
-    bannerPts.forEach(([bx, bz, rotY]) => {
-      const bg = new THREE.Group();
-      bg.position.set(bx, 0, bz);
-      bg.rotation.y = rotY;
-      const pole = mesh(new THREE.CylinderGeometry(0.06, 0.08, 5.5, 8), MAT.woodDark);
-      pole.position.y = 2.75;
-      bg.add(pole);
-      const bar = mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.2, 6).rotateZ(Math.PI / 2), MAT.woodDark);
-      bar.position.set(0.55, 5.2, 0);
-      bg.add(bar);
-      const cloth = mesh(new THREE.BoxGeometry(1.0, 3.6, 0.02), MAT.crimson);
-      cloth.position.set(0.55, 3.3, 0);
-      bg.add(cloth);
-      const crest = mesh(new THREE.OctahedronGeometry(0.18, 0), MAT.gold);
-      crest.position.set(0.55, 4.0, 0.02);
-      bg.add(crest);
-      this.scene.add(bg);
-      this.addSolid(bx, bz, 0.3, 5.5);
-    });
-
-    // Zen Garden Mossy Stone Formations (Ishi)
-    const rockPts = [
-      [-10, -12, 1.1], [10, -12, 0.9],
-      [-8, 16, 0.85], [8, 16, 1.05],
-      [-16, -2, 1.3], [16, -2, 1.2],
-      [-5, -24, 0.95], [5, -24, 0.9]
-    ];
-    rockPts.forEach(([rx, rz, s]) => {
-      const rock = mesh(new THREE.DodecahedronGeometry(s, 1), MAT.stoneDark);
-      rock.position.set(rx, s * 0.4, rz);
-      rock.scale.set(1.2, 0.7, 1.1);
-      this.scene.add(rock);
-      this.occluders.push(rock);
-      this.addSolid(rx, rz, s * 0.9, s * 1.5);
-    });
-
-    // Sacred Temple Torches (Kagaribi) with flickering fire
-    const torchPts = [
-      [-5.5, -23], [5.5, -23],
-      [-2, 14], [2, 14]
-    ];
-    torchPts.forEach(([tx, tz]) => {
-      const tg = new THREE.Group();
-      tg.position.set(tx, 0, tz);
-      // Tripod wooden legs
-      for (let i = 0; i < 3; i++) {
-        const ang = (i / 3) * Math.PI * 2;
-        const leg = mesh(new THREE.CylinderGeometry(0.04, 0.04, 2.2, 6), MAT.woodDark);
-        leg.position.set(Math.sin(ang) * 0.28, 1.1, Math.cos(ang) * 0.28);
-        leg.rotation.x = Math.cos(ang) * 0.18;
-        leg.rotation.z = -Math.sin(ang) * 0.18;
-        tg.add(leg);
-      }
-      // Iron Fire Bowl
-      const bowl = mesh(new THREE.CylinderGeometry(0.35, 0.2, 0.25, 8), MAT.dark);
-      bowl.position.y = 2.15;
-      tg.add(bowl);
-      // Fire flame glow
-      const fire = new THREE.Mesh(
-        new THREE.ConeGeometry(0.22, 0.45, 8),
-        new THREE.MeshBasicMaterial({ color: new THREE.Color(0xff7a18).multiplyScalar(3), transparent: true, opacity: 0.9, fog: false })
-      );
-      fire.position.y = 2.45;
-      tg.add(fire);
-      this.scene.add(tg);
-      this.addSolid(tx, tz, 0.35, 2.5);
-    });
-
+    this.world = new World(this.renderer, this.scene);
+    this.sun = this.world.sun;
+    this.solids = this.world.solids;
   }
 
   private initPlayer() {
@@ -640,32 +394,6 @@ export class GameEngine {
       this.player.weaponMeshes.push(m);
     });
     this.setWeapon(0);
-  }
-
-  public applyTheme() {
-    const T = WORLD_PAL.ninja;
-    this.scene.background = new THREE.Color(T.sky);
-    if (this.scene.fog && 'far' in this.scene.fog) {
-      this.scene.fog.color.set(T.sky);
-      (this.scene.fog as THREE.Fog).far = T.fogFar;
-    }
-    MAT.ground.color.set(T.ground);
-    MAT.stone.color.set(T.stone);
-    MAT.stoneDark.color.set(T.stoneDark);
-    MAT.wood.color.set(T.wood);
-    MAT.roof.color.set(T.roof);
-    MAT.torii.color.set(T.torii);
-    MAT.trunk.color.set(T.trunk);
-    MAT.pine.color.set(T.pine);
-    MAT.sakura.color.set(T.sakura);
-    MAT.glow.color.set(T.glow).multiplyScalar(3);
-
-    this.sun.color.set(T.sun);
-    this.sun.intensity = T.sunI;
-    (this.sunDisc.material as THREE.MeshBasicMaterial).color.set(T.sunDisc).multiplyScalar(2.6);
-    this.hemi.color.set(T.hemiSky);
-    this.hemi.groundColor.set(T.hemiGround);
-
   }
 
   public setWeapon(idx: number) {
@@ -2484,8 +2212,7 @@ export class GameEngine {
     this.updateLabels(dt);
     this.updateCamera(real);
 
-    this.sun.position.set(this.player.pos.x - 30, 40, this.player.pos.z - 25);
-    this.sun.target.position.set(this.player.pos.x, 0, this.player.pos.z);
+    this.world.update(dt, this.time, this.player.pos, this.camera.position);
 
     this.updateFx(real);
     this.render();
@@ -2536,10 +2263,10 @@ export class GameEngine {
     this.renderer.setPixelRatio(prof.pixelRatio);
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
 
+    this.world.setQuality(prof);
     const shadowType = prof.softShadows ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
-    if (this.sun.shadow.mapSize.x !== prof.shadowMap || this.renderer.shadowMap.type !== shadowType) {
+    if (this.sun.shadow.map?.width !== prof.shadowMap || this.renderer.shadowMap.type !== shadowType) {
       this.renderer.shadowMap.type = shadowType;
-      this.sun.shadow.mapSize.set(prof.shadowMap, prof.shadowMap);
       this.sun.shadow.map?.dispose();
       (this.sun.shadow as { map: THREE.WebGLRenderTarget | null }).map = null;
       this.renderer.shadowMap.needsUpdate = true;

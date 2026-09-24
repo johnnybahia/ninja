@@ -610,7 +610,7 @@ export default function App() {
 
       {/* Main Start Menu */}
       {gameState === 'menu' && (
-        <div id="menu-overlay" className="fixed inset-0 flex items-center justify-center bg-[rgba(22,18,31,0.85)] backdrop-blur-md p-6 z-30 overflow-auto">
+        <div id="menu-overlay" className="fixed inset-0 flex items-center justify-center bg-[radial-gradient(ellipse_at_center,rgba(16,12,24,0.78),rgba(16,12,24,0.42))] backdrop-blur-[2px] p-6 z-30 overflow-auto">
           <div className="max-w-md w-full text-center py-4">
             <div className="kanji-title font-serif text-8xl font-bold text-[var(--torii)] leading-none mb-2">
               影
