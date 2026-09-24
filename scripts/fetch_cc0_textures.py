@@ -71,7 +71,9 @@ KEYWORDS = {
 }
 # fill in a slug (from --list-candidates) to skip the automatic search for that surface
 OVERRIDE_SLUG = {
-    # 'roof': 'roof_tiles_03',
+    # picked by hand from --list-candidates output, not the automatic ranking:
+    'flag': 'precast_stone_paving',  # tied vs. concrete/hex/brick paving - only real stone of the lot
+    'rock': 'lichen_rock',  # matches the original brief directly: granite, strata, lichen, moss
 }
 
 _INDEX = None
