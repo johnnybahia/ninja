@@ -23,6 +23,7 @@ import {
 } from './constants';
 import { sfx } from './audio';
 import { World } from './world';
+import { ATMOSPHERES, AtmosMode, atmosphereForWave } from './atmosphere';
 import { BladeTrail, ImpactPool, softDotTexture } from './vfx';
 import { PostFX, NINJA_LOOK, Quality, QualitySetting, qualityProfile, detectQuality } from './postfx';
 import { MAT, makeWeapon, mesh } from './rigs';
@@ -313,6 +314,7 @@ export class GameEngine {
   // Rendering quality & post-processing
   private fx: PostFX | null = null;
   public qualitySetting: QualitySetting = 'auto';
+  public atmosMode: AtmosMode = 'two';
   public quality: Quality = 'high';
   private fpsAcc = 0;
   private fpsFrames = 0;
@@ -533,6 +535,8 @@ export class GameEngine {
 
   public start() {
     this.reset();
+    const first = this.atmosMode === 'random' ? Math.floor(Math.random() * ATMOSPHERES.length) : 0;
+    if (first !== this.world.atmIndex) this.world.setAtmosphere(first, true);
     this.paused = false;
     this.state = 'play';
     this.nextWave();
@@ -649,7 +653,12 @@ export class GameEngine {
       }
     });
 
-    const sub = boss ? 'O oni despertou' : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
+    let sub = boss ? 'O oni despertou' : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
+    const atmIdx = atmosphereForWave(this.wave, this.atmosMode, this.world.atmIndex);
+    if (atmIdx !== this.world.atmIndex) {
+      this.world.setAtmosphere(atmIdx);
+      sub += ` · ${ATMOSPHERES[atmIdx].name}`;
+    }
     this.callbacks.onWaveChange(this.wave, `Onda ${this.wave}`, sub);
     sfx.wave();
   }
@@ -2915,6 +2924,8 @@ export class GameEngine {
     this.updateCamera(real);
 
     this.world.update(dt, this.time, this.player.pos, this.camera.position);
+    this.renderer.toneMappingExposure = this.world.atm.exposure;
+    this.fx?.setLook(this.world.atm.look);
 
     this.updateFx(real);
     this.render();

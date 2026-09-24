@@ -3,21 +3,9 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { MAT } from './rigs';
 import { TAU, rand } from './constants';
 import type { QualityProfile } from './postfx';
+import { ATMOSPHERES, Atmos, blendAtmos, cloneAtmos } from './atmosphere';
 
 export type Solid = { x: number; z: number; r: number; h: number };
-
-// Dusk palette (sky colors are linear HDR, the rest are sRGB hex)
-const PAL = {
-  zenith: new THREE.Color(0.035, 0.03, 0.09),
-  horizon: new THREE.Color(0.42, 0.22, 0.27),
-  sunGlow: new THREE.Color(1.5, 0.62, 0.28),
-  fog: 0x5a3a4c,
-  ground: 0x4c5a38,
-  sunLight: 0xffa468,
-  skyFill: 0x8c94c8,
-  groundFill: 0x3a2830
-};
-const SUN_DIR = new THREE.Vector3(-0.55, 0.16, -0.82).normalize();
 
 // Shared wind clock for every swaying material (grass, foliage, banners)
 const WIND_TIME = { value: 0 };
@@ -392,16 +380,17 @@ function bladeGeometry() {
 // ---------------------------------------------------------------------------
 // Sky dome: gradient, sun halo, HDR sun disc (feeds bloom) and drifting clouds
 // ---------------------------------------------------------------------------
-function buildSky() {
+function buildSky(atm: Atmos) {
   const mat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
     fog: false,
     uniforms: {
-      uZenith: { value: PAL.zenith },
-      uHorizon: { value: PAL.horizon },
-      uSun: { value: PAL.sunGlow },
-      uSunDir: { value: SUN_DIR },
+      uZenith: { value: atm.zenith },
+      uHorizon: { value: atm.horizon },
+      uSun: { value: atm.sunGlow },
+      uSunDir: { value: atm.sunDir },
+      uStars: { value: atm.stars },
       uTime: { value: 0 }
     },
     vertexShader: /* glsl */ `
@@ -413,7 +402,7 @@ function buildSky() {
       }
     `,
     fragmentShader: /* glsl */ `
-      uniform vec3 uZenith; uniform vec3 uHorizon; uniform vec3 uSun; uniform vec3 uSunDir; uniform float uTime;
+      uniform vec3 uZenith; uniform vec3 uHorizon; uniform vec3 uSun; uniform vec3 uSunDir; uniform float uTime; uniform float uStars;
       varying vec3 vDir;
       float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
       float noise(vec2 p) {
@@ -435,6 +424,17 @@ function buildSky() {
         float cl = smoothstep(0.52, 0.82, n) * smoothstep(0.03, 0.3, h) * (1.0 - smoothstep(0.55, 0.9, h));
         vec3 cloud = mix(uHorizon * 0.55 + vec3(0.02, 0.015, 0.04), uSun * 0.9, pow(sd, 2.5) * 0.9);
         col = mix(col, cloud, cl * 0.75);
+        if (uStars > 0.01 && h > 0.0) {
+          // twinkling star field, hidden behind clouds and near the horizon haze
+          vec2 sp = d.xz / (h + 0.3) * 42.0;
+          vec2 cell = floor(sp);
+          vec2 f = fract(sp) - 0.5;
+          float r = hash(cell);
+          vec2 jit = vec2(hash(cell + 1.7), hash(cell + 4.3)) - 0.5;
+          float star = step(0.975, r) * smoothstep(0.09, 0.0, length(f - jit * 0.6));
+          float tw = 0.55 + 0.45 * sin(uTime * (2.0 + r * 3.0) + r * 60.0);
+          col += vec3(0.85, 0.9, 1.1) * star * tw * uStars * smoothstep(0.04, 0.3, h) * (1.0 - cl) * 1.6;
+        }
         col = mix(col, uHorizon * 0.5, smoothstep(0.0, -0.15, h));
         gl_FragColor = vec4(col, 1.0);
       }
@@ -448,12 +448,12 @@ function buildSky() {
 
 // Distant mountain ring, colored by height from haze to a darker ridge (no fog so the
 // silhouettes stay readable; the base matches the fog color for a seamless horizon).
-function buildMountains(radius: number, minH: number, maxH: number, ridgeCol: THREE.Color, seed: number) {
+function buildMountains(radius: number, minH: number, maxH: number, ridgeCol: THREE.Color, seed: number, fogCol: THREE.Color) {
   const seg = 160;
   const pos: number[] = [];
   const col: number[] = [];
   const idx: number[] = [];
-  const base = new THREE.Color(PAL.fog);
+  const base = fogCol;
   for (let i = 0; i <= seg; i++) {
     const a = (i / seg) * TAU;
     const n =
@@ -526,33 +526,43 @@ export class World {
   private emberSources: THREE.Vector3[] = [];
   private dummy = new THREE.Object3D();
   private shojiMat: THREE.MeshBasicMaterial;
+  private hemi: THREE.HemisphereLight;
+  private front: THREE.DirectionalLight;
+  private mountains: { mesh: THREE.Mesh; far: boolean }[] = [];
+  atm: Atmos = cloneAtmos(ATMOSPHERES[0]);
+  private atmTarget: Atmos = ATMOSPHERES[0];
+  private atmBlending = false;
+  atmIndex = 0;
 
   constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene) {
     this.scene = scene;
     scene.add(this.root);
-    scene.background = new THREE.Color(PAL.fog);
-    scene.fog = new THREE.Fog(PAL.fog, 26, 118);
-    MAT.glow.color.set(0xff9a3c).multiplyScalar(3);
+    const atm = this.atm;
+    scene.background = atm.fog.clone();
+    scene.fog = new THREE.Fog(atm.fog.clone(), atm.fogNear, atm.fogFar);
+    MAT.glow.color.set(0xff9a3c).multiplyScalar(atm.glow);
 
-    // Lights: warm low sun behind the temple, cool sky fill, and a soft front fill so
-    // characters facing the camera are not pure silhouettes against the sunset.
-    const hemi = new THREE.HemisphereLight(PAL.skyFill, PAL.groundFill, 1.25);
-    scene.add(hemi);
-    this.sun = new THREE.DirectionalLight(PAL.sunLight, 2.6);
+    // Lights: low sun behind the temple, cool sky fill, and a soft front fill so
+    // characters facing the camera are not pure silhouettes against the sky.
+    this.hemi = new THREE.HemisphereLight(atm.skyFill, atm.groundFill, atm.hemiI);
+    scene.add(this.hemi);
+    this.sun = new THREE.DirectionalLight(atm.sunLight, atm.sunI);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
     Object.assign(this.sun.shadow.camera, { left: -40, right: 40, top: 40, bottom: -40, near: 1, far: 140 });
     this.sun.shadow.bias = -0.0008;
     this.sun.shadow.normalBias = 0.04;
     scene.add(this.sun, this.sun.target);
-    const front = new THREE.DirectionalLight(0x9aa6e0, 0.7);
-    front.position.set(10, 14, 30);
-    scene.add(front);
+    this.front = new THREE.DirectionalLight(atm.front, atm.frontI);
+    this.front.position.set(10, 14, 30);
+    scene.add(this.front);
 
-    this.sky = buildSky();
+    this.sky = buildSky(atm);
     scene.add(this.sky);
-    this.root.add(buildMountains(175, 26, 58, new THREE.Color(0.1, 0.07, 0.14), 1.7));
-    this.root.add(buildMountains(140, 14, 34, new THREE.Color(0.055, 0.04, 0.08), 4.2));
+    const mFar = buildMountains(175, 26, 58, atm.ridgeFar, 1.7, atm.fog);
+    const mNear = buildMountains(140, 14, 34, atm.ridgeNear, 4.2, atm.fog);
+    this.root.add(mFar, mNear);
+    this.mountains.push({ mesh: mFar, far: true }, { mesh: mNear, far: false });
 
     const aniso = Math.min(8, renderer.capabilities.getMaxAnisotropy());
     const batch = new Batcher();
@@ -1010,6 +1020,53 @@ export class World {
     return { points: pts, pos, col };
   }
 
+  // Start easing toward another atmosphere (instant for the first frame / menu)
+  setAtmosphere(i: number, instant = false) {
+    this.atmIndex = i;
+    this.atmTarget = ATMOSPHERES[i];
+    if (instant) {
+      this.atm = cloneAtmos(this.atmTarget);
+      const u = (this.sky.material as THREE.ShaderMaterial).uniforms;
+      u.uZenith.value = this.atm.zenith;
+      u.uHorizon.value = this.atm.horizon;
+      u.uSun.value = this.atm.sunGlow;
+      u.uSunDir.value = this.atm.sunDir;
+      this.applyAtmos();
+      this.atmBlending = false;
+    } else {
+      this.atmBlending = true;
+    }
+  }
+
+  private applyAtmos() {
+    const a = this.atm;
+    const fog = this.scene.fog as THREE.Fog;
+    fog.color.copy(a.fog);
+    fog.near = a.fogNear;
+    fog.far = a.fogFar;
+    (this.scene.background as THREE.Color).copy(a.fog);
+    this.hemi.color.copy(a.skyFill);
+    this.hemi.groundColor.copy(a.groundFill);
+    this.hemi.intensity = a.hemiI;
+    this.sun.color.copy(a.sunLight);
+    this.sun.intensity = a.sunI;
+    this.front.color.copy(a.front);
+    this.front.intensity = a.frontI;
+    (this.sky.material as THREE.ShaderMaterial).uniforms.uStars.value = a.stars;
+    MAT.glow.color.set(0xff9a3c).multiplyScalar(a.glow);
+    for (const m of this.mountains) {
+      const ridge = m.far ? a.ridgeFar : a.ridgeNear;
+      const col = m.mesh.geometry.attributes.color as THREE.BufferAttribute;
+      for (let i = 0; i < col.count; i += 2) {
+        col.setXYZ(i, a.fog.r, a.fog.g, a.fog.b);
+        col.setXYZ(i + 1, ridge.r, ridge.g, ridge.b);
+      }
+      col.needsUpdate = true;
+    }
+  }
+
+  private petalQuality = 1;
+
   setQuality(p: QualityProfile) {
     this.grass.visible = p.grassDensity > 0;
     this.grass.count = Math.floor(this.grassMax * Math.max(0, p.grassDensity));
@@ -1018,6 +1075,7 @@ export class World {
       this.grass.receiveShadow = wantShadow;
       (this.grass.material as THREE.Material).needsUpdate = true;
     }
+    this.petalQuality = p.ambientParticles;
     this.petals.count = Math.floor(this.petalMax * p.ambientParticles);
     const lights = p.composer ? (p.shadowMap >= 2048 ? 4 : 2) : 0;
     this.lanternLights.forEach((l, i) => (l.visible = i < lights));
@@ -1027,11 +1085,18 @@ export class World {
 
   update(dt: number, time: number, focus: THREE.Vector3, camPos: THREE.Vector3) {
     WIND_TIME.value = time;
+    if (this.atmBlending) {
+      const done = blendAtmos(this.atm, this.atmTarget, 1 - Math.exp(-dt * 0.9));
+      this.applyAtmos();
+      if (done) this.atmBlending = false;
+    }
+    this.petals.count = Math.floor(this.petalMax * Math.min(1, this.petalQuality * this.atm.petals));
     this.sky.position.copy(camPos);
     (this.sky.material as THREE.ShaderMaterial).uniforms.uTime.value = time;
 
     // Sun follows the action so the shadow map covers it at full resolution
-    this.sun.position.set(focus.x - SUN_DIR.x * 60, 45, focus.z - SUN_DIR.z * 60);
+    const sd = this.atm.sunDir;
+    this.sun.position.set(focus.x - sd.x * 60, 45, focus.z - sd.z * 60);
     this.sun.target.position.set(focus.x, 0, focus.z);
 
     // Flickering fire and lantern glow
@@ -1043,8 +1108,10 @@ export class World {
       f.light.intensity = 8 * k;
     }
     const glowK = 0.94 + Math.sin(time * 7.3) * 0.03 + Math.sin(time * 13.1) * 0.03;
-    this.lanternLights.forEach((l, i) => (l.intensity = 5 * (glowK + Math.sin(time * 5 + i) * 0.04)));
-    this.shojiMat.color.setRGB(1.05 * glowK, 0.82 * glowK, 0.56 * glowK);
+    const lamp = this.atm.lantern;
+    this.lanternLights.forEach((l, i) => (l.intensity = lamp * (glowK + Math.sin(time * 5 + i) * 0.04)));
+    const sj = this.atm.shoji * glowK;
+    this.shojiMat.color.setRGB(1.05 * sj, 0.82 * sj, 0.56 * sj);
 
     // Petals: drift with the wind, flutter, respawn above the play area around the focus
     const d = this.dummy;
@@ -1110,7 +1177,7 @@ export class World {
         m.x += Math.sin(time * 0.9 + i * 1.7) * 0.4 * dt;
         m.y += Math.sin(time * 1.3 + i) * 0.25 * dt;
         m.z += Math.cos(time * 0.8 + i * 2.3) * 0.4 * dt;
-        bright = Math.sin(f * Math.PI) * (0.6 + 0.4 * Math.sin(time * 6 + i * 3)) * 2.4;
+        bright = Math.sin(f * Math.PI) * (0.6 + 0.4 * Math.sin(time * 6 + i * 3)) * 2.4 * this.atm.fireflies;
         this.moteCol[i * 3] = bright * 0.9;
         this.moteCol[i * 3 + 1] = bright;
         this.moteCol[i * 3 + 2] = bright * 0.35;

@@ -5,6 +5,7 @@ import { WEAPONS_KAGE, WEAPON_INFO, KARATE, SPECIALS } from './game/constants';
 import { ICON_URLS } from './game/icons';
 import { initAudio } from './game/audio';
 import type { Quality, QualitySetting } from './game/postfx';
+import type { AtmosMode } from './game/atmosphere';
 import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft, ArrowUp } from 'lucide-react';
 
 const SLOT_COUNT = 2;
@@ -156,6 +157,15 @@ export default function App() {
   });
   const [effectiveQuality, setEffectiveQuality] = useState<Quality>('high');
   const qualityRef = useRef(qualitySetting);
+  const [atmosMode, setAtmosMode] = useState<AtmosMode>(() => {
+    try {
+      const v = localStorage.getItem('kage_atmos');
+      return v === 'every' || v === 'random' ? v : 'two';
+    } catch {
+      return 'two';
+    }
+  });
+  const atmosRef = useRef(atmosMode);
   const [sensitivity, setSensitivity] = useState(1.0);
   const [autoCamera, setAutoCamera] = useState(true);
   const [autoTurnStick, setAutoTurnStick] = useState(true);
@@ -220,6 +230,7 @@ export default function App() {
     if (import.meta.env.DEV) (window as any).__engine = engine;
     engine.loadout = slotsRef.current;
     engine.setQuality(qualityRef.current);
+    engine.atmosMode = atmosRef.current;
     setActiveWeapon(engine.weapons[0]);
 
     const handleResize = () => engine.resize();
@@ -1018,6 +1029,39 @@ export default function App() {
                   ))}
                 </div>
                 <p className="text-[10px] text-[var(--paper)]/50 mt-1">Auto reduz a qualidade se o jogo ficar lento.</p>
+              </div>
+
+              <div className="py-1 border-t border-[rgba(239,230,210,0.1)]">
+                <div className="font-bold mb-1.5">Mudança de atmosfera:</div>
+                <div className="grid grid-cols-3 gap-1">
+                  {(
+                    [
+                      ['every', 'Cada onda'],
+                      ['two', 'A cada 2'],
+                      ['random', 'Aleatória']
+                    ] as [AtmosMode, string][]
+                  ).map(([m, label]) => (
+                    <button
+                      key={m}
+                      onClick={() => {
+                        setAtmosMode(m);
+                        atmosRef.current = m;
+                        if (engineRef.current) engineRef.current.atmosMode = m;
+                        try {
+                          localStorage.setItem('kage_atmos', m);
+                        } catch {}
+                      }}
+                      className={`py-1.5 rounded border text-[11px] font-bold cursor-pointer ${
+                        atmosMode === m
+                          ? 'border-[var(--ember)] bg-[rgba(242,166,90,0.25)] text-[var(--paper)]'
+                          : 'border-[rgba(239,230,210,0.2)] text-[var(--paper)]/70'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-[var(--paper)]/50 mt-1">Entardecer, Noite de lua e Amanhecer com névoa.</p>
               </div>
 
             </div>
