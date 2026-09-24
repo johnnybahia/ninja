@@ -73,7 +73,7 @@ KEYWORDS = {
 OVERRIDE_SLUG = {
     # picked by hand from --list-candidates output, not the automatic ranking:
     'flag': 'monastery_stone_floor',  # confirmed by eye on polyhaven.com: irregular fitted flagstone, matches the brief
-    'rock': 'lichen_rock',  # matches the original brief directly: granite, strata, lichen, moss
+    'rock': 'mountainside',  # confirmed by eye: visible strata, heavy fracturing, moss/lichen in the crevices
 }
 
 _INDEX = None
