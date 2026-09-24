@@ -21,6 +21,7 @@ import {
 } from './constants';
 import { sfx } from './audio';
 import { World } from './world';
+import { BladeTrail, ImpactPool, softDotTexture } from './vfx';
 import { PostFX, NINJA_LOOK, Quality, QualitySetting, qualityProfile, detectQuality } from './postfx';
 import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
@@ -56,6 +57,19 @@ function prdConstant(p: number): number {
   prdCache.set(p, hi);
   return hi;
 }
+
+// Blade span (local Z on the weapon mesh) swept by the melee trail
+const TRAIL_SPEC: Record<string, { base: number; tip: number; tint: THREE.Color }> = {
+  katana: { base: 0.25, tip: 1.45, tint: new THREE.Color(1.25, 1.4, 1.75) },
+  bo: { base: -0.95, tip: 1.55, tint: new THREE.Color(1.7, 1.25, 0.6) },
+  kama: { base: 0.3, tip: 0.62, tint: new THREE.Color(1.3, 1.55, 1.35) }
+};
+const TRAIL_SPECIAL = new THREE.Color(2.2, 1.6, 0.5);
+const IMPACT_NORMAL = new THREE.Color(2.2, 1.9, 1.5);
+const IMPACT_HEAVY = new THREE.Color(2.6, 1.7, 0.9);
+const IMPACT_CRIT = new THREE.Color(3.0, 2.2, 0.7);
+const IMPACT_HURT = new THREE.Color(2.6, 0.5, 0.35);
+const IMPACT_DODGE = new THREE.Color(1.2, 2.2, 2.6);
 
 export interface GameEngineCallbacks {
   onHpChange: (hp: number, maxHp: number) => void;
@@ -231,6 +245,8 @@ export class GameEngine {
 
   private tmpV = new THREE.Vector3();
   private tmpH = new THREE.Vector3();
+  private trailA = new THREE.Vector3();
+  private trailB = new THREE.Vector3();
 
   // Rendering quality & post-processing
   private fx: PostFX | null = null;
@@ -240,6 +256,11 @@ export class GameEngine {
   private fpsFrames = 0;
   private slowWindows = 0;
   private hurtFx = 0;
+  private trail!: BladeTrail;
+  private impacts!: ImpactPool;
+  private camTarget = new THREE.Vector3(0, 1.6, 5);
+  private fovKick = 0;
+  private baseFov = 60;
   private prevYaw = Math.PI;
   private desatFx = 0;
 
@@ -277,6 +298,9 @@ export class GameEngine {
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 420);
+    this.baseFov = this.camera.aspect < 1 ? 72 : 60;
+    this.camera.fov = this.baseFov;
+    this.camera.updateProjectionMatrix();
 
     // General Particle Buffer
     for (let i = 0; i < this.PN; i++) this.pPos[i * 3 + 1] = -999;
@@ -285,7 +309,8 @@ export class GameEngine {
     const points = new THREE.Points(
       this.pGeo,
       new THREE.PointsMaterial({
-        size: 0.24,
+        size: 0.3,
+        map: softDotTexture(),
         color: new THREE.Color(2.2, 2.2, 2.2),
         vertexColors: true,
         transparent: true,
@@ -353,6 +378,9 @@ export class GameEngine {
   }
 
   private initSlashEffects() {
+    this.trail = new BladeTrail(this.scene);
+    this.impacts = new ImpactPool(this.scene);
+
     this.slashGeos = {
       katana: new THREE.RingGeometry(1.1, 2.9, 24, 1, -Math.PI / 2 - 1.05, 2.1).rotateX(-Math.PI / 2),
       bo: new THREE.RingGeometry(1.6, 3.5, 40).rotateX(-Math.PI / 2),
@@ -372,8 +400,8 @@ export class GameEngine {
     this.buildReticle();
 
     this.chainLink = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.025, 0.025, 1, 4).rotateX(Math.PI / 2).translate(0, 0, 0.5),
-      MAT.metal
+      new THREE.CylinderGeometry(0.04, 0.04, 1, 6).rotateX(Math.PI / 2).translate(0, 0, 0.5),
+      new THREE.MeshStandardMaterial({ color: 0xc8ccd4, roughness: 0.3, metalness: 0.9, emissive: 0x2a2c30 })
     );
     this.chainTip = mesh(new THREE.BoxGeometry(0.03, 0.34, 0.08), MAT.metal);
     this.chainTip.scale.setScalar(1.6);
@@ -1061,6 +1089,7 @@ export class GameEngine {
       this.player.dashDir.set(Math.sin(this.player.yaw), 0, Math.cos(this.player.yaw));
     }
     this.player.yaw = Math.atan2(this.player.dashDir.x, this.player.dashDir.z);
+    this.fovKick = Math.max(this.fovKick, 7);
     sfx.dash();
   }
 
@@ -1177,6 +1206,7 @@ export class GameEngine {
     const S = SPECIALS[w.id];
     if (!S) return;
     this.player.atkCd = S.cd;
+    this.fovKick = Math.min(this.fovKick, -4);
     const fx = Math.sin(this.player.yaw);
     const fz = Math.cos(this.player.yaw);
     this.player.rig.root.updateMatrixWorld(true);
@@ -1326,6 +1356,16 @@ export class GameEngine {
     dmg = rolled.dmg;
     e.hp -= dmg;
     e.flash = 0.14;
+    {
+      const nl = Math.hypot(nx, nz) || 1;
+      const sc = e.rig.root.scale.x;
+      this.tmpV.set(e.pos.x - (nx / nl) * e.r * 0.7, e.pos.y + 1.25 * sc, e.pos.z - (nz / nl) * e.r * 0.7);
+      const crit = rolled.tier === 'crit';
+      const size = (crit ? 1.9 : heavy ? 1.55 : 1.1) * (e.type === 'boss' ? 1.4 : 1);
+      this.impacts.spawn(this.tmpV, crit ? IMPACT_CRIT : heavy ? IMPACT_HEAVY : IMPACT_NORMAL, size);
+      this.emitParticles(this.tmpV.x, this.tmpV.y, this.tmpV.z, crit ? 16 : 9, 0xffd49a, 7, 1.5, 16, 0.24);
+      if (crit || heavy) this.fovKick = Math.min(this.fovKick, -3);
+    }
 
     const labelY = e.pos.y + (e.type === 'boss' ? 5.6 : 2.9);
     const labelColor = rolled.tier === 'crit' ? '#ffd166' : rolled.tier === 'weak' ? '#b9b0c8' : '#efe6d2';
@@ -1529,6 +1569,7 @@ export class GameEngine {
     this.player.hp = Math.max(0, this.player.hp - dmg);
     this.player.inv = 0.6;
     this.hurtFx = 1;
+    this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.3, this.player.pos.z), IMPACT_HURT, 1.4, 0.18);
     this.player.dashInv = false;
     this.player.killCombo = 0;
     this.player.hitCombo = 0;
@@ -1580,6 +1621,8 @@ export class GameEngine {
           perfect ? 1.55 : 1.1
         );
         this.triggerSlowmo(perfect ? 0.5 : 0.22, perfect ? 0.22 : 0.42);
+        this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.2, this.player.pos.z), IMPACT_DODGE, perfect ? 2.4 : 1.6, 0.3);
+        this.fovKick = perfect ? -5 : -2.5;
         if (perfect) {
           this.player.st = Math.min(this.player.maxSt, this.player.st + 18);
           this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
@@ -1708,7 +1751,7 @@ export class GameEngine {
       this.player.dash -= dt;
       this.player.pos.addScaledVector(this.player.dashDir, 23 * dt);
       this.player.vel.set(0, 0, 0);
-      this.emitParticles(this.player.pos.x, this.player.pos.y + 1, this.player.pos.z, 3, 0x7a5cc8, 0.6, 0, 0, 0.35);
+      this.emitParticles(this.player.pos.x, this.player.pos.y + 0.9, this.player.pos.z, 3, 0x8a86c8, 0.7, 0.2, 0, 0.4);
     } else {
       const penalty = this.player.anim ? 0.6 : this.player.tornado > 0 ? 0.55 : 1;
       const maxSp = 7.6 * penalty;
@@ -1852,6 +1895,7 @@ export class GameEngine {
       turn: yawRate,
       hit: this.hurtFx * 0.8
     });
+    this.updateBladeTrail();
 
     this.player.rig.root.position.copy(this.player.pos);
     this.player.rig.root.rotation.y = this.player.yaw;
@@ -1859,7 +1903,19 @@ export class GameEngine {
   }
 
   private updateCamera(dt: number) {
-    const camTarget = new THREE.Vector3(this.player.pos.x, this.player.pos.y + 1.6, this.player.pos.z);
+    // soft follow: the frame trails the player slightly, which reads as weight
+    const kx = 1 - Math.exp(-14 * dt);
+    const ky = 1 - Math.exp(-9 * dt);
+    this.camTarget.x += (this.player.pos.x - this.camTarget.x) * kx;
+    this.camTarget.z += (this.player.pos.z - this.camTarget.z) * kx;
+    this.camTarget.y += (this.player.pos.y + 1.6 - this.camTarget.y) * ky;
+    const camTarget = this.camTarget;
+    this.fovKick *= Math.exp(-5 * dt);
+    const fov = this.baseFov + this.fovKick;
+    if (Math.abs(this.camera.fov - fov) > 0.01) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
     const cp = Math.cos(this.camPitch);
     const camDir = new THREE.Vector3(
       Math.sin(this.camYaw) * cp,
@@ -2051,6 +2107,16 @@ export class GameEngine {
       if (p.grav) p.vel.y -= p.grav * dt;
       p.pos.addScaledVector(p.vel, dt);
       p.mesh.position.copy(p.pos);
+      if (p.type === 'kunai' || p.type === 'arrow') {
+        p.mesh.lookAt(this.tmpV.copy(p.pos).add(p.vel));
+      } else if (p.type === 'shuriken') {
+        p.mesh.rotation.y += dt * 24;
+      } else if (p.type === 'bomb') {
+        p.mesh.rotation.x += dt * 7;
+        p.mesh.rotation.z += dt * 4;
+      } else if (p.type === 'wave') {
+        p.mesh.rotation.y = Math.atan2(p.vel.x, p.vel.z) + Math.PI;
+      }
 
       let dead = p.life <= 0 || Math.hypot(p.pos.x, p.pos.z) > 55;
       let exploded = false;
@@ -2192,7 +2258,8 @@ export class GameEngine {
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
     this.fx?.setSize(window.innerWidth, window.innerHeight);
     this.camera.aspect = window.innerWidth / window.innerHeight;
-    this.camera.fov = this.camera.aspect < 1 ? 72 : 60;
+    this.baseFov = this.camera.aspect < 1 ? 72 : 60;
+    this.camera.fov = this.baseFov + this.fovKick;
     this.camera.updateProjectionMatrix();
   }
 
@@ -2252,6 +2319,8 @@ export class GameEngine {
     }
 
     this.updateParticles(dt);
+    this.impacts.update(dt);
+    this.updateChain(dt);
     this.updateLabels(dt);
     this.updateCamera(real);
 
@@ -2261,6 +2330,50 @@ export class GameEngine {
     this.render();
     this.drawMinimap();
   };
+
+  // Kusarigama chain: shoots out from the hand to full reach and snaps back; during the
+  // special it whirls around the player
+  private updateChain(dt: number) {
+    const striking = this.chainT < 0.36;
+    const spinning = this.chainSpin > 0;
+    if (!striking && !spinning) {
+      this.chain.visible = false;
+      return;
+    }
+    this.chainT += dt;
+    if (spinning) this.chainSpin = Math.max(0, this.chainSpin - dt);
+    this.player.rig.root.updateMatrixWorld(true);
+    this.player.rig.hand.getWorldPosition(this.tmpH);
+    let yaw = this.player.yaw;
+    let len: number;
+    if (spinning) {
+      yaw += (0.45 - this.chainSpin) * Math.PI * 4.4;
+      len = 6.5;
+    } else {
+      const t = this.chainT;
+      len = 6.5 * (t < 0.14 ? t / 0.14 : Math.max(0, 1 - (t - 0.14) / 0.22));
+    }
+    this.chain.visible = len > 0.05;
+    this.chain.position.copy(this.tmpH);
+    this.chain.rotation.set(0, yaw, 0);
+    this.chainLink.scale.set(1, 1, len);
+    this.chainTip.position.set(0, 0, len);
+    this.chainTip.rotation.set(0, 0, this.time * 20);
+  }
+
+  private updateBladeTrail() {
+    const w = this.weapons[this.activeWeaponIdx];
+    const spec = w && TRAIL_SPEC[w.id];
+    if (spec && (this.player.anim || this.player.tornado > 0)) {
+      const m = this.player.weaponMeshes[this.activeWeaponIdx];
+      this.player.rig.root.updateMatrixWorld(true);
+      m.localToWorld(this.trailA.set(0, 0, spec.base));
+      m.localToWorld(this.trailB.set(0, 0, spec.tip));
+      this.trail.setTint(this.player.special[this.activeWeaponIdx] > 0 ? TRAIL_SPECIAL : spec.tint);
+      this.trail.push(this.trailA, this.trailB, this.time);
+    }
+    this.trail.update(this.time);
+  }
 
   private render() {
     this.renderer.info.reset();

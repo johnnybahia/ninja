@@ -241,10 +241,12 @@ function attack(kind: string, side: number, p: number): { snapBodyY?: number } |
       break;
     }
     case 'spin': {
-      set('armR', -1.45, 0, 1.05);
-      set('armL', -1.45, 0, -1.05);
-      set('foreR', -0.25);
-      set('foreL', -0.25);
+      // both arms forward, staff held level so the body spin sweeps it around
+      set('armR', -1.45, 0, 0.12);
+      set('armL', -1.4, 0, -0.3);
+      set('foreR', -0.15);
+      set('foreL', -0.35);
+      set('handR', 1.45);
       hipsY += Math.sin(p * Math.PI) * 0.1;
       add('legL', -0.3, 0, -0.2);
       add('legR', 0.2, 0, 0.2);
