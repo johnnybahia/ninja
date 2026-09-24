@@ -24,7 +24,7 @@ import {
 import { sfx } from './audio';
 import { World } from './world';
 import { ATMOSPHERES, AtmosMode, atmosphereForWave } from './atmosphere';
-import { BladeTrail, ImpactPool, softDotTexture } from './vfx';
+import { Afterimages, BladeTrail, DustPool, ImpactPool, InkDecals, softDotTexture } from './vfx';
 import { PostFX, NINJA_LOOK, Quality, QualitySetting, QualityProfile, qualityProfile, detectQuality } from './postfx';
 import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
@@ -77,7 +77,10 @@ const IMPACT_DEFLECT = new THREE.Color(3.2, 1.7, 0.45);
 const IMPACT_BLOCK = new THREE.Color(1.8, 1.5, 1.1);
 
 // Sekiro-style combat tuning
-const DEFLECT_WINDOW = 0.2; // seconds after pressing guard that an incoming strike is deflected
+const DEFLECT_WINDOW = 0.2;
+const GHOST_DASH = new THREE.Color(0x2a2464);
+const GHOST_PERFECT = new THREE.Color(0x6a4a18);
+const DUST_BASE = new THREE.Color(0.55, 0.5, 0.44); // seconds after pressing guard that an incoming strike is deflected
 const PLAYER_MAX_POSTURE = 100;
 
 // Canvas sprites shared by every enemy: the perilous-attack kanji and the deathblow mark
@@ -307,6 +310,13 @@ export class GameEngine {
   private isRunning = false;
 
   private tmpV = new THREE.Vector3();
+  private decals!: InkDecals;
+  private dust!: DustPool;
+  private ghosts!: Afterimages;
+  private ghostT = 0;
+  private stepIdx = 0;
+  private dustCol = new THREE.Color();
+  private bufSize = new THREE.Vector2();
   private tmpH = new THREE.Vector3();
   private trailA = new THREE.Vector3();
   private trailB = new THREE.Vector3();
@@ -450,6 +460,13 @@ export class GameEngine {
   private initSlashEffects() {
     this.trail = new BladeTrail(this.scene);
     this.impacts = new ImpactPool(this.scene);
+    this.decals = new InkDecals(this.scene);
+    this.dust = new DustPool(this.scene);
+    this.ghosts = new Afterimages(this.scene, () => {
+      const r = buildCharacter('ninja');
+      r.dispose?.();
+      return r.root;
+    });
 
     this.slashGeos = {
       katana: new THREE.RingGeometry(1.1, 2.9, 24, 1, -Math.PI / 2 - 1.05, 2.1).rotateX(-Math.PI / 2),
@@ -569,6 +586,9 @@ export class GameEngine {
     this.rings = [];
     for (let i = 0; i < this.BLOOD_PN; i++) this.bPos[i * 3 + 1] = -999;
     this.bGeo.attributes.position.needsUpdate = true;
+    this.decals.clear();
+    this.dust.clear();
+    this.ghosts.clear();
 
     this.player.hp = 60;
     this.player.maxHp = 60;
@@ -940,6 +960,27 @@ export class GameEngine {
     }
   }
 
+  // ground dust tinted by the current atmosphere; (dx, dz) biases the spread
+  private puff(x: number, z: number, n: number, spd: number, dx = 0, dz = 0) {
+    this.dustCol.copy(this.world.atm.fog).lerp(DUST_BASE, 0.55).multiplyScalar(0.9 + this.world.atm.hemiI * 0.15);
+    for (let i = 0; i < n; i++) {
+      const a = rand(0, TAU);
+      const v = spd * rand(0.4, 1);
+      this.dust.emit(
+        x + rand(-0.15, 0.15),
+        rand(0.05, 0.2),
+        z + rand(-0.15, 0.15),
+        Math.sin(a) * v + dx * spd * 0.6,
+        rand(0.2, 0.7),
+        Math.cos(a) * v + dz * spd * 0.6,
+        rand(0.35, 0.6),
+        rand(0.5, 0.85),
+        this.dustCol,
+        0.4
+      );
+    }
+  }
+
   private spawnBloodRing(x: number, y: number, z: number, maxR: number, color = 0x9b111e, dur = 0.28) {
     const ringMat = new THREE.MeshBasicMaterial({
       color,
@@ -1258,6 +1299,9 @@ export class GameEngine {
     }
     this.player.yaw = Math.atan2(this.player.dashDir.x, this.player.dashDir.z);
     this.fovKick = Math.max(this.fovKick, 7);
+    this.ghosts.spawn(this.player.rig.root, GHOST_DASH);
+    this.ghostT = 0.06;
+    this.puff(this.player.pos.x, this.player.pos.z, 6, 2.2, -this.player.dashDir.x, -this.player.dashDir.z);
     sfx.dash();
   }
 
@@ -1597,6 +1641,10 @@ export class GameEngine {
     // Emissão de sangue realista com spray direcional e leque de corte
     const bloodCount = isComboFinisher ? 38 : isCombo ? 26 : heavy ? 22 : 14;
     this.emitBlood(e.pos.x, e.pos.y + 1.1, e.pos.z, nx, nz, bloodCount, isCombo, isComboFinisher);
+    if (heavy || isComboFinisher || Math.random() < 0.5) {
+      const off = rand(0.5, 1.3);
+      this.decals.spawn(e.pos.x + nx * off, e.pos.z + nz * off, nx, nz, heavy || isComboFinisher ? rand(1.1, 1.5) : rand(0.7, 1));
+    }
 
     // Hitstop cinemático e tremor de impacto proporcional ao combo
     const now = performance.now();
@@ -1641,6 +1689,10 @@ export class GameEngine {
 
     // Erupção de sangue estelar ao eliminar o inimigo
     this.emitBlood(e.pos.x, e.pos.y + 1.2, e.pos.z, 0, 0, e.type === 'boss' ? 65 : 42, true, true);
+    {
+      const a = rand(0, TAU);
+      this.decals.spawn(e.pos.x, e.pos.z, Math.sin(a), Math.cos(a), e.type === 'boss' ? 2.6 : 1.8);
+    }
     this.emitParticles(e.pos.x, 1, e.pos.z, 28, 0x9a88c0, 5, 3, 4, 1);
 
     // Bosses always drop a scroll; other kills roll against the loadout-proportional rate
@@ -1790,6 +1842,7 @@ export class GameEngine {
     this.shake = Math.max(this.shake, 0.35);
     // Emissão de sangue do jogador ao sofrer golpe
     this.emitBlood(this.player.pos.x, this.player.pos.y + 1.1, this.player.pos.z, -nx, -nz, 18, false, true);
+    this.decals.spawn(this.player.pos.x - nx * 0.7, this.player.pos.z - nz * 0.7, -nx, -nz, 0.8);
     this.spawnLabel(
       this.player.pos.x,
       this.player.pos.y + 2.3,
@@ -1944,6 +1997,7 @@ export class GameEngine {
         this.triggerSlowmo(perfect ? 0.5 : 0.22, perfect ? 0.22 : 0.42);
         this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.2, this.player.pos.z), IMPACT_DODGE, perfect ? 2.4 : 1.6, 0.3);
         this.fovKick = perfect ? -5 : -2.5;
+        this.ghosts.spawn(this.player.rig.root, perfect ? GHOST_PERFECT : GHOST_DASH, perfect ? 0.6 : 0.4);
         if (perfect) {
           this.player.st = Math.min(this.player.maxSt, this.player.st + 18);
           this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
@@ -2058,6 +2112,7 @@ export class GameEngine {
       const p = this.tmpV.set(e.pos.x, e.pos.y + 1.3 * sc, e.pos.z);
       this.impacts.spawn(p, IMPACT_CRIT, 3.2 * (sc > 1 ? 1.4 : 1), 0.35);
       this.emitBlood(e.pos.x, e.pos.y + 1.2 * sc, e.pos.z, Math.sin(this.player.yaw), Math.cos(this.player.yaw), 70, true, true);
+      this.decals.spawn(e.pos.x + Math.sin(this.player.yaw) * 1.2, e.pos.z + Math.cos(this.player.yaw) * 1.2, Math.sin(this.player.yaw), Math.cos(this.player.yaw), 2.4 * sc);
       this.emitParticles(p.x, p.y, p.z, 30, 0xff6a3a, 8, 3, 12, 0.5);
       this.shake = Math.max(this.shake, 0.55);
       this.hitstop = 0.14;
@@ -2204,7 +2259,12 @@ export class GameEngine {
       this.player.dash -= dt;
       this.player.pos.addScaledVector(this.player.dashDir, 23 * dt);
       this.player.vel.set(0, 0, 0);
-      this.emitParticles(this.player.pos.x, this.player.pos.y + 0.9, this.player.pos.z, 3, 0x8a86c8, 0.7, 0.2, 0, 0.4);
+      this.emitParticles(this.player.pos.x, this.player.pos.y + 0.9, this.player.pos.z, 1, 0x8a86c8, 0.7, 0.2, 0, 0.4);
+      this.ghostT -= dt;
+      if (this.ghostT <= 0) {
+        this.ghostT = 0.06;
+        this.ghosts.spawn(this.player.rig.root, GHOST_DASH);
+      }
     } else {
       const penalty =
         this.cine ? 0 : this.player.staggerT > 0 ? 0.25 : this.player.healT > 0 ? 0.35 : this.input.guardHeld ? 0.45 : this.player.anim ? 0.6 : this.player.tornado > 0 ? 0.55 : 1;
@@ -2230,7 +2290,7 @@ export class GameEngine {
 
     if (this.player.pos.y <= 0) {
       if (!this.player.grounded && this.player.vy < -6) {
-        this.emitParticles(this.player.pos.x, 0.1, this.player.pos.z, 8, 0xbfb3d8, 2.5, 0.5, 4, 0.35);
+        this.puff(this.player.pos.x, this.player.pos.z, 9, 2.6);
       }
       this.player.pos.y = 0;
       this.player.vy = 0;
@@ -2365,6 +2425,16 @@ export class GameEngine {
 
     // Animation updates
     this.player.phase += dt * 11 * this.player.moveAmt;
+    const stepIdx = Math.floor(this.player.phase / Math.PI);
+    if (stepIdx !== this.stepIdx) {
+      this.stepIdx = stepIdx;
+      if (this.player.grounded && this.player.dash <= 0 && this.player.moveAmt > 0.55) {
+        const side = stepIdx % 2 ? 0.14 : -0.14;
+        const cx = Math.cos(this.player.yaw) * side;
+        const cz = -Math.sin(this.player.yaw) * side;
+        this.puff(this.player.pos.x + cx, this.player.pos.z + cz, 2, 0.5, -Math.sin(this.player.yaw), -Math.cos(this.player.yaw));
+      }
+    }
     const yawRate = dt > 0 ? wrap(this.player.yaw - this.prevYaw) / dt : 0;
     this.prevYaw = this.player.yaw;
     if (this.player.rig.flash) this.player.rig.flash.value = this.hurtFx * this.hurtFx * 0.35;
@@ -2921,6 +2991,9 @@ export class GameEngine {
 
     this.updateParticles(dt);
     this.impacts.update(dt);
+    this.decals.update(dt);
+    this.dust.update(dt);
+    this.ghosts.update(real);
     this.updateChain(dt);
     this.updateLabels(dt);
     this.updateCamera(real);
@@ -2992,6 +3065,8 @@ export class GameEngine {
 
   private render() {
     this.renderer.info.reset();
+    this.renderer.getDrawingBufferSize(this.bufSize);
+    this.dust.setScale(this.bufSize.y, this.camera.fov);
     if (this.fx) this.fx.render();
     else this.renderer.render(this.scene, this.camera);
   }

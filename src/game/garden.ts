@@ -149,9 +149,9 @@ export class Garden {
           float fres = pow(1.0 - max(dot(n, v), 0.0), 3.0);
           vec3 r = reflect(-v, n);
           vec3 sky = mix(uHorizon, uZenith, smoothstep(0.0, 0.6, r.y));
-          float spec = pow(max(dot(r, normalize(uSunDir)), 0.0), 160.0);
+          float spec = pow(max(dot(r, normalize(uSunDir)), 0.0), 420.0);
           vec3 deep = vec3(0.02, 0.07, 0.07);
-          vec3 col = mix(deep, sky, 0.25 + fres * 0.7) + uSunCol * spec * 2.5;
+          vec3 col = mix(deep, sky, 0.25 + fres * 0.6) + uSunCol * min(spec * 1.4, 1.2);
           float edge = length(p - uCenter) / uRadius;
           float a = mix(0.5, 0.95, fres) * smoothstep(1.08, 0.9, edge);
           gl_FragColor = vec4(col, a);
