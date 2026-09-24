@@ -2,8 +2,9 @@ import * as THREE from 'three';
 import LUM from './texture-manifest.json';
 
 // ===========================================================================
-// Surface materials: baked albedo + normal maps (scripts/bake_textures.py) applied
-// to existing MeshStandardMaterials. Most world geometry is merged into big
+// Surface materials: albedo + normal maps in public/tex (procedural via
+// scripts/bake_textures.py, or real CC0 photos via scripts/fetch_cc0_textures.py)
+// applied to existing MeshStandardMaterials. Most world geometry is merged into big
 // batches without meaningful UVs, so the maps are projected in world space
 // (triplanar, whiteout-blended normals). Roofs keep their own UVs, flat ground
 // uses a single top-down projection. Albedo acts as a luminance-normalised detail
