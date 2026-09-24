@@ -71,7 +71,9 @@ KEYWORDS = {
 }
 # fill in a slug (from --list-candidates) to skip the automatic search for that surface
 OVERRIDE_SLUG = {
-    # 'roof': 'roof_tiles_03',
+    # picked by hand from --list-candidates output, not the automatic ranking:
+    'flag': 'monastery_stone_floor',  # confirmed by eye on polyhaven.com: irregular fitted flagstone, matches the brief
+    'rock': 'mountainside',  # confirmed by eye: visible strata, heavy fracturing, moss/lichen in the crevices
 }
 
 _INDEX = None
