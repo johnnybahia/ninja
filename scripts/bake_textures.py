@@ -310,21 +310,24 @@ def pine_card():
     img = Image.new('RGBA', (S, S), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     r = np.random.default_rng(92)
-    # a spray: central twig with needle bundles radiating along it
-    for b in range(13):
-        a0 = -math.pi / 2 + r.normal(0, 0.5)
-        x0, y0 = S / 2 + r.normal(0, 40), S * 0.8 + r.normal(0, 30)
-        L = r.uniform(220, 320)
-        x1, y1 = x0 + math.cos(a0) * L, y0 + math.sin(a0) * L
-        d.line([(x0, y0), (x1, y1)], fill=(58, 44, 30, 255), width=4)
-        for k in range(34):
-            t = k / 26
-            bx, by = x0 + (x1 - x0) * t, y0 + (y1 - y0) * t
-            for side in (-1, 1):
-                na = a0 + side * r.uniform(0.5, 1.1)
-                nl = r.uniform(26, 46) * (1 - t * 0.4)
-                g = int(r.uniform(70, 120))
-                d.line([(bx, by), (bx + math.cos(na) * nl, by + math.sin(na) * nl)], fill=(int(g * 0.35), g, int(g * 0.45), 255), width=3)
+    # a dense cloud-pruned pad: twigs fanning out, each thick with needle bundles;
+    # darker needles first so the outer layer reads lighter
+    for layer in range(2):
+        for b in range(16):
+            a0 = r.uniform(0, 2 * math.pi)
+            L = r.uniform(120, 210)
+            x0, y0 = S / 2 + r.normal(0, 25), S / 2 + r.normal(0, 25)
+            x1, y1 = x0 + math.cos(a0) * L, y0 + math.sin(a0) * L * 0.8
+            d.line([(x0, y0), (x1, y1)], fill=(52, 40, 28, 255), width=4)
+            for k in range(30):
+                t = k / 30
+                bx, by = x0 + (x1 - x0) * t, y0 + (y1 - y0) * t
+                for side in (-1, 1):
+                    na = a0 + side * r.uniform(0.35, 1.0)
+                    nl = r.uniform(24, 44) * (1 - t * 0.35)
+                    g = int(r.uniform(58, 92) + layer * 34)
+                    d.line([(bx, by), (bx + math.cos(na) * nl, by + math.sin(na) * nl)], fill=(int(g * 0.38), g, int(g * 0.46), 255), width=3)
+    img = img.filter(ImageFilter.SMOOTH)
     bleed(img).save(os.path.join(OUT, 'pine_card.webp'), quality=90, method=6)
 
 

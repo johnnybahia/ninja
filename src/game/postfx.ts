@@ -20,15 +20,16 @@ export interface QualityProfile {
   ink: boolean;
   rays: boolean;
   mistLayers: number;
+  reflections: boolean;
 }
 
 export function qualityProfile(q: Quality): QualityProfile {
   const dpr = window.devicePixelRatio || 1;
   if (q === 'high')
-    return { pixelRatio: Math.min(dpr, 2), composer: true, msaa: 4, shadowMap: 2048, softShadows: true, bloom: true, grassDensity: 1, ambientParticles: 1, ink: true, rays: true, mistLayers: 2 };
+    return { pixelRatio: Math.min(dpr, 2), composer: true, msaa: 4, shadowMap: 2048, softShadows: true, bloom: true, grassDensity: 1, ambientParticles: 1, ink: true, rays: true, mistLayers: 2, reflections: true };
   if (q === 'medium')
-    return { pixelRatio: Math.min(dpr, 1.35), composer: true, msaa: 2, shadowMap: 1024, softShadows: true, bloom: true, grassDensity: 0.6, ambientParticles: 0.7, ink: true, rays: false, mistLayers: 1 };
-  return { pixelRatio: 1, composer: false, msaa: 0, shadowMap: 1024, softShadows: false, bloom: false, grassDensity: 0, ambientParticles: 0.4, ink: false, rays: false, mistLayers: 0 };
+    return { pixelRatio: Math.min(dpr, 1.5), composer: true, msaa: 2, shadowMap: 1024, softShadows: true, bloom: true, grassDensity: 0.6, ambientParticles: 0.7, ink: true, rays: false, mistLayers: 1, reflections: false };
+  return { pixelRatio: 1, composer: false, msaa: 0, shadowMap: 1024, softShadows: false, bloom: false, grassDensity: 0, ambientParticles: 0.4, ink: false, rays: false, mistLayers: 0, reflections: false };
 }
 
 export function detectQuality(): Quality {
@@ -118,8 +119,8 @@ const GradeShader = {
         float ly = invDepth(vUv + vec2(0.0, o.y)) + invDepth(vUv - vec2(0.0, o.y)) - 2.0 * ic;
         float dist = 1.0 / ic;
         float edge = (abs(lx) + abs(ly)) * dist;
-        float ink = smoothstep(0.06, 0.3, edge) * (1.0 - smoothstep(30.0, 85.0, dist));
-        col = mix(col, col * 0.16 + vec3(0.012, 0.008, 0.012), ink * uInk);
+        float ink = smoothstep(0.14, 0.5, edge) * (1.0 - smoothstep(25.0, 70.0, dist));
+        col = mix(col, col * 0.35, ink * uInk);
       }
 
       // Light shafts: march toward the sun and gather bright open sky, so gaps between

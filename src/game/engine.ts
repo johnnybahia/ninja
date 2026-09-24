@@ -331,6 +331,8 @@ export class GameEngine {
   private fpsAcc = 0;
   private fpsFrames = 0;
   private slowWindows = 0;
+  private fastWindows = 0;
+  private resScale = 1;
   private hurtFx = 0;
   private trail!: BladeTrail;
   private impacts!: ImpactPool;
@@ -369,7 +371,7 @@ export class GameEngine {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -3011,7 +3013,7 @@ export class GameEngine {
         const off = Math.max(Math.abs(this.tmpV.x), Math.abs(this.tmpV.y));
         rays = atm.rays * (1 - Math.min(1, Math.max(0, off - 1) / 0.6));
       }
-      this.fx.setStylize(this.profile.ink ? 0.6 : 0, rays, this.sunUv, atm.sunGlow, this.camera.near, this.camera.far);
+      this.fx.setStylize(this.profile.ink ? 0.4 : 0, rays, this.sunUv, atm.sunGlow, this.camera.near, this.camera.far);
     }
 
     this.updateFx(real);
@@ -3080,19 +3082,43 @@ export class GameEngine {
     this.desatFx += (wantDesat - this.desatFx) * Math.min(1, real * 10);
     if (this.fx) this.fx.update(this.time, this.desatFx, Math.max(this.hurtFx, low));
 
-    if (this.qualitySetting !== 'auto' || this.state !== 'play' || this.quality === 'low') return;
+    // Auto: first trade resolution (cheap, keeps every effect), then step the preset
+    // down if even the lowest scale is too slow; climb back slowly when there is room.
+    if (this.qualitySetting !== 'auto' || this.state !== 'play') return;
     this.fpsAcc += real;
     this.fpsFrames++;
-    if (this.fpsAcc >= 4) {
-      const fps = this.fpsFrames / this.fpsAcc;
-      this.fpsAcc = 0;
-      this.fpsFrames = 0;
-      this.slowWindows = fps < 38 ? this.slowWindows + 1 : 0;
-      if (this.slowWindows >= 2) {
+    if (this.fpsAcc < 2) return;
+    const fps = this.fpsFrames / this.fpsAcc;
+    this.fpsAcc = 0;
+    this.fpsFrames = 0;
+    const minScale = this.quality === 'low' ? 0.75 : 0.6;
+    if (fps < 40) {
+      this.fastWindows = 0;
+      if (this.resScale > minScale + 0.01) {
+        this.setResScale(Math.max(minScale, this.resScale - 0.15));
         this.slowWindows = 0;
+      } else if (++this.slowWindows >= 2 && this.quality !== 'low') {
+        this.slowWindows = 0;
+        this.resScale = 1;
         this.applyQuality(this.quality === 'high' ? 'medium' : 'low');
       }
+    } else if (fps > 56) {
+      this.slowWindows = 0;
+      if (++this.fastWindows >= 3 && this.resScale < 1) {
+        this.fastWindows = 0;
+        this.setResScale(Math.min(1, this.resScale + 0.1));
+      }
+    } else {
+      this.slowWindows = 0;
+      this.fastWindows = 0;
     }
+  }
+
+  private setResScale(k: number) {
+    this.resScale = k;
+    this.renderer.setPixelRatio(this.profile.pixelRatio * k);
+    this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+    this.fx?.setSize(window.innerWidth, window.innerHeight);
   }
 
   public setQuality(setting: QualitySetting) {
@@ -3100,6 +3126,8 @@ export class GameEngine {
     this.fpsAcc = 0;
     this.fpsFrames = 0;
     this.slowWindows = 0;
+    this.fastWindows = 0;
+    this.resScale = 1;
     this.applyQuality(setting === 'auto' ? detectQuality() : setting);
   }
 
@@ -3107,11 +3135,11 @@ export class GameEngine {
     this.quality = q;
     const prof = qualityProfile(q);
     this.profile = prof;
-    this.renderer.setPixelRatio(prof.pixelRatio);
+    this.renderer.setPixelRatio(prof.pixelRatio * this.resScale);
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
 
     this.world.setQuality(prof);
-    const shadowType = prof.softShadows ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+    const shadowType = THREE.PCFShadowMap;
     if (this.sun.shadow.map?.width !== prof.shadowMap || this.renderer.shadowMap.type !== shadowType) {
       this.renderer.shadowMap.type = shadowType;
       this.sun.shadow.map?.dispose();

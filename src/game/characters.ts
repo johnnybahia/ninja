@@ -139,13 +139,16 @@ class RigBuilder {
 // --------------------------------------------------------------------------
 // Shape helpers (all hang from the bone origin downward unless noted)
 // --------------------------------------------------------------------------
-const limb = (rTop: number, rBot: number, len: number, seg = 9) =>
-  new THREE.CylinderGeometry(rTop, rBot, len, seg, 1).translate(0, -len / 2, 0);
-const ball = (r: number, w = 10, h = 7) => new THREE.SphereGeometry(r, w, h);
-const rbox = (w: number, h: number, d: number, r: number) => new RoundedBoxGeometry(w, h, d, 2, Math.min(r, w / 2 - 0.001, h / 2 - 0.001, d / 2 - 0.001));
+// Segment counts are scaled up (SEG) so silhouettes stay round up close
+const SEG = 1.5;
+const seg = (n: number) => Math.max(3, Math.round(n * SEG));
+const limb = (rTop: number, rBot: number, len: number, n = 9) =>
+  new THREE.CylinderGeometry(rTop, rBot, len, seg(n), 1).translate(0, -len / 2, 0);
+const ball = (r: number, w = 10, h = 7) => new THREE.SphereGeometry(r, seg(w), seg(h));
+const rbox = (w: number, h: number, d: number, r: number) => new RoundedBoxGeometry(w, h, d, 3, Math.min(r, w / 2 - 0.001, h / 2 - 0.001, d / 2 - 0.001));
 const box = (w: number, h: number, d: number) => new THREE.BoxGeometry(w, h, d);
-const lathe = (pts: [number, number][], seg = 14) => new THREE.LatheGeometry(pts.map(([r, y]) => new THREE.Vector2(r, y)), seg);
-const ring = (r: number, h: number, seg = 12) => new THREE.CylinderGeometry(r, r, h, seg, 1, true);
+const lathe = (pts: [number, number][], n = 14) => new THREE.LatheGeometry(pts.map(([r, y]) => new THREE.Vector2(r, y)), seg(n));
+const ring = (r: number, h: number, n = 12) => new THREE.CylinderGeometry(r, r, h, seg(n), 1, true);
 
 // --------------------------------------------------------------------------
 // Materials: rim light (warm sunset backlight) + white hit flash, per rig
