@@ -27,10 +27,30 @@ from io import BytesIO
 import numpy as np
 from PIL import Image, ImageOps
 
+def _find_repo_root(start):
+    d = os.path.abspath(start)
+    for _ in range(6):
+        if os.path.isfile(os.path.join(d, 'src', 'game', 'texture-manifest.json')):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+    return None
+
+
+_ROOT = _find_repo_root(os.path.dirname(os.path.abspath(__file__))) or _find_repo_root(os.getcwd())
+if _ROOT is None:
+    raise SystemExit(
+        "could not find src/game/texture-manifest.json above this script or the current directory.\n"
+        "Run this from inside your ninja checkout (e.g. as scripts/fetch_cc0_textures.py there), "
+        "or cd into the repo root first."
+    )
+
 API = 'https://api.polyhaven.com'
-OUT = os.path.join(os.path.dirname(__file__), '..', 'public', 'tex')
-MANIFEST = os.path.join(os.path.dirname(__file__), '..', 'src', 'game', 'texture-manifest.json')
-SOURCES_JSON = os.path.join(os.path.dirname(__file__), 'cc0_sources.json')
+OUT = os.path.join(_ROOT, 'public', 'tex')
+MANIFEST = os.path.join(_ROOT, 'src', 'game', 'texture-manifest.json')
+SOURCES_JSON = os.path.join(_ROOT, 'scripts', 'cc0_sources.json')
 N = 1024
 RES_ORDER = ('1k', '2k', '4k')
 FMT_ORDER = ('jpg', 'png')
