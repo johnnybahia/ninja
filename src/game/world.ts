@@ -579,6 +579,7 @@ export class World {
     batch.build(this.root);
 
     this.shojiMat = this.root.userData.shoji as THREE.MeshBasicMaterial;
+    this.buildMist();
     this.grass = this.buildGrass();
     this.petals = this.buildPetals();
     const motes = this.buildMotes();
@@ -911,8 +912,10 @@ export class World {
     const mat = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uWindTime = WIND_TIME;
+      shader.uniforms.uSunDir = { value: this.atm.sunDir };
+      shader.uniforms.uSunCol = { value: this.atm.sunLight };
       shader.vertexShader =
-        'uniform float uWindTime;\nvarying float vBladeH;\n' +
+        'uniform float uWindTime;\nvarying float vBladeH;\nvarying vec3 vGrassW;\n' +
         shader.vertexShader.replace(
           '#include <begin_vertex>',
           `#include <begin_vertex>
@@ -922,12 +925,19 @@ export class World {
           float gust = 0.6 + 0.4 * sin(uWindTime * 0.5 + wOrigin.x * 0.05);
           float wAmt = (sin(wPh) * 0.7 + sin(wPh * 2.9) * 0.3) * 0.16 * gust * vBladeH * vBladeH;
           transformed.x += wAmt;
-          transformed.z += wAmt * 0.5;`
+          transformed.z += wAmt * 0.5;
+          vGrassW = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;`
         );
-      shader.fragmentShader = 'varying float vBladeH;\n' + shader.fragmentShader.replace(
+      shader.fragmentShader = 'varying float vBladeH;\nvarying vec3 vGrassW;\nuniform vec3 uSunDir;\nuniform vec3 uSunCol;\n' + shader.fragmentShader.replace(
         '#include <color_fragment>',
         `#include <color_fragment>
         diffuseColor.rgb *= mix(0.5, 1.15, vBladeH);`
+      ).replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+        vec3 toCam = normalize(cameraPosition - vGrassW);
+        float back = pow(max(dot(-toCam, normalize(uSunDir)), 0.0), 5.0);
+        totalEmissiveRadiance += uSunCol * diffuseColor.rgb * back * vBladeH * vBladeH * 1.1;`
       );
     };
     mat.customProgramCacheKey = () => 'grass';
@@ -1025,12 +1035,8 @@ export class World {
     this.atmIndex = i;
     this.atmTarget = ATMOSPHERES[i];
     if (instant) {
-      this.atm = cloneAtmos(this.atmTarget);
-      const u = (this.sky.material as THREE.ShaderMaterial).uniforms;
-      u.uZenith.value = this.atm.zenith;
-      u.uHorizon.value = this.atm.horizon;
-      u.uSun.value = this.atm.sunGlow;
-      u.uSunDir.value = this.atm.sunDir;
+      // copy in place: shaders hold references to these color/vector objects
+      blendAtmos(this.atm, this.atmTarget, 1);
       this.applyAtmos();
       this.atmBlending = false;
     } else {
@@ -1066,6 +1072,58 @@ export class World {
   }
 
   private petalQuality = 1;
+  private mist: THREE.Mesh[] = [];
+  private mistU = { uTime: { value: 0 }, uDensity: { value: 0.3 }, uColor: { value: new THREE.Color() }, uFocus: { value: new THREE.Vector2() } };
+
+  // Low ground mist: horizontal sheets of drifting noise around the play area. Sheets
+  // (rather than billboards) never show hard cut lines against the ground.
+  private buildMist() {
+    const mk = (y: number, scale: number, speed: number, alpha: number) => {
+      const m = new THREE.ShaderMaterial({
+        transparent: true,
+        depthWrite: false,
+        fog: false,
+        uniforms: { ...this.mistU, uY: { value: y }, uScale: { value: scale }, uSpeed: { value: speed }, uAlpha: { value: alpha } },
+        vertexShader: /* glsl */ `
+          varying vec3 vW;
+          void main() {
+            vec4 w = modelMatrix * vec4(position, 1.0);
+            vW = w.xyz;
+            gl_Position = projectionMatrix * viewMatrix * w;
+          }
+        `,
+        fragmentShader: /* glsl */ `
+          uniform float uTime; uniform float uDensity; uniform vec3 uColor; uniform vec2 uFocus;
+          uniform float uScale; uniform float uSpeed; uniform float uAlpha;
+          varying vec3 vW;
+          float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+          float noise(vec2 p) {
+            vec2 i = floor(p); vec2 f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
+            return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
+          }
+          float fbm(vec2 p) { float v = 0.0; float a = 0.5; for (int i = 0; i < 4; i++) { v += a * noise(p); p *= 2.1; a *= 0.5; } return v; }
+          void main() {
+            vec2 p = vW.xz * uScale + vec2(uTime * uSpeed, uTime * uSpeed * 0.4);
+            float n = fbm(p) * 0.7 + fbm(p * 0.5 - vec2(uTime * uSpeed * 0.6, 0.0)) * 0.5;
+            float a = smoothstep(0.35, 0.95, n) * uDensity * uAlpha;
+            float r = length(vW.xz - uFocus);
+            a *= 1.0 - smoothstep(38.0, 60.0, r);
+            float cam = length(vW - cameraPosition);
+            a *= smoothstep(2.0, 7.0, cam);
+            gl_FragColor = vec4(uColor, a);
+          }
+        `
+      });
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(130, 130).rotateX(-Math.PI / 2), m);
+      mesh.position.y = y;
+      mesh.renderOrder = 5;
+      mesh.frustumCulled = false;
+      this.root.add(mesh);
+      this.mist.push(mesh);
+    };
+    mk(0.22, 0.06, 0.35, 0.55);
+    mk(0.9, 0.035, 0.22, 0.4);
+  }
 
   setQuality(p: QualityProfile) {
     this.grass.visible = p.grassDensity > 0;
@@ -1076,6 +1134,7 @@ export class World {
       (this.grass.material as THREE.Material).needsUpdate = true;
     }
     this.petalQuality = p.ambientParticles;
+    this.mist.forEach((m, i) => (m.visible = i < p.mistLayers));
     this.petals.count = Math.floor(this.petalMax * p.ambientParticles);
     const lights = p.composer ? (p.shadowMap >= 2048 ? 4 : 2) : 0;
     this.lanternLights.forEach((l, i) => (l.visible = i < lights));
@@ -1091,6 +1150,14 @@ export class World {
       if (done) this.atmBlending = false;
     }
     this.petals.count = Math.floor(this.petalMax * Math.min(1, this.petalQuality * this.atm.petals));
+    this.mistU.uTime.value = time;
+    this.mistU.uDensity.value = this.atm.mist;
+    this.mistU.uColor.value.copy(this.atm.fog).lerp(this.atm.skyFill, 0.25).multiplyScalar(1.15);
+    this.mistU.uFocus.value.set(focus.x, focus.z);
+    for (const m of this.mist) {
+      m.position.x = focus.x;
+      m.position.z = focus.z;
+    }
     this.sky.position.copy(camPos);
     (this.sky.material as THREE.ShaderMaterial).uniforms.uTime.value = time;
 

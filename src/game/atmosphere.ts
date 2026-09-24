@@ -32,6 +32,7 @@ export interface Atmos {
   petals: number;
   exposure: number;
   mist: number; // low ground mist density 0..1
+  rays: number; // light shaft strength
   look: GradeLook;
 }
 
@@ -65,6 +66,7 @@ export const ATMOSPHERES: Atmos[] = [
     petals: 1,
     exposure: 1.05,
     mist: 0.35,
+    rays: 0.9,
     look: { shadowTint: [0.88, 0.93, 1.12], highTint: [1.07, 1.0, 0.88], sat: 1.1, contrast: 1.07, vignette: 0.5, bloom: 0.55 }
   },
   {
@@ -93,6 +95,7 @@ export const ATMOSPHERES: Atmos[] = [
     petals: 0.6,
     exposure: 1.1,
     mist: 0.45,
+    rays: 0.4,
     look: { shadowTint: [0.82, 0.92, 1.22], highTint: [1.12, 1.0, 0.84], sat: 0.95, contrast: 1.1, vignette: 0.62, bloom: 0.8 }
   },
   {
@@ -121,6 +124,7 @@ export const ATMOSPHERES: Atmos[] = [
     petals: 1.3,
     exposure: 1.0,
     mist: 1,
+    rays: 1.2,
     look: { shadowTint: [0.95, 0.97, 1.06], highTint: [1.05, 1.0, 0.93], sat: 0.92, contrast: 0.98, vignette: 0.4, bloom: 0.5 }
   }
 ];
@@ -171,7 +175,7 @@ export function blendAtmos(cur: Atmos, to: Atmos, k: number): boolean {
   cur.front.lerp(to.front, k);
   cur.ridgeFar.lerp(to.ridgeFar, k);
   cur.ridgeNear.lerp(to.ridgeNear, k);
-  const nums: (keyof Atmos)[] = ['stars', 'fogNear', 'fogFar', 'sunI', 'hemiI', 'frontI', 'glow', 'lantern', 'shoji', 'fireflies', 'petals', 'exposure', 'mist'];
+  const nums: (keyof Atmos)[] = ['stars', 'fogNear', 'fogFar', 'sunI', 'hemiI', 'frontI', 'glow', 'lantern', 'shoji', 'fireflies', 'petals', 'exposure', 'mist', 'rays'];
   let diff = 0;
   for (const key of nums) {
     const a = cur[key] as number;

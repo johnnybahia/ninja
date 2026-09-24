@@ -25,7 +25,7 @@ import { sfx } from './audio';
 import { World } from './world';
 import { ATMOSPHERES, AtmosMode, atmosphereForWave } from './atmosphere';
 import { BladeTrail, ImpactPool, softDotTexture } from './vfx';
-import { PostFX, NINJA_LOOK, Quality, QualitySetting, qualityProfile, detectQuality } from './postfx';
+import { PostFX, NINJA_LOOK, Quality, QualitySetting, QualityProfile, qualityProfile, detectQuality } from './postfx';
 import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
 import { animateCharacter, animateDeath } from './animation';
@@ -315,6 +315,8 @@ export class GameEngine {
   private fx: PostFX | null = null;
   public qualitySetting: QualitySetting = 'auto';
   public atmosMode: AtmosMode = 'two';
+  private profile: QualityProfile = qualityProfile('high');
+  private sunUv = new THREE.Vector2();
   public quality: Quality = 'high';
   private fpsAcc = 0;
   private fpsFrames = 0;
@@ -2925,7 +2927,19 @@ export class GameEngine {
 
     this.world.update(dt, this.time, this.player.pos, this.camera.position);
     this.renderer.toneMappingExposure = this.world.atm.exposure;
-    this.fx?.setLook(this.world.atm.look);
+    if (this.fx) {
+      this.fx.setLook(this.world.atm.look);
+      // sun position on screen for the light shafts (fade out when it leaves the view)
+      const atm = this.world.atm;
+      this.tmpV.copy(this.camera.position).addScaledVector(atm.sunDir, 200).project(this.camera);
+      let rays = 0;
+      if (this.profile.rays && this.tmpV.z < 1) {
+        this.sunUv.set(this.tmpV.x * 0.5 + 0.5, this.tmpV.y * 0.5 + 0.5);
+        const off = Math.max(Math.abs(this.tmpV.x), Math.abs(this.tmpV.y));
+        rays = atm.rays * (1 - Math.min(1, Math.max(0, off - 1) / 0.6));
+      }
+      this.fx.setStylize(this.profile.ink ? 0.6 : 0, rays, this.sunUv, atm.sunGlow, this.camera.near, this.camera.far);
+    }
 
     this.updateFx(real);
     this.render();
@@ -3017,6 +3031,7 @@ export class GameEngine {
   private applyQuality(q: Quality) {
     this.quality = q;
     const prof = qualityProfile(q);
+    this.profile = prof;
     this.renderer.setPixelRatio(prof.pixelRatio);
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
 
