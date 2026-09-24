@@ -20,6 +20,7 @@ export interface SurfaceOpts {
   normal?: number; // normal map strength
   albedo?: number; // 0 = colour only, 1 = full texture detail
   breakup?: boolean; // hide tiling on large areas with a second, rotated sample
+  sat?: number; // albedo saturation (photo textures whose hue does not fit, e.g. terracotta tiles)
 }
 
 interface Surface {
@@ -92,6 +93,7 @@ export function applySurface(mat: THREE.MeshStandardMaterial, name: SurfaceName,
     shader.uniforms.uSurfGain = { value: s.gain };
     shader.uniforms.uSurfAlb = { value: o.albedo ?? 1 };
     shader.uniforms.uSurfNrm = { value: o.normal ?? 1 };
+    shader.uniforms.uSurfSat = { value: o.sat ?? 1 };
     const defs =
       (o.mode === 'uv' ? '#define SURF_UV\n' : o.mode === 'top' ? '#define SURF_TOP\n' : '') + (o.breakup ? '#define SURF_BREAKUP\n' : '');
     shader.vertexShader =
@@ -123,6 +125,7 @@ export function applySurface(mat: THREE.MeshStandardMaterial, name: SurfaceName,
       uniform float uSurfGain;
       uniform float uSurfAlb;
       uniform float uSurfNrm;
+      uniform float uSurfSat;
       vec3 surfTN(vec2 uv) {
         vec3 t = texture2D(tSurfN, uv).xyz * 2.0 - 1.0;
         t.xy *= uSurfNrm;
@@ -152,6 +155,7 @@ export function applySurface(mat: THREE.MeshStandardMaterial, name: SurfaceName,
             vec2 sUv2 = mat2(0.8, -0.6, 0.6, 0.8) * sUv * 0.61 + 0.37;
             sAlb = mix(sAlb, texture2D(tSurfA, sUv2).rgb, smoothstep(-0.25, 0.25, sMac));
           #endif
+          sAlb = mix(vec3(dot(sAlb, vec3(0.2126, 0.7152, 0.0722))), sAlb, uSurfSat);
           diffuseColor.rgb *= mix(vec3(1.0), sAlb * uSurfGain, uSurfAlb);`
         )
         .replace(

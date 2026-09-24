@@ -30,12 +30,12 @@ function worldMaterials(): WorldMats {
     trunk: tex(MAT.trunk, 0.5),
     dark: MAT.dark.clone()
   };
-  applySurface(W.stone, 'rock', { mode: 'tri', scale: 0.5, normal: 1.1, albedo: 0.85 });
-  applySurface(W.stoneDark, 'rock', { mode: 'tri', scale: 0.6, normal: 1.0, albedo: 0.8 });
+  applySurface(W.stone, 'rock', { mode: 'tri', scale: 0.7, normal: 1.1, albedo: 0.7, sat: 0.35 });
+  applySurface(W.stoneDark, 'rock', { mode: 'tri', scale: 0.8, normal: 1.0, albedo: 0.7, sat: 0.35 });
   applySurface(W.rock, 'rock', { mode: 'tri', scale: 0.42, normal: 1.3, albedo: 0.9 });
-  applySurface(W.wood, 'wood', { mode: 'tri', scale: 0.4, normal: 0.9, albedo: 0.9 });
-  applySurface(W.woodDark, 'wood', { mode: 'tri', scale: 0.45, normal: 0.8, albedo: 0.7 });
-  applySurface(W.roof, 'roof', { mode: 'uv', scale: 1, normal: 1.2, albedo: 0.9 });
+  applySurface(W.wood, 'wood', { mode: 'tri', scale: 0.45, normal: 0.9, albedo: 0.9, sat: 0.75 });
+  applySurface(W.woodDark, 'wood', { mode: 'tri', scale: 0.5, normal: 0.8, albedo: 0.7, sat: 0.6 });
+  applySurface(W.roof, 'roof', { mode: 'uv', scale: 1, normal: 1.2, albedo: 0.9, sat: 0.12 });
   applySurface(W.torii, 'wood', { mode: 'tri', scale: 0.4, normal: 0.35, albedo: 0.12 });
   applySurface(W.trunk, 'bark', { mode: 'tri', scale: 0.7, normal: 1.3, albedo: 0.9 });
   applySurface(W.dark, 'wood', { mode: 'tri', scale: 0.45, normal: 0.4, albedo: 0.2 });
@@ -546,13 +546,13 @@ export class World {
 
   private buildGround() {
     const groundMat = new THREE.MeshStandardMaterial({ roughness: 0.95, color: new THREE.Color(0.075, 0.08, 0.06) });
-    applySurface(groundMat, 'ground', { mode: 'top', scale: 0.19, normal: 1.0, breakup: true });
+    applySurface(groundMat, 'ground', { mode: 'top', scale: 0.33, normal: 1.0, breakup: true, sat: 0.55 });
     const ground = new THREE.Mesh(new THREE.CircleGeometry(170, 64).rotateX(-Math.PI / 2), groundMat);
     ground.receiveShadow = true;
     this.root.add(ground);
 
     const plazaMat = new THREE.MeshStandardMaterial({ roughness: 0.8, color: new THREE.Color(0.12, 0.12, 0.125) });
-    applySurface(plazaMat, 'cobble', { mode: 'top', scale: 0.3, normal: 1.1, breakup: true });
+    applySurface(plazaMat, 'cobble', { mode: 'top', scale: 0.6, normal: 1.1, breakup: true });
     const plaza = new THREE.Mesh(new THREE.CircleGeometry(13, 64).rotateX(-Math.PI / 2), plazaMat);
     plaza.position.y = 0.02;
     plaza.receiveShadow = true;
@@ -565,7 +565,7 @@ export class World {
     this.root.add(curb);
 
     const pathMat = new THREE.MeshStandardMaterial({ roughness: 0.85, color: new THREE.Color(0.16, 0.16, 0.155) });
-    applySurface(pathMat, 'flag', { mode: 'tri', scale: 0.32, normal: 1.0 });
+    applySurface(pathMat, 'flag', { mode: 'tri', scale: 0.4, normal: 1.0 });
     const path = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.06, 11), pathMat);
     path.position.set(0, 0.03, -17.8);
     path.receiveShadow = true;
