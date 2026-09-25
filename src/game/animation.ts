@@ -64,6 +64,7 @@ export interface AnimInput {
   weapon?: string;
   windup?: number; // enemy telegraph progress 0..1
   hit?: number; // 0..1 hit reaction
+  landJuice?: number; // 0..1 landing-impact reaction, decays right after touchdown
   dash?: boolean;
   turn?: number; // yaw rate (rad/s) for leaning into turns
   windupKind?: string; // enemy strike being prepared: slash | thrust | sweep | smash
@@ -587,11 +588,12 @@ export function animateCharacter(r: RigInstance, a: AnimInput) {
     add('chest', 0.1);
   }
 
-  // lean into turns while running
+  // lean into turns while running; the head counter-leans to stay roughly level
   if (a.turn) {
     const lean = Math.max(-0.28, Math.min(0.28, -a.turn * 0.045 * m));
     add('hips', 0, 0, lean);
     add('chest', 0, 0, lean * 0.6);
+    add('head', 0, 0, -lean * 0.5);
   }
 
   if (a.hit && a.hit > 0) {
@@ -602,6 +604,15 @@ export function animateCharacter(r: RigInstance, a: AnimInput) {
     add('armL', 0.25 * h, 0, -0.2 * h);
     add('armR', 0.25 * h, 0, 0.2 * h);
     hipsY -= 0.03 * h;
+  }
+
+  if (a.landJuice && a.landJuice > 0) {
+    const l = a.landJuice;
+    hipsY -= 0.12 * l;
+    add('legL', 0.15 * l);
+    add('legR', 0.15 * l);
+    add('shinL', 0.25 * l);
+    add('shinR', 0.25 * l);
   }
 
   footLevel();

@@ -341,6 +341,7 @@ export class GameEngine {
   private fastWindows = 0;
   private resScale = 1;
   private hurtFx = 0;
+  private landFx = 0;
   private trail!: BladeTrail;
   private impacts!: ImpactPool;
   private camTarget = new THREE.Vector3(0, 1.6, 5);
@@ -2319,6 +2320,7 @@ export class GameEngine {
     if (this.player.pos.y <= 0) {
       if (!this.player.grounded && this.player.vy < -6) {
         this.puff(this.player.pos.x, this.player.pos.z, 9, 2.6);
+        this.landFx = 1;
       }
       this.player.pos.y = 0;
       this.player.vy = 0;
@@ -2477,6 +2479,7 @@ export class GameEngine {
       dash: this.player.dash > 0,
       turn: yawRate,
       hit: this.hurtFx * 0.8,
+      landJuice: this.landFx,
       guard: this.input.guardHeld && this.player.staggerT <= 0,
       stagger: this.player.staggerT > 0
     });
@@ -3118,6 +3121,7 @@ export class GameEngine {
   // (plus a faint persistent one at low health). Also watches frame rate for 'auto'.
   private updateFx(real: number) {
     this.hurtFx = Math.max(0, this.hurtFx - real * 2.2);
+    this.landFx = Math.max(0, this.landFx - real * 6);
     const low = this.state === 'play' && this.player.hp > 0 && this.player.hp / this.player.maxHp < 0.3 ? 0.35 + Math.sin(this.time * 5) * 0.1 : 0;
     const wantDesat = this.slowmoT > 0 ? 1 : 0;
     this.desatFx += (wantDesat - this.desatFx) * Math.min(1, real * 10);
