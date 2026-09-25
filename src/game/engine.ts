@@ -2272,17 +2272,26 @@ export class GameEngine {
         this.camYaw += -ix * steerSens * dt;
       }
 
-      // 3. AJUSTE AUTOMÁTICO DE ROTAÇÃO DA CÂMERA (Auto-Follow & Virada para Trás)
-      if (this.settings.autoCamera && this.lookTouch.id === null) {
-        const camBehindPlayer = wrap(this.player.yaw - Math.PI);
-        // Se estiver indo para trás (puxando para baixo), a câmera gira suavemente atrás do personagem
-        const isPullingBack = iy > 0.15;
-        const autoSpeed = isPullingBack
-          ? 3.8 * this.settings.cameraSensitivity * Math.min(1.2, iy * 1.5)
-          : 1.8 * this.settings.cameraSensitivity * amt;
-
-        this.camYaw = turnTo(this.camYaw, camBehindPlayer, dt * autoSpeed);
-      }
+      // 3. moved below: auto-follow only runs once the stick is released (see why there)
+    } else if (this.settings.autoCamera && this.lookTouch.id === null) {
+      // AJUSTE AUTOMÁTICO DE ROTAÇÃO DA CÂMERA (Auto-Follow & Virada para Trás)
+      //
+      // This only runs once the stick is back near center (amt <= 0.05), not while
+      // it's held. Running it inside the block above - chasing camYaw toward
+      // wrap(player.yaw - PI) every frame the stick is held - closes a loop: yaw is
+      // itself turning toward moveAngle, which is derived from THIS SAME camYaw. For
+      // held-forward input the two targets happen to already agree (moveAngle sits
+      // exactly PI from where the camera wants to end up), so it looked fine - but for
+      // any other constant direction (held backward, held strafe) there is no angle
+      // that satisfies both at once, so camYaw and player.yaw chased each other in a
+      // circle that never settles, spinning both indefinitely for as long as the
+      // stick stayed held (confirmed with a standalone simulation of this exact math).
+      // Deferring the settle-behind adjustment to when the stick is released breaks
+      // that loop - yaw has already finished turning to face the last held direction,
+      // so camBehindPlayer is a fixed target instead of a moving one chasing itself.
+      const camBehindPlayer = wrap(this.player.yaw - Math.PI);
+      const autoSpeed = 1.8 * this.settings.cameraSensitivity;
+      this.camYaw = turnTo(this.camYaw, camBehindPlayer, dt * autoSpeed);
     }
 
     if (this.player.dash > 0) {
