@@ -1,20 +1,32 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Kage — jogo ninja 3D
 
-# Run and deploy your AI Studio app
+Jogo de ação em terceira pessoa no navegador, feito com React, Vite e Three.js. Tudo — cenário, personagens, texturas, efeitos — é gerado por código; não há assets de terceiros com licença duvidosa. Controles sensíveis ao toque para celular e câmera automática.
 
-This contains everything you need to run your app locally.
+## Rodando localmente
 
-View your app in AI Studio: https://ai.studio/apps/3a409fec-6928-4316-95d8-166340f85f0d
+Pré-requisitos: Node.js 20.19+ ou 22.12+.
 
-## Run Locally
+```bash
+npm install
+npm run dev
+```
 
-**Prerequisites:**  Node.js
+Abra `http://localhost:3000`.
 
+## Build de produção
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+```bash
+npm run build   # gera dist/
+npm run preview # serve dist/ localmente para conferir
+```
+
+## Deploy no Netlify
+
+O repositório já traz `netlify.toml` (comando de build, pasta publicada, versão do Node e cache). Basta conectar o repositório no Netlify — nenhuma variável de ambiente é necessária, o jogo não usa nenhuma chave de API.
+
+## Estrutura
+
+- `src/game/` — motor do jogo (Three.js puro): cenário (`world.ts`, `garden.ts`), personagens (`characters.ts`, `animation.ts`, `rigs.ts`), combate e loop principal (`engine.ts`), pós-processamento (`postfx.ts`), texturas com relevo (`surfaces.ts`).
+- `src/App.tsx` — UI (menu, HUD, configurações) em React.
+- `scripts/bake_textures.py` — gera as texturas procedurais em `public/tex/` (opcional, o resultado já fica versionado no repositório).
+- `scripts/fetch_cc0_textures.py` — alternativa que baixa texturas CC0 do Poly Haven no lugar das procedurais.
