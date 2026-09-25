@@ -1,6 +1,6 @@
 # Kage — jogo ninja 3D
 
-Jogo de ação em terceira pessoa no navegador, feito com React, Vite e Three.js. Tudo — cenário, personagens, texturas, efeitos — é gerado por código; não há assets de terceiros com licença duvidosa. Controles sensíveis ao toque para celular e câmera automática.
+Jogo de ação em terceira pessoa no navegador, feito com React, Vite e Three.js. Cenário, personagens procedurais, texturas e efeitos são gerados por código. Um segundo personagem jogável (O Rōnin) usa um modelo 3D externo gerado por IA (`public/models/samurai.glb`), animado pelo mesmo sistema procedural via um adaptador de retargeting (`src/game/externalRig.ts`). Controles sensíveis ao toque para celular e câmera automática.
 
 ## Rodando localmente
 
@@ -26,7 +26,8 @@ O repositório já traz `netlify.toml` (comando de build, pasta publicada, vers�
 
 ## Estrutura
 
-- `src/game/` — motor do jogo (Three.js puro): cenário (`world.ts`, `garden.ts`), personagens (`characters.ts`, `animation.ts`, `rigs.ts`), combate e loop principal (`engine.ts`), pós-processamento (`postfx.ts`), texturas com relevo (`surfaces.ts`).
+- `src/game/` — motor do jogo (Three.js puro): cenário (`world.ts`, `garden.ts`), personagens (`characters.ts`, `animation.ts`, `rigs.ts`), personagem importado (`externalRig.ts`), combate e loop principal (`engine.ts`), pós-processamento (`postfx.ts`), texturas com relevo (`surfaces.ts`).
+- `public/models/` — modelos 3D externos já rigados (GLB), servidos como estão.
 - `src/App.tsx` — UI (menu, HUD, configurações) em React.
 - `scripts/bake_textures.py` — gera as texturas procedurais em `public/tex/` (opcional, o resultado já fica versionado no repositório).
 - `scripts/fetch_cc0_textures.py` — alternativa que baixa texturas CC0 do Poly Haven no lugar das procedurais.
