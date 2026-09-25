@@ -79,6 +79,17 @@ const SYNC_ORDER = [
 // mixamorig name for each PASSTHROUGH slot above, in the same order they appear.
 const PASSTHROUGH_NAMES = ['mixamorigSpine1', 'mixamorigRightShoulder', 'mixamorigLeftShoulder'];
 
+// The world-space flip above is only exact right at rest - it's an approximation that
+// grows away from it (see the file header). For most bones that's fine (the pose never
+// swings far, or the approximation error stays small), but the sword arm swings through
+// very large angles (a run cycle's own arm swing stacked on a held two-handed grip, or a
+// full attack) and visibly drifted - the hand ended up pinned near the body instead of
+// reaching out. These three bones use LOCAL conjugation instead - exact at any rotation
+// magnitude, provided the bone's own natural bind-pose rotation is small, which this
+// import's right arm/forearm/hand happen to be (its LEFT forearm isn't, hence this isn't
+// applied to every limb - see copyLocalRotation below for the actual math).
+const LOCAL_JOINTS = new Set(['armR', 'foreR', 'handBoneR']);
+
 const qWorld = new THREE.Quaternion();
 const qParentWorld = new THREE.Quaternion();
 
@@ -126,6 +137,15 @@ function copyWorldRotation(source: THREE.Object3D, target: THREE.Object3D, flip:
   target.quaternion.copy(qParentWorld.invert().multiply(qWorld));
   target.updateMatrix();
   target.matrixWorld.multiplyMatrices(target.parent!.matrixWorld, target.matrix);
+}
+
+// Converts the shadow bone's LOCAL rotation (its full delta from rest, since every
+// shadow bone starts at identity) into the imported bone's own local convention by
+// conjugating with that bone's own natural bind-pose local rotation `restLocal`
+// (captured once, before this bone is ever touched) - standard retargeting math, exact
+// for any rotation magnitude as long as restLocal itself is small (see LOCAL_JOINTS).
+function copyLocalRotation(source: THREE.Object3D, target: THREE.Object3D, restLocal: THREE.Quaternion) {
+  target.quaternion.copy(restLocal).invert().multiply(source.quaternion).multiply(restLocal);
 }
 
 // Refreshes a bone's matrixWorld from its own (unchanged) local matrix and its parent's
@@ -184,6 +204,11 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
   // own natural rest/bind pose - see buildRestFlips above for what this captures and why.
   root.updateMatrixWorld(true);
   const restFlips = buildRestFlips(shadow, real);
+  const restLocal: Partial<Record<string, THREE.Quaternion>> = {};
+  for (const key of LOCAL_JOINTS) {
+    const dst = real[key];
+    if (dst) restLocal[key] = dst.quaternion.clone();
+  }
 
   const hipsBindY = real.hips?.position.y ?? 0;
   const shadowHipsRestY = shadow.hipsRestY ?? 0;
@@ -273,8 +298,13 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
         }
         const dst = real[key];
         const src = (shadow as unknown as Record<string, THREE.Object3D | undefined>)[key];
-        const flip = restFlips[key] ?? null;
-        if (src && dst) copyWorldRotation(src, dst, flip);
+        if (!src || !dst) continue;
+        if (LOCAL_JOINTS.has(key)) {
+          const rl = restLocal[key];
+          if (rl) copyLocalRotation(src, dst, rl);
+        } else {
+          copyWorldRotation(src, dst, restFlips[key] ?? null);
+        }
       }
       if (real.hips) {
         real.hips.position.y = hipsBindY + (shadow.hips!.position.y - shadowHipsRestY) * deltaScale;
