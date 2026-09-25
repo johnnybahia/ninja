@@ -32,17 +32,10 @@ function loadTemplate(url: string): Promise<THREE.Group> {
 // bone's own local axes match our own rig's authoring convention. Copying a bone's WORLD
 // rotation straight onto the corresponding imported bone (three.js's own
 // SkeletonUtils.retarget() technique) sidesteps most of that: working in world space
-// means neither skeleton's local axis LAYOUT matters. What it doesn't sidestep is which
-// local direction each bone calls "toward my child" - and that's a real, measured
-// difference here, though not a uniform one: our own rig's LIMB bones (arm/forearm,
-// thigh/shin) point their child down at local -Y (limbs hang in the rest pose), while its
-// SPINE chain (hips/spine/chest/neck/head) points its child up at local +Y (the torso
-// stands, it doesn't hang) - two different conventions in our OWN rig, confirmed by
-// measuring both. This imported skeleton uses +Y for every one of those bones, limbs
-// included. So it agrees with our spine chain already, but disagrees with our limbs -
-// meaning the correction below applies ONLY to limb bones, never to the torso chain.
-// (A single blanket 180 degree correction was tried first and broke the torso instead:
-// applying it to the spine chain flips a relationship that was already correct.)
+// means neither skeleton's local axis LAYOUT matters. What it doesn't sidestep is each
+// bone's own bind-pose difference from our rig's corresponding bone - and that's a real,
+// per-bone difference here, not a uniform one (confirmed by measuring it - see
+// buildRestFlips below), since this skeleton wasn't built for our rig.
 // ===========================================================================
 
 // mixamorig's Left/Right is the character's own anatomical side, which sits
@@ -86,26 +79,41 @@ const SYNC_ORDER = [
 // mixamorig name for each PASSTHROUGH slot above, in the same order they appear.
 const PASSTHROUGH_NAMES = ['mixamorigSpine1', 'mixamorigRightShoulder', 'mixamorigLeftShoulder'];
 
-// Only these need the child-offset correction (see the big comment above) - the torso
-// chain already agrees with the imported skeleton's own +Y convention. Legs and arms
-// need DIFFERENT flip axes (confirmed empirically: an X-axis flip alone makes the leg
-// chain correct but leaves the arm chain broken), because the correction axis is
-// resolved in world space and a vertical bone (leg) and a diagonal one (arm, spread in
-// this skeleton's A-pose bind) don't share one fixed axis that flips Y on both correctly.
-const LEG_FLIP_JOINTS = new Set(['legL', 'shinL', 'footL', 'legR', 'shinR', 'footR']);
-const ARM_FLIP_JOINTS = new Set(['armL', 'foreL', 'handBoneL', 'armR', 'foreR', 'handBoneR']);
-
 const qWorld = new THREE.Quaternion();
 const qParentWorld = new THREE.Quaternion();
 
-// A limb bone's child sits at local +Y in this skeleton's bind pose, where our own
-// rig's limb bones sit at local -Y (arms/legs hang in the rest pose). Left uncorrected,
-// a copied world rotation swings the bone correctly for a "child at -Y" bone but the
-// real child is at +Y, so the limb points the opposite physical way. The flip quaternions
-// are the correction: post-multiplying one onto the copied world rotation before
-// converting to local space re-aims local +Y where local -Y would otherwise have gone.
-const LEG_FLIP = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
-const ARM_FLIP = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI);
+// For each synced bone, measures the constant rotation `flip` such that
+// `shadowRestWorld * flip == realRestWorld` - i.e. exactly what's needed so that
+// retargeting AT REST reproduces the imported model's own natural bind pose, whatever
+// that bone's authored local-axis convention happens to be. Composed with the shadow's
+// WORLD rotation at any later pose (copyWorldRotation below), this reproduces the same
+// physical limb direction using the real bone's own convention.
+//
+// (Measured PER BONE like this, rather than one hand-picked axis-angle constant shared
+// by a whole limb: a single guessed constant looked plausible near rest, then visibly
+// broke down for arms at the large joint angles a real guard stance or attack swing
+// reaches - confirmed by comparing the sword hand's position relative to the hips
+// against the same pose on the procedural ninja, and by real-gameplay screenshots
+// showing the sword pinned near the spine instead of held out in front.)
+function buildRestFlips(
+  shadow: RigInstance,
+  real: Partial<Record<string, THREE.Object3D>>
+): Partial<Record<string, THREE.Quaternion>> {
+  shadow.root.updateMatrixWorld(true);
+  const flips: Partial<Record<string, THREE.Quaternion>> = {};
+  const qs = new THREE.Quaternion();
+  const qd = new THREE.Quaternion();
+  for (const key of SYNC_ORDER) {
+    if (key === PASSTHROUGH) continue;
+    const src = (shadow as unknown as Record<string, THREE.Object3D | undefined>)[key];
+    const dst = real[key];
+    if (!src || !dst) continue;
+    src.getWorldQuaternion(qs);
+    dst.getWorldQuaternion(qd);
+    flips[key] = qs.clone().invert().multiply(qd);
+  }
+  return flips;
+}
 
 // Copies `source`'s WORLD rotation onto `target`, re-expressed in target's own local
 // (parent-relative) space, then rebuilds just target's own matrixWorld from that -
@@ -172,6 +180,11 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
   // source skeleton for the per-frame world-space retarget below.
   const shadow = buildCharacter('ninja');
 
+  // Measured before either skeleton has ever been animated, so both are still at their
+  // own natural rest/bind pose - see buildRestFlips above for what this captures and why.
+  root.updateMatrixWorld(true);
+  const restFlips = buildRestFlips(shadow, real);
+
   const hipsBindY = real.hips?.position.y ?? 0;
   const shadowHipsRestY = shadow.hipsRestY ?? 0;
 
@@ -203,21 +216,20 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
   // the imported skeleton, not a child of these groups - still gets the full scale it
   // needs.
   //
-  // Rotation: the hand bone's WORLD rotation is shadowWrist * ARM_FLIP (needed so the
-  // mesh skins correctly - see the arm/leg flip note above), but a weapon here isn't
-  // skinned, it's a rigid child: it needs the hand's true physical orientation,
-  // shadowWrist alone. Giving the attach point ARM_FLIP as its own local rotation
-  // cancels the parent's flip back out (ARM_FLIP is self-inverse, so flip*flip =
-  // identity), restoring the same "+Z forward, arm hanging down" convention weapon
-  // meshes are authored in.
+  // Rotation: the hand bone's WORLD rotation is shadowWrist * restFlips.handBoneX
+  // (needed so the mesh skins correctly - see buildRestFlips above), but a weapon here
+  // isn't skinned, it's a rigid child: it needs the hand's true physical orientation,
+  // shadowWrist alone. Giving the attach point that flip's inverse as its own local
+  // rotation cancels the parent's flip back out, restoring the same "+Z forward, arm
+  // hanging down" convention weapon meshes are authored in.
   const realHandR = realBones.mixamorigLeftHand; // see the L/R note above
   const realHandL = realBones.mixamorigRightHand;
   const hand = new THREE.Group();
-  hand.quaternion.copy(ARM_FLIP);
+  if (restFlips.handBoneR) hand.quaternion.copy(restFlips.handBoneR).invert();
   hand.scale.setScalar(deltaScale);
   if (realHandR) realHandR.add(hand);
   const handL = new THREE.Group();
-  handL.quaternion.copy(ARM_FLIP);
+  if (restFlips.handBoneL) handL.quaternion.copy(restFlips.handBoneL).invert();
   handL.scale.setScalar(deltaScale);
   if (realHandL) realHandL.add(handL);
 
@@ -261,7 +273,7 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
         }
         const dst = real[key];
         const src = (shadow as unknown as Record<string, THREE.Object3D | undefined>)[key];
-        const flip = LEG_FLIP_JOINTS.has(key) ? LEG_FLIP : ARM_FLIP_JOINTS.has(key) ? ARM_FLIP : null;
+        const flip = restFlips[key] ?? null;
         if (src && dst) copyWorldRotation(src, dst, flip);
       }
       if (real.hips) {
