@@ -28,7 +28,10 @@ import { Afterimages, BladeTrail, DustPool, ImpactPool, InkDecals, softDotTextur
 import { PostFX, NINJA_LOOK, Quality, QualitySetting, QualityProfile, qualityProfile, detectQuality } from './postfx';
 import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
+import { loadExternalRig } from './externalRig';
 import { animateCharacter, animateDeath } from './animation';
+
+const SAMURAI_MODEL_URL = '/models/samurai.glb';
 
 // Scroll drop chance per kill for each loaded weapon (2 weapons -> 7.5% per kill).
 const SCROLL_RATE_PER_WEAPON = 0.0375;
@@ -191,6 +194,10 @@ export class GameEngine {
   public charId: CharacterId = 'kage';
   public weapons: WeaponDef[] = WEAPONS_KAGE;
   public activeWeaponIdx = 0;
+  // Bumped on every setCharacter() call so a slow in-flight load (external GLB fetch)
+  // can tell it's been superseded by a newer selection and discard its result instead
+  // of clobbering whatever the player switched to in the meantime.
+  private charReqId = 0;
 
   // Player State
   public player = {
@@ -499,13 +506,32 @@ export class GameEngine {
     this.scene.add(this.chain);
   }
 
-  public setCharacter(id: CharacterId) {
-    this.charId = id;
+  // Building the ninja is synchronous (procedural geometry); loading the samurai means
+  // awaiting a GLB fetch+parse. Either way the old rig stays on screen, live and
+  // rendering, until the new one is fully ready - the swap below is the only place
+  // this.player.rig changes, so the render loop never sees it null or half-built.
+  public async setCharacter(id: CharacterId): Promise<void> {
     if (this.state === 'play') return;
+    const reqId = ++this.charReqId;
+
+    let rig: RigInstance;
+    let resolvedId = id;
+    try {
+      rig = id === 'samurai' ? await loadExternalRig({ url: SAMURAI_MODEL_URL, kind: 'samurai' }) : buildCharacter('ninja');
+    } catch (e) {
+      console.error('setCharacter: failed to load', id, e);
+      resolvedId = 'kage';
+      rig = buildCharacter('ninja');
+    }
+
+    // A newer selection (or a Play press) already landed while this one was loading -
+    // its result is stale, drop it instead of clobbering whatever is live now.
+    if (reqId !== this.charReqId) return;
+    this.charId = resolvedId;
 
     this.scene.remove(this.player.rig.root);
     this.player.rig.dispose?.();
-    this.player.rig = buildCharacter('ninja');
+    this.player.rig = rig;
     this.scene.add(this.player.rig.root);
 
     this.weapons = WEAPONS_KAGE;

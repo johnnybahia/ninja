@@ -1,7 +1,26 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { patchCharacter } from './characters';
 import type { RigInstance } from './types';
+
+// Loading a GLB means a network fetch + JSON/binary parse, unlike every other
+// character in the game (built from procedural geometry, nothing to await). Selecting
+// the same external character again later (e.g. leaving and reopening the character
+// select screen) should not pay that cost twice, so the parsed template is cached per
+// URL for the page's lifetime and cloned cheaply (SkeletonUtils.clone only duplicates
+// the bone/mesh graph - geometry, materials and textures stay shared, so repeat
+// clones cost no extra GPU memory).
+const templateCache = new Map<string, Promise<THREE.Group>>();
+
+function loadTemplate(url: string): Promise<THREE.Group> {
+  let p = templateCache.get(url);
+  if (!p) {
+    p = new GLTFLoader().loadAsync(url).then((gltf) => gltf.scene);
+    templateCache.set(url, p);
+  }
+  return p;
+}
 
 // ===========================================================================
 // Loads a rigged GLB (mixamorig-style skeleton, any bind/rest pose) and wraps
@@ -86,8 +105,8 @@ export interface ExternalRigOptions {
 }
 
 export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInstance> {
-  const gltf = await new GLTFLoader().loadAsync(opts.url);
-  const model = gltf.scene;
+  const template = await loadTemplate(opts.url);
+  const model = cloneSkeleton(template);
 
   const realBones: Record<string, THREE.Object3D> = {};
   let skinned: THREE.SkinnedMesh | null = null;
@@ -174,19 +193,11 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
     footR: proxies.footR,
     flash,
     kind: opts.kind ?? 'samurai',
-    dispose: () => {
-      usedMats.forEach((m) => m.dispose());
-      mesh.geometry.dispose();
-      const anyMat = mesh.material;
-      const mats = Array.isArray(anyMat) ? anyMat : anyMat ? [anyMat] : [];
-      for (const m of mats) {
-        const std = m as THREE.MeshStandardMaterial;
-        std.map?.dispose();
-        std.normalMap?.dispose();
-        std.roughnessMap?.dispose();
-        std.metalnessMap?.dispose();
-      }
-    }
+    // Geometry, materials and textures come from the cached template (shared with
+    // every other clone made from it) and must outlive this one instance, so there is
+    // nothing to dispose here beyond dropping this clone's own bone/mesh objects,
+    // which happens naturally once `root` is removed from the scene and GC'd.
+    dispose: () => {}
   };
   return rig;
 }

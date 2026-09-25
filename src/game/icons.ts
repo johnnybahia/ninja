@@ -257,6 +257,77 @@ function generateIcons() {
         g.lineTo(-3, -18.5);
       });
     },
+    samurai_portrait: (g) => {
+      // Circular portrait frame background
+      const bgGrad = g.createRadialGradient(0, 0, 10, 0, 0, 64);
+      bgGrad.addColorStop(0, '#3a1414');
+      bgGrad.addColorStop(0.7, '#1c0d0d');
+      bgGrad.addColorStop(1, '#0a0707');
+      g.fillStyle = bgGrad;
+      g.beginPath();
+      g.arc(0, 0, 62, 0, Math.PI * 2);
+      g.fill();
+
+      // Outer ring, tan/gold like the armor trim
+      g.strokeStyle = '#c9a04a';
+      g.lineWidth = 3;
+      g.stroke();
+
+      // Shoulders / armored torso
+      shape(g, DARKSTEEL(g, 0, 30, 0, 62), '#0d0e10', 2, () => {
+        g.moveTo(-48, 62);
+        g.quadraticCurveTo(-36, 30, -20, 24);
+        g.lineTo(20, 24);
+        g.quadraticCurveTo(36, 30, 48, 62);
+      });
+      // Lamellar plate stripes on the chest
+      for (const y of [32, 40, 48, 56]) {
+        shape(g, '#8a2a22', '#5a1a16', 1, () => g.rect(-24, y, 48, 5));
+      }
+
+      // Face (skin tone, unmasked)
+      shape(g, '#e0ab82', '#5a3a26', 1.5, () => {
+        g.moveTo(-16, 10);
+        g.quadraticCurveTo(-18, -10, 0, -12);
+        g.quadraticCurveTo(18, -10, 16, 10);
+        g.quadraticCurveTo(10, 20, 0, 20);
+        g.quadraticCurveTo(-10, 20, -16, 10);
+      });
+
+      // Kabuto helmet bowl
+      shape(g, DARKSTEEL(g, 0, -40, 0, -8), '#0d0e10', 2, () => {
+        g.arc(0, -14, 24, Math.PI, 0);
+        g.lineTo(22, -8);
+        g.quadraticCurveTo(0, -2, -22, -8);
+      });
+      // Helmet brim
+      shape(g, GOLD(g, -26, -12, 26, -12), '#0d0e10', 1.5, () => {
+        g.moveTo(-26, -10);
+        g.quadraticCurveTo(0, -18, 26, -10);
+        g.quadraticCurveTo(0, -4, -26, -10);
+      });
+      // Crescent maedate (frontal crest)
+      shape(g, GOLD(g, -14, -44, 14, -30), '#12151c', 1.4, () => {
+        g.moveTo(-16, -30);
+        g.quadraticCurveTo(-10, -50, 0, -40);
+        g.quadraticCurveTo(10, -50, 16, -30);
+        g.quadraticCurveTo(0, -36, -16, -30);
+      });
+
+      // Eyes
+      shape(g, '#1a1410', null, 0, () => {
+        g.moveTo(-11, -1);
+        g.lineTo(-3, -2);
+        g.lineTo(-3, 1);
+        g.lineTo(-11, 2);
+      });
+      shape(g, '#1a1410', null, 0, () => {
+        g.moveTo(3, -2);
+        g.lineTo(11, -1);
+        g.lineTo(11, 2);
+        g.lineTo(3, 1);
+      });
+    },
   };
 
   Object.entries(builders).forEach(([id, fn]) => {

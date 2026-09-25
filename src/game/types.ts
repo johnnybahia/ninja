@@ -1,7 +1,7 @@
 import type * as THREE from 'three';
 import type { Ribbon } from './characters';
 
-export type CharacterId = 'kage';
+export type CharacterId = 'kage' | 'samurai';
 
 export type WeaponKind = 'melee' | 'chain' | 'proj' | 'bomb' | 'karate';
 

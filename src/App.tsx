@@ -11,7 +11,9 @@ import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft, ArrowUp } fr
 const SLOT_COUNT = 2;
 const SLOT_LABELS = ['Principal', 'Secundária'];
 // Default pairs a close-range weapon with a ranged one: Katana + Shuriken.
-const DEFAULT_SLOTS: Record<CharacterId, number[]> = { kage: [0, 3] };
+const DEFAULT_SLOTS: Record<CharacterId, number[]> = { kage: [0, 3], samurai: [0, 3] };
+
+const CHAR_NAME: Record<CharacterId, string> = { kage: 'Kage, o Shinobi', samurai: 'O Rōnin' };
 
 // Loadout picked on the Arsenal screen, saved per character; falls back to the default
 // pair if missing or invalid (e.g. an older 4-button save).
@@ -83,8 +85,10 @@ export default function App() {
   // right away; holding keeps firing.
   const weaponList = WEAPONS_KAGE;
   const [loadouts, setLoadouts] = useState<Record<CharacterId, number[]>>(() => ({
-    kage: loadSlots('kage')
+    kage: loadSlots('kage'),
+    samurai: loadSlots('samurai')
   }));
+  const [startingGame, setStartingGame] = useState(false);
   const slots = loadouts[charId];
   const slotsRef = useRef(slots);
   const heldSlotRef = useRef<number | null>(null);
@@ -120,8 +124,10 @@ export default function App() {
     const eng = engineRef.current;
     if (eng) {
       if (eng.state !== 'menu') eng.backToMenu();
-      eng.setCharacter(id);
-      eng.setWeapon(loadouts[id][0]);
+      // Runs in the background (the samurai means an async GLB load) while the Arsenal
+      // screen opens right away below - setWeapon re-applies the saved loadout once the
+      // character is actually ready, since setCharacter resets it to a default mid-swap.
+      eng.setCharacter(id).then(() => eng.setWeapon(loadouts[id][0]));
     }
     setShowSettings(false);
     setEditSlot(0);
@@ -260,12 +266,22 @@ export default function App() {
     }
   }, [sensitivity, autoCamera, autoTurnStick]);
 
-  const handleStartGame = () => {
+  const handleStartGame = async () => {
     initAudio();
-    if (engineRef.current) {
-      engineRef.current.setCharacter(charId);
-      engineRef.current.loadout = slots;
-      engineRef.current.start();
+    const eng = engineRef.current;
+    if (eng) {
+      // Almost always already resolved by the time the player reaches this button (the
+      // load kicked off in the background back on the character-select screen) - this
+      // await only matters if they raced through on a slow connection, so the game never
+      // starts with a not-yet-ready rig.
+      setStartingGame(true);
+      await eng.setCharacter(charId);
+      setStartingGame(false);
+      if (charId === 'samurai' && eng.charId !== 'samurai') {
+        showBanner('Não foi possível carregar o Rōnin', 'Jogando com o Kage');
+      }
+      eng.loadout = slots;
+      eng.start();
     }
     setGameState('play');
   };
@@ -465,7 +481,7 @@ export default function App() {
             {/* Character Portrait Photo */}
             <div className="relative shrink-0">
               <img
-                src={ICON_URLS.kage_portrait}
+                src={charId === 'samurai' ? ICON_URLS.samurai_portrait : ICON_URLS.kage_portrait}
                 alt="Player Avatar"
                 className="w-12 h-12 rounded-full border-2 border-[var(--ember)] shadow-md object-cover bg-black/60"
               />
@@ -732,7 +748,7 @@ export default function App() {
               </p>
             )}
 
-            {/* The ninja: tapping the card (or Jogar) opens the Arsenal */}
+            {/* Tapping a card opens the Arsenal for that character */}
             <div className="flex flex-col items-center gap-3 mb-6">
               <button
                 onClick={() => handleCharSelect('kage')}
@@ -744,17 +760,27 @@ export default function App() {
                   className="w-14 h-14 rounded-full border-2 border-[var(--torii)] object-cover shadow-md"
                 />
                 <span className="flex flex-col items-start text-left">
-                  <span className="text-sm font-bold text-[var(--paper)]">Kage, o Shinobi</span>
+                  <span className="text-sm font-bold text-[var(--paper)]">{CHAR_NAME.kage}</span>
                   <span className="text-[11px] text-[var(--ember)] font-medium">
                     {loadouts.kage.map((i) => WEAPONS_KAGE[i].name).join(' & ')}
                   </span>
                 </span>
               </button>
               <button
-                onClick={() => handleCharSelect('kage')}
-                className="go-btn w-64 font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] py-3 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer"
+                onClick={() => handleCharSelect('samurai')}
+                className="char-card flex items-center gap-3 w-64 py-3 px-4 rounded-xl border-2 border-[var(--ember)] bg-[rgba(242,166,90,0.2)] shadow-[0_0_16px_rgba(242,166,90,0.35)] transition-all cursor-pointer active:scale-95"
               >
-                Jogar
+                <img
+                  src={ICON_URLS.samurai_portrait}
+                  alt="O Rōnin"
+                  className="w-14 h-14 rounded-full border-2 border-[var(--torii)] object-cover shadow-md"
+                />
+                <span className="flex flex-col items-start text-left">
+                  <span className="text-sm font-bold text-[var(--paper)]">{CHAR_NAME.samurai}</span>
+                  <span className="text-[11px] text-[var(--ember)] font-medium">
+                    {loadouts.samurai.map((i) => WEAPONS_KAGE[i].name).join(' & ')}
+                  </span>
+                </span>
               </button>
             </div>
 
@@ -788,7 +814,7 @@ export default function App() {
               >
                 <ChevronLeft className="w-4 h-4" /> Voltar
               </button>
-              <span className="text-xs font-bold text-[var(--paper)]/60">Kage, o Shinobi</span>
+              <span className="text-xs font-bold text-[var(--paper)]/60">{CHAR_NAME[charId]}</span>
             </div>
 
             <div className="text-center mb-4">
@@ -907,9 +933,10 @@ export default function App() {
 
             <button
               onClick={handleStartGame}
-              className="go-btn w-full font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] py-3.5 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer"
+              disabled={startingGame}
+              className="go-btn w-full font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] py-3.5 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer disabled:opacity-60 disabled:cursor-wait"
             >
-              Entrar em combate
+              {startingGame ? 'Carregando…' : 'Entrar em combate'}
             </button>
           </div>
         </div>
@@ -928,9 +955,10 @@ export default function App() {
             </p>
             <button
               onClick={handleStartGame}
-              className="font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] px-10 py-3.5 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer"
+              disabled={startingGame}
+              className="font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] px-10 py-3.5 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer disabled:opacity-60 disabled:cursor-wait"
             >
-              Recomeçar
+              {startingGame ? 'Carregando…' : 'Recomeçar'}
             </button>
             <button
               onClick={() => openArsenal(charId)}

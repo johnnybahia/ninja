@@ -20,6 +20,12 @@
   [headers.values]
     Cache-Control = "public, max-age=604800, must-revalidate"
 
+# Same reasoning as /tex/*: imported character models keep a stable filename.
+[[headers]]
+  for = "/models/*"
+  [headers.values]
+    Cache-Control = "public, max-age=604800, must-revalidate"
+
 # No SPA catch-all redirect: this is a single page with no client-side router, so a
 # missing file (e.g. a texture that failed to deploy) should 404 for real instead of
 # silently serving index.html back.
