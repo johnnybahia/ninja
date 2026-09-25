@@ -271,7 +271,7 @@ const ring = (r: number, h: number, n = 12) => new THREE.CylinderGeometry(r, r, 
 // --------------------------------------------------------------------------
 // Materials: rim light (warm sunset backlight) + white hit flash, per rig
 // --------------------------------------------------------------------------
-function patchCharacter(mat: THREE.Material, flash: { value: number }, rim: THREE.Color) {
+export function patchCharacter(mat: THREE.Material, flash: { value: number }, rim: THREE.Color) {
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uFlash = flash;
     shader.uniforms.uRim = { value: rim };
