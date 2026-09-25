@@ -521,7 +521,13 @@ export function animateCharacter(r: RigInstance, a: AnimInput) {
   const m = a.air ? 0 : a.moveAmt;
   locomotion(m, a.phase, a.t);
   const guardKind = kind === 'ninja' ? a.weapon || 'katana' : kind;
-  guard(guardKind, 1 - 0.5 * m, a.t);
+  // the two-handed "samurai" stance is a much bigger swing away from a natural running
+  // arm-swing than the other guard poses (a static held grip, not a loose one-handed
+  // carry), so it needs to loosen faster with speed or it still reads as a held pose at
+  // a full sprint - the arms come off looking pinned out to the sides instead of
+  // swinging fore-aft. Every other guard kind keeps the original falloff.
+  const guardW = guardKind === 'samurai' ? 1 - 0.85 * m : 1 - 0.5 * m;
+  guard(guardKind, guardW, a.t);
 
   let snapBodyY: number | undefined;
   const attacking = !!(a.anim && a.anim.dur > 0);
