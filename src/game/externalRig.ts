@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
-import { patchCharacter } from './characters';
+import { buildCharacter, patchCharacter } from './characters';
 import type { RigInstance } from './types';
 
 // Loading a GLB means a network fetch + JSON/binary parse, unlike every other
@@ -23,24 +23,26 @@ function loadTemplate(url: string): Promise<THREE.Group> {
 }
 
 // ===========================================================================
-// Loads a rigged GLB (mixamorig-style skeleton, any bind/rest pose) and wraps
-// its bones so the SAME procedural animation code that drives our own
-// hand-built rigs (animation.ts) can drive it too, unchanged.
+// Loads a rigged GLB (mixamorig-style skeleton, any bind/rest pose) and lets the SAME
+// procedural animation code that drives our own hand-built rigs (animation.ts) drive
+// it too, unchanged.
 //
-// animation.ts eases every joint toward an absolute target angle each frame by
-// writing bone.rotation.x/y/z directly - a convention that only reads right
-// because our own bones start at identity rotation (arms hanging straight
-// down = zero). An imported rig's bind pose is whatever pose it was scanned
-// in (here, arms spread ~45 degrees), so writing the same absolute numbers
-// would send the limbs to the wrong place entirely.
-//
-// The fix: each joint is a proxy object whose `.rotation` is a real
-// THREE.Euler wired (via the same _onChange hook Object3D itself uses to
-// keep .quaternion in sync) to compute `real.quaternion = bind * delta`
-// instead of `real.quaternion = delta`. animation.ts's read/write pattern on
-// `.rotation.x/y/z` needs no changes at all - it is simply now writing into
-// "this bone's own rest pose" space instead of "hanging straight down" space,
-// which is exactly what retargeting onto a different bind pose requires.
+// animation.ts eases every joint toward an absolute target angle by writing
+// bone.rotation.x/y/z directly - a convention that only reads right when the target
+// bone's own local axes match our own rig's authoring convention. Copying a bone's WORLD
+// rotation straight onto the corresponding imported bone (three.js's own
+// SkeletonUtils.retarget() technique) sidesteps most of that: working in world space
+// means neither skeleton's local axis LAYOUT matters. What it doesn't sidestep is which
+// local direction each bone calls "toward my child" - and that's a real, measured
+// difference here, though not a uniform one: our own rig's LIMB bones (arm/forearm,
+// thigh/shin) point their child down at local -Y (limbs hang in the rest pose), while its
+// SPINE chain (hips/spine/chest/neck/head) points its child up at local +Y (the torso
+// stands, it doesn't hang) - two different conventions in our OWN rig, confirmed by
+// measuring both. This imported skeleton uses +Y for every one of those bones, limbs
+// included. So it agrees with our spine chain already, but disagrees with our limbs -
+// meaning the correction below applies ONLY to limb bones, never to the torso chain.
+// (A single blanket 180 degree correction was tried first and broke the torso instead:
+// applying it to the spine chain flips a relationship that was already correct.)
 // ===========================================================================
 
 // mixamorig's Left/Right is the character's own anatomical side, which sits
@@ -66,41 +68,69 @@ const BONE_MAP: Record<string, string> = {
   mixamorigLeftFoot: 'footR'
 };
 
-const qTmp = new THREE.Quaternion();
+// Strict parent-before-child order: each bone's world matrix is rebuilt from its own
+// freshly-set local rotation plus its parent's *already rebuilt* world matrix, so a
+// child processed before its parent would read a stale parent transform. This skeleton
+// has a couple of bones our own rig has no equivalent for - mixamorigSpine1 (between
+// spine and chest) and the two shoulder/clavicle bones (between chest and each upper
+// arm) - which just need their matrixWorld carried forward unchanged so their children
+// read a correct, non-stale parent transform; PASSTHROUGH marks those spots.
+const PASSTHROUGH = Symbol('passthrough');
+const SYNC_ORDER = [
+  'hips', 'spine', PASSTHROUGH, 'chest', 'neck', 'head',
+  PASSTHROUGH, 'armL', 'foreL', 'handBoneL',
+  PASSTHROUGH, 'armR', 'foreR', 'handBoneR',
+  'legL', 'shinL', 'footL',
+  'legR', 'shinR', 'footR'
+] as const;
+// mixamorig name for each PASSTHROUGH slot above, in the same order they appear.
+const PASSTHROUGH_NAMES = ['mixamorigSpine1', 'mixamorigRightShoulder', 'mixamorigLeftShoulder'];
 
-// A joint proxy: writes to `.rotation.x/y/z` (exactly how animation.ts eases
-// every joint) apply as a delta ON TOP of the real bone's own bind pose.
-function retargetedBone(real: THREE.Object3D) {
-  const bind = real.quaternion.clone();
-  const euler = new THREE.Euler(0, 0, 0, 'XYZ');
-  euler._onChange(() => {
-    real.quaternion.copy(bind).multiply(qTmp.setFromEuler(euler));
-  });
-  return { rotation: euler } as unknown as THREE.Object3D;
+// Only these need the child-offset correction (see the big comment above) - the torso
+// chain already agrees with the imported skeleton's own +Y convention. Legs and arms
+// need DIFFERENT flip axes (confirmed empirically: an X-axis flip alone makes the leg
+// chain correct but leaves the arm chain broken), because the correction axis is
+// resolved in world space and a vertical bone (leg) and a diagonal one (arm, spread in
+// this skeleton's A-pose bind) don't share one fixed axis that flips Y on both correctly.
+const LEG_FLIP_JOINTS = new Set(['legL', 'shinL', 'footL', 'legR', 'shinR', 'footR']);
+const ARM_FLIP_JOINTS = new Set(['armL', 'foreL', 'handBoneL', 'armR', 'foreR', 'handBoneR']);
+
+const qWorld = new THREE.Quaternion();
+const qParentWorld = new THREE.Quaternion();
+
+// A limb bone's child sits at local +Y in this skeleton's bind pose, where our own
+// rig's limb bones sit at local -Y (arms/legs hang in the rest pose). Left uncorrected,
+// a copied world rotation swings the bone correctly for a "child at -Y" bone but the
+// real child is at +Y, so the limb points the opposite physical way. The flip quaternions
+// are the correction: post-multiplying one onto the copied world rotation before
+// converting to local space re-aims local +Y where local -Y would otherwise have gone.
+const LEG_FLIP = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
+const ARM_FLIP = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI);
+
+// Copies `source`'s WORLD rotation onto `target`, re-expressed in target's own local
+// (parent-relative) space, then rebuilds just target's own matrixWorld from that -
+// cheap (no subtree traversal) and correct as long as target.parent's matrixWorld is
+// already current, which SYNC_ORDER guarantees.
+function copyWorldRotation(source: THREE.Object3D, target: THREE.Object3D, flip: THREE.Quaternion | null) {
+  source.getWorldQuaternion(qWorld);
+  if (flip) qWorld.multiply(flip);
+  target.parent!.getWorldQuaternion(qParentWorld);
+  target.quaternion.copy(qParentWorld.invert().multiply(qWorld));
+  target.updateMatrix();
+  target.matrixWorld.multiplyMatrices(target.parent!.matrixWorld, target.matrix);
 }
 
-// The one position channel animation.ts touches (hips bob): virtual rest is 0,
-// and the delta is re-scaled from our world-ish units into the import's own
-// (smaller) local-space units before landing on the real bone.
-function retargetedHipsPosition(real: THREE.Object3D, deltaScale: number) {
-  const bindY = real.position.y;
-  let virtualY = 0;
-  return {
-    x: 0,
-    z: 0,
-    get y() {
-      return virtualY;
-    },
-    set y(v: number) {
-      virtualY = v;
-      real.position.y = bindY + v * deltaScale;
-    }
-  };
+// Refreshes a bone's matrixWorld from its own (unchanged) local matrix and its parent's
+// freshly-updated one - for a bone we never retarget but whose children still need a
+// current parent transform to read.
+function refreshMatrixWorld(bone: THREE.Object3D) {
+  if (!bone.parent) return;
+  bone.matrixWorld.multiplyMatrices(bone.parent.matrixWorld, bone.matrix);
 }
 
 export interface ExternalRigOptions {
   url: string;
-  height?: number; // target standing height in our world's units (our own rigs are ~1.72)
+  height?: number; // target standing height in our world's units (the procedural ninja rig measures 2.32 - it's deliberately stylized/elongated, not a realistic human height)
   kind?: RigInstance['kind'];
 }
 
@@ -119,7 +149,7 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
 
   const box = new THREE.Box3().setFromObject(model);
   const importedHeight = Math.max(0.01, box.max.y - box.min.y);
-  const targetHeight = opts.height ?? 1.72;
+  const targetHeight = opts.height ?? 2.32;
   const scale = targetHeight / importedHeight;
   const deltaScale = 1 / scale; // world-unit deltas -> the import's own (smaller) local units
 
@@ -129,12 +159,21 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
   root.add(bodyNode);
   root.scale.setScalar(scale);
 
-  const proxies: Record<string, THREE.Object3D> = { body: retargetedBone(bodyNode) };
+  // real bone lookup by OUR joint name (not the mixamorig name), via BONE_MAP
+  const real: Partial<Record<string, THREE.Object3D>> = {};
   for (const [src, dst] of Object.entries(BONE_MAP)) {
-    const real = realBones[src];
-    if (!real) continue;
-    proxies[dst] = retargetedBone(real);
+    const bone = realBones[src];
+    if (bone) real[dst] = bone;
   }
+
+  // Shadow rig: an ordinary procedural ninja skeleton, driven by animateCharacter() the
+  // same as any other character (its own bones, its own convention, nothing special).
+  // Never added to a scene or rendered - only its bone transforms exist, purely as the
+  // source skeleton for the per-frame world-space retarget below.
+  const shadow = buildCharacter('ninja');
+
+  const hipsBindY = real.hips?.position.y ?? 0;
+  const shadowHipsRestY = shadow.hipsRestY ?? 0;
 
   const flash = { value: 0 };
   const rim = new THREE.Color(1.0, 0.5, 0.3).multiplyScalar(0.28);
@@ -150,9 +189,8 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
   mesh.receiveShadow = false;
   mesh.frustumCulled = false;
 
-  // weapon attach points, parented to the real hand bones (not the retargeted proxy -
-  // a child of a bone follows its animated world transform either way, and this keeps
-  // the attachment math simple: local offset from the hand, nothing else)
+  // weapon attach points, parented to the real hand bones - a child of a bone follows
+  // its animated world transform regardless of how that bone's own rotation is driven.
   const realHandR = realBones.mixamorigLeftHand; // see the L/R note above
   const realHandL = realBones.mixamorigRightHand;
   const hand = new THREE.Group();
@@ -160,44 +198,67 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
   const handL = new THREE.Group();
   if (realHandL) realHandL.add(handL);
 
-  const hipsReal = realBones.mixamorigHips;
-  const hipsProxy = proxies.hips as unknown as { position: { x: number; y: number; z: number } };
-  if (hipsReal) hipsProxy.position = retargetedHipsPosition(hipsReal, deltaScale);
-
   const rig: RigInstance = {
     root,
-    body: proxies.body,
-    head: proxies.head,
-    eye: proxies.head,
-    legL: proxies.legL,
-    legR: proxies.legR,
-    legBaseY: 0,
-    armL: proxies.armL,
-    armR: proxies.armR,
+    body: shadow.body,
+    head: shadow.head,
+    eye: shadow.head,
+    legL: shadow.legL,
+    legR: shadow.legR,
+    legBaseY: shadow.legBaseY,
+    armL: shadow.armL,
+    armR: shadow.armR,
     hand,
     handL,
     scarf: new THREE.Group(),
     mats: usedMats,
-    hips: proxies.hips,
-    hipsRestY: 0,
-    spine: proxies.spine,
-    chest: proxies.chest,
-    neck: proxies.neck,
-    foreL: proxies.foreL,
-    foreR: proxies.foreR,
-    handBoneL: proxies.handBoneL,
-    handBoneR: proxies.handBoneR,
-    shinL: proxies.shinL,
-    shinR: proxies.shinR,
-    footL: proxies.footL,
-    footR: proxies.footR,
+    hips: shadow.hips,
+    hipsRestY: shadow.hipsRestY,
+    spine: shadow.spine,
+    chest: shadow.chest,
+    neck: shadow.neck,
+    foreL: shadow.foreL,
+    foreR: shadow.foreR,
+    handBoneL: shadow.handBoneL,
+    handBoneR: shadow.handBoneR,
+    shinL: shadow.shinL,
+    shinR: shadow.shinR,
+    footL: shadow.footL,
+    footR: shadow.footR,
     flash,
     kind: opts.kind ?? 'samurai',
-    // Geometry, materials and textures come from the cached template (shared with
-    // every other clone made from it) and must outlive this one instance, so there is
-    // nothing to dispose here beyond dropping this clone's own bone/mesh objects,
-    // which happens naturally once `root` is removed from the scene and GC'd.
-    dispose: () => {}
+    postAnimate: () => {
+      shadow.root.updateMatrixWorld(true);
+      let passIdx = 0;
+      for (const key of SYNC_ORDER) {
+        if (key === PASSTHROUGH) {
+          const bone = realBones[PASSTHROUGH_NAMES[passIdx++]];
+          if (bone) refreshMatrixWorld(bone);
+          continue;
+        }
+        const dst = real[key];
+        const src = (shadow as unknown as Record<string, THREE.Object3D | undefined>)[key];
+        const flip = LEG_FLIP_JOINTS.has(key) ? LEG_FLIP : ARM_FLIP_JOINTS.has(key) ? ARM_FLIP : null;
+        if (src && dst) copyWorldRotation(src, dst, flip);
+      }
+      if (real.hips) {
+        real.hips.position.y = hipsBindY + (shadow.hips!.position.y - shadowHipsRestY) * deltaScale;
+        real.hips.updateMatrix();
+        real.hips.matrixWorld.multiplyMatrices(real.hips.parent!.matrixWorld, real.hips.matrix);
+      }
+      // bodyNode wraps the whole imported model and, like shadow.body, has no imported-
+      // skeleton axis quirk to correct for (both are plain, identity-bind nodes this
+      // module/characters.ts controls) - its rotation carries over directly.
+      bodyNode.quaternion.copy(shadow.body.quaternion);
+      root.updateMatrixWorld(true);
+    },
+    dispose: () => {
+      shadow.dispose?.();
+      // Geometry, materials and textures come from the cached template (shared with
+      // every other clone made from it) and must outlive this one instance - nothing
+      // to dispose for the imported mesh itself beyond dropping this clone's own
+      // bone/mesh objects, which happens once `root` is removed from the scene and GC'd.
+    }
   };
   return rig;
 }
