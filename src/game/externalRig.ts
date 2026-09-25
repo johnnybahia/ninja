@@ -189,13 +189,36 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
   mesh.receiveShadow = false;
   mesh.frustumCulled = false;
 
-  // weapon attach points, parented to the real hand bones - a child of a bone follows
-  // its animated world transform regardless of how that bone's own rotation is driven.
+  // weapon attach points, parented to the real hand bones.
+  //
+  // Scale: makeWeapon() builds geometry directly in the game's own world units (a
+  // katana sized to look right on our 2.32-unit-tall ninja). The hand bone lives inside
+  // `root`, which carries `scale` to blow up the IMPORTED MESH's own (much smaller,
+  // ~1-unit-tall) geometry up to that same 2.32 units - a correction the weapon never
+  // needed, since it was never in the import's units to begin with. Left alone, the
+  // weapon inherits that scale on top of its own already-correct size and renders
+  // roughly `scale` times too big (confirmed: a katana several times the character's own
+  // height). Countering it with 1/scale (deltaScale) here cancels that back out for
+  // anything parented to these two groups, while the character mesh itself - skinned to
+  // the imported skeleton, not a child of these groups - still gets the full scale it
+  // needs.
+  //
+  // Rotation: the hand bone's WORLD rotation is shadowWrist * ARM_FLIP (needed so the
+  // mesh skins correctly - see the arm/leg flip note above), but a weapon here isn't
+  // skinned, it's a rigid child: it needs the hand's true physical orientation,
+  // shadowWrist alone. Giving the attach point ARM_FLIP as its own local rotation
+  // cancels the parent's flip back out (ARM_FLIP is self-inverse, so flip*flip =
+  // identity), restoring the same "+Z forward, arm hanging down" convention weapon
+  // meshes are authored in.
   const realHandR = realBones.mixamorigLeftHand; // see the L/R note above
   const realHandL = realBones.mixamorigRightHand;
   const hand = new THREE.Group();
+  hand.quaternion.copy(ARM_FLIP);
+  hand.scale.setScalar(deltaScale);
   if (realHandR) realHandR.add(hand);
   const handL = new THREE.Group();
+  handL.quaternion.copy(ARM_FLIP);
+  handL.scale.setScalar(deltaScale);
   if (realHandL) realHandL.add(handL);
 
   const rig: RigInstance = {
