@@ -633,6 +633,7 @@ export function animateCharacter(r: RigInstance, a: AnimInput) {
   }
 
   if (r.cloth) for (const rb of r.cloth) rb.update(a.dt, a.t);
+  r.postAnimate?.();
 }
 
 // Fall backward with buckling knees and flung arms; the engine sinks the root.

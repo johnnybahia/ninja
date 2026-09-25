@@ -88,6 +88,9 @@ export interface RigInstance {
   cloth?: Ribbon[];
   kind?: 'ninja' | 'samurai' | 'archer' | 'oni';
   dispose?: () => void;
+  // Called once, at the end of every animateCharacter() call - an imported rig uses this
+  // to retarget a shadow skeleton's freshly-animated pose onto its own real bones.
+  postAnimate?: () => void;
 }
 
 export interface EnemyInstance {

@@ -54,7 +54,7 @@ export default function App() {
 
   // UI State
   const [gameState, setGameState] = useState<'menu' | 'arsenal' | 'play' | 'over'>('menu');
-  const [charId, setCharId] = useState<CharacterId>('kage');
+  const [charId, setCharId] = useState<CharacterId>('samurai');
   const [hp, setHp] = useState(60);
   const [maxHp, setMaxHp] = useState(60);
   const [stamina, setStamina] = useState(100);
@@ -748,27 +748,12 @@ export default function App() {
               </p>
             )}
 
-            {/* Tapping a card opens the Arsenal for that character */}
+            {/* Kage is hidden for now (kept in code, not deleted, in case it comes back) -
+                O Rōnin is the only selectable character while it's the one being tuned. */}
             <div className="flex flex-col items-center gap-3 mb-6">
               <button
-                onClick={() => handleCharSelect('kage')}
-                className="char-card on flex items-center gap-3 w-64 py-3 px-4 rounded-xl border-2 border-[var(--ember)] bg-[rgba(242,166,90,0.2)] shadow-[0_0_16px_rgba(242,166,90,0.35)] transition-all cursor-pointer active:scale-95"
-              >
-                <img
-                  src={ICON_URLS.kage_portrait}
-                  alt="Kage Ninja"
-                  className="w-14 h-14 rounded-full border-2 border-[var(--torii)] object-cover shadow-md"
-                />
-                <span className="flex flex-col items-start text-left">
-                  <span className="text-sm font-bold text-[var(--paper)]">{CHAR_NAME.kage}</span>
-                  <span className="text-[11px] text-[var(--ember)] font-medium">
-                    {loadouts.kage.map((i) => WEAPONS_KAGE[i].name).join(' & ')}
-                  </span>
-                </span>
-              </button>
-              <button
                 onClick={() => handleCharSelect('samurai')}
-                className="char-card flex items-center gap-3 w-64 py-3 px-4 rounded-xl border-2 border-[var(--ember)] bg-[rgba(242,166,90,0.2)] shadow-[0_0_16px_rgba(242,166,90,0.35)] transition-all cursor-pointer active:scale-95"
+                className="char-card on flex items-center gap-3 w-64 py-3 px-4 rounded-xl border-2 border-[var(--ember)] bg-[rgba(242,166,90,0.2)] shadow-[0_0_16px_rgba(242,166,90,0.35)] transition-all cursor-pointer active:scale-95"
               >
                 <img
                   src={ICON_URLS.samurai_portrait}
