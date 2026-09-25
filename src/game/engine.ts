@@ -345,6 +345,7 @@ export class GameEngine {
   private trail!: BladeTrail;
   private impacts!: ImpactPool;
   private camTarget = new THREE.Vector3(0, 1.6, 5);
+  private camLead = new THREE.Vector3();
   private fovKick = 0;
   private baseFov = 60;
   private prevYaw = Math.PI;
@@ -2498,6 +2499,13 @@ export class GameEngine {
     this.camTarget.z += (this.player.pos.z - this.camTarget.z) * kx;
     this.camTarget.y += (this.player.pos.y + 1.6 - this.camTarget.y) * ky;
     const camTarget = this.camTarget;
+    // subtle look-ahead in the direction of travel - kept off the obstacle-avoidance
+    // raycast below (which still keys off the player's own followed position), so this
+    // is purely cosmetic and safe to rip out (delete camLead + this block + the two
+    // lookTarget uses below) if it doesn't feel right.
+    const leadTarget = this.player.vel.clone().multiplyScalar(0.12);
+    this.camLead.lerp(leadTarget, 1 - Math.exp(-4 * dt));
+    const lookTarget = camTarget.clone().add(this.camLead);
     this.fovKick *= Math.exp(-5 * dt);
     const fov = this.baseFov + this.fovKick;
     if (Math.abs(this.camera.fov - fov) > 0.01) {
@@ -2529,13 +2537,13 @@ export class GameEngine {
     }
     this.camDist += (limit - this.camDist) * Math.min(1, dt * (limit < this.camDist ? 18 : 5));
 
-    this.camera.position.copy(camTarget).addScaledVector(camDir, this.camDist);
+    this.camera.position.copy(lookTarget).addScaledVector(camDir, this.camDist);
     if (this.shake > 0.001) {
       this.camera.position.x += (Math.random() - 0.5) * this.shake;
       this.camera.position.y += (Math.random() - 0.5) * this.shake;
       this.shake *= Math.exp(-9 * dt);
     }
-    this.camera.lookAt(camTarget);
+    this.camera.lookAt(lookTarget);
   }
 
   private updateEnemies(dt: number) {
