@@ -1,0 +1,25 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# Vite fingerprints these filenames with a content hash, so a new deploy always gets a
+# new URL: safe to cache forever.
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# Baked textures keep the same filename across deploys (only their bytes change if they
+# are regenerated), so cache for a week and let the browser revalidate after that instead
+# of caching forever.
+[[headers]]
+  for = "/tex/*"
+  [headers.values]
+    Cache-Control = "public, max-age=604800, must-revalidate"
+
+# No SPA catch-all redirect: this is a single page with no client-side router, so a
+# missing file (e.g. a texture that failed to deploy) should 404 for real instead of
+# silently serving index.html back.

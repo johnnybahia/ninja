@@ -5,10 +5,12 @@ import type { RigInstance } from './types';
 import { FACE_URI } from './rigs';
 
 // ===========================================================================
-// Characters are built from simple parts (lathes, capsules, rounded boxes)
-// rigidly skinned to a real bone hierarchy and merged into ONE skinned mesh per
-// material. A full character costs ~4 draw calls instead of ~40, and the joints
-// (shoulder, elbow, hip, knee, ankle) can bend for proper animation.
+// Characters are built from simple parts (lathes, capsules, rounded boxes) skinned
+// to a real bone hierarchy and merged into ONE skinned mesh per material. A full
+// character costs ~4 draw calls instead of ~40. Most parts are rigid (100% weight
+// to one bone); the arms and legs are each one continuous lofted tube spanning two
+// bones (limb2/taperedLimb below) with the skin weight blended across the elbow/knee,
+// so bending doesn't crease into two rigid halves the way a plain two-piece limb does.
 // ===========================================================================
 
 type Kind = 'cloth' | 'armor' | 'metal' | 'skin' | 'glow' | 'face';
@@ -120,6 +122,122 @@ class RigBuilder {
     const list = this.parts.get(kind) || [];
     list.push(g);
     this.parts.set(kind, list);
+  }
+
+  private reqIdx(bone: string) {
+    const i = this.index.get(bone);
+    if (i === undefined) throw new Error('bone ' + bone);
+    return i;
+  }
+
+  // Revolves a radius/color/skin-weight profile (already in root-local space, relative
+  // to `originBone`) into one lofted tube via LatheGeometry, then stamps the per-vertex
+  // color/skinIndex/skinWeight LatheGeometry doesn't know about. Vertices come out as
+  // (radialStep, profilePoint) pairs in that order, so `k % profile.length` recovers the
+  // originating profile point for every vertex.
+  private buildTube(
+    originBone: string,
+    profile: { y: number; r: number; col: THREE.Color; boneA: number; boneB: number; wB: number }[],
+    kind: Kind,
+    radialSegs: number
+  ) {
+    const origin = this.world.get(originBone)!;
+    const g = new THREE.LatheGeometry(
+      profile.map((p) => new THREE.Vector2(Math.max(0.0015, p.r), p.y)),
+      radialSegs
+    );
+    g.translate(origin.x, origin.y, origin.z);
+    const P = profile.length;
+    const n = g.attributes.position.count;
+    const col = new Float32Array(n * 3);
+    const si = new Uint16Array(n * 4);
+    const sw = new Float32Array(n * 4);
+    for (let k = 0; k < n; k++) {
+      const p = profile[k % P];
+      col.set([p.col.r, p.col.g, p.col.b], k * 3);
+      si[k * 4] = p.boneA;
+      si[k * 4 + 1] = p.boneB;
+      sw[k * 4] = 1 - p.wB;
+      sw[k * 4 + 1] = p.wB;
+    }
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(si, 4));
+    g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(sw, 4));
+    const list = this.parts.get(kind) || [];
+    list.push(g);
+    this.parts.set(kind, list);
+  }
+
+  // One continuous tube spanning two bones (shoulder->elbow->wrist, hip->knee->ankle):
+  // both bear the SAME material/kind, so the color eases across the joint along with the
+  // skin weight. `lenA`/`lenB` are each bone's own local -Y length (the child bone's own
+  // spec offset); `radii` are sampled at the start, the joint and the end.
+  limb2(
+    boneA: string,
+    boneB: string,
+    lenA: number,
+    lenB: number,
+    radii: [number, number, number],
+    colors: [THREE.Color, THREE.Color],
+    kind: Kind,
+    opts: { radialSegs?: number; ringsA?: number; ringsB?: number; blend?: number } = {}
+  ) {
+    const idxA = this.reqIdx(boneA);
+    const idxB = this.reqIdx(boneB);
+    const radial = seg(opts.radialSegs ?? 10);
+    const ringsA = Math.max(2, opts.ringsA ?? 7);
+    const ringsB = Math.max(2, opts.ringsB ?? 7);
+    const blend = THREE.MathUtils.clamp(opts.blend ?? 0.32, 0.05, 0.49);
+    const bandA = lenA * blend;
+    const bandB = lenB * blend;
+    const profile: { y: number; r: number; col: THREE.Color; boneA: number; boneB: number; wB: number }[] = [];
+    for (let k = 0; k <= ringsA; k++) {
+      const t = k / ringsA;
+      // signed distance from the joint: negative while still inside bone A
+      const d = -(lenA - t * lenA);
+      const wB = THREE.MathUtils.smoothstep(d, -bandA, bandA);
+      profile.push({ y: -t * lenA, r: THREE.MathUtils.lerp(radii[0], radii[1], t), col: colors[0].clone().lerp(colors[1], wB), boneA: idxA, boneB: idxB, wB });
+    }
+    for (let k = 1; k <= ringsB; k++) {
+      const t = k / ringsB;
+      const yFromB = t * lenB;
+      // positive past the joint, inside bone B
+      const wB = THREE.MathUtils.smoothstep(yFromB, -bandB, bandB);
+      profile.push({ y: -(lenA + yFromB), r: THREE.MathUtils.lerp(radii[1], radii[2], t), col: colors[0].clone().lerp(colors[1], wB), boneA: idxA, boneB: idxB, wB });
+    }
+    this.buildTube(boneA, profile, kind, radial);
+  }
+
+  // A single bone's tapered tube (used when the neighbouring segment is a different
+  // material/kind, e.g. a cloth sleeve into an armored gauntlet) that still blends its
+  // skin weight toward the named neighbour near one end, so it bends without creasing
+  // even though the two pieces are separate meshes.
+  taperedLimb(
+    bone: string,
+    len: number,
+    r0: number,
+    r1: number,
+    color: THREE.Color,
+    kind: Kind,
+    opts: { radialSegs?: number; rings?: number; neighbor?: { name: string; at: 'start' | 'end'; blend?: number } } = {}
+  ) {
+    const idx = this.reqIdx(bone);
+    const radial = seg(opts.radialSegs ?? 10);
+    const rings = Math.max(2, opts.rings ?? 8);
+    const nb = opts.neighbor;
+    const nbIdx = nb ? this.reqIdx(nb.name) : idx;
+    const band = nb ? len * (nb.blend ?? 0.3) : 0;
+    const profile: { y: number; r: number; col: THREE.Color; boneA: number; boneB: number; wB: number }[] = [];
+    for (let k = 0; k <= rings; k++) {
+      const t = k / rings;
+      let wB = 0;
+      if (nb) {
+        const d = nb.at === 'end' ? -(len - t * len) : t * len;
+        wB = THREE.MathUtils.smoothstep(d, -band, band);
+      }
+      profile.push({ y: -t * len, r: THREE.MathUtils.lerp(r0, r1, t), col: color, boneA: idx, boneB: nbIdx, wB });
+    }
+    this.buildTube(bone, profile, kind, radial);
   }
 
   build(): Template {
@@ -403,7 +521,8 @@ function faceTexture() {
 const templates = new Map<string, Template>();
 
 function ninjaTemplate(): Template {
-  const B = new RigBuilder(humanoidBones({ hip: 0.98, shoulderX: 0.29, hipX: 0.13, thigh: 0.45, shin: 0.4, upper: 0.33, fore: 0.31 }));
+  const o = { hip: 0.98, shoulderX: 0.29, hipX: 0.13, thigh: 0.45, shin: 0.4, upper: 0.33, fore: 0.31 };
+  const B = new RigBuilder(humanoidBones(o));
   const gi = c(0xebe5d9);
   const giShade = c(0xcfc6b6);
   const trim = c(0xa3262e);
@@ -453,20 +572,14 @@ function ninjaTemplate(): Template {
   B.part('head', rbox(0.08, 0.07, 0.05, 0.02), trim, 'cloth', [0, 0.32, -0.235]);
   // arms: flared white sleeves with red cuffs, wrapped forearms, fists
   for (const [side, s] of [['L', -1], ['R', 1]] as const) {
-    B.part('upperArm' + side, ball(0.1), gi, 'cloth');
-    B.part('upperArm' + side, limb(0.1, 0.125, 0.3), gi, 'cloth', [0, -0.02, 0]);
-    B.part('upperArm' + side, ring(0.127, 0.035), trim, 'cloth', [0, -0.31, 0]);
-    B.part('fore' + side, ball(0.07), wrap, 'cloth');
-    B.part('fore' + side, limb(0.072, 0.058, 0.28), wrap, 'cloth', [0, -0.01, 0]);
+    // arm: one continuous tube shoulder->wrist; the white sleeve blends into the wrap
+    B.limb2('upperArm' + side, 'fore' + side, o.upper, o.fore, [0.105, 0.09, 0.062], [gi, wrap], 'cloth', { ringsA: 7, ringsB: 7 });
     for (const y of [-0.08, -0.18, -0.26]) B.part('fore' + side, ring(0.07 - y * 0.05, 0.02), strap, 'cloth', [0, y, 0]);
     B.part('hand' + side, rbox(0.1, 0.11, 0.1, 0.035), white, 'skin', [0, -0.04, 0.01]);
     B.part('hand' + side, rbox(0.04, 0.06, 0.05, 0.015), white, 'skin', [s * -0.05, -0.02, 0.03]);
-    // legs: wide dark hakama, wrapped shins, split-toe tabi
-    B.part('thigh' + side, ball(0.14), hakama, 'cloth', [0, 0.02, 0]);
-    B.part('thigh' + side, limb(0.14, 0.17, 0.47), hakama, 'cloth');
-    B.part('shin' + side, ball(0.115), hakama, 'cloth', [0, 0.03, 0]);
+    // legs: one tube hip->ankle; wide dark hakama blends into the wrapped shin, split-toe tabi
+    B.limb2('thigh' + side, 'shin' + side, o.thigh, o.shin, [0.145, 0.125, 0.075], [hakama, wrap], 'cloth', { ringsA: 8, ringsB: 8 });
     B.part('shin' + side, limb(0.12, 0.1, 0.12), hakama, 'cloth', [0, 0.02, 0]);
-    B.part('shin' + side, limb(0.085, 0.068, 0.3), wrap, 'cloth', [0, -0.08, 0]);
     for (const y of [-0.14, -0.24, -0.33]) B.part('shin' + side, ring(0.083 + y * 0.04, 0.02), strap, 'cloth', [0, y, 0]);
     B.part('foot' + side, rbox(0.115, 0.085, 0.25, 0.035), tabi, 'cloth', [0, -0.035, 0.05]);
     B.part('foot' + side, box(0.02, 0.07, 0.08), strap, 'cloth', [s * -0.015, -0.03, 0.16]);
@@ -475,7 +588,8 @@ function ninjaTemplate(): Template {
 }
 
 function samuraiLike(kind: 'samurai' | 'archer'): Template {
-  const B = new RigBuilder(humanoidBones({ hip: 0.97, shoulderX: 0.3, hipX: 0.13, thigh: 0.45, shin: 0.4, upper: 0.33, fore: 0.31 }));
+  const o = { hip: 0.97, shoulderX: 0.3, hipX: 0.13, thigh: 0.45, shin: 0.4, upper: 0.33, fore: 0.31 };
+  const B = new RigBuilder(humanoidBones(o));
   const archer = kind === 'archer';
   const plate = archer ? c(0x4f5a3a) : c(0x7a1a1c);
   const plateDk = archer ? c(0x2e3424) : c(0x14111a);
@@ -524,21 +638,19 @@ function samuraiLike(kind: 'samurai' | 'archer'): Template {
   }
   // arms: sode shoulder plates, armored sleeves, gloves
   for (const [side, s] of [['L', -1], ['R', 1]] as const) {
-    B.part('upperArm' + side, ball(0.105), cloth, 'cloth');
-    B.part('upperArm' + side, limb(0.1, 0.1, 0.3), cloth, 'cloth');
+    // arm: cloth sleeve into an armored gauntlet - different materials, but both blend
+    // their skin weight across the elbow so neither piece creases when it bends
+    B.taperedLimb('upperArm' + side, o.upper, 0.105, 0.098, cloth, 'cloth', { rings: 7, neighbor: { name: 'fore' + side, at: 'end' } });
     for (let k = 0; k < 3; k++) {
       B.part('upperArm' + side, box(0.26, 0.09, 0.03), k % 2 ? plateDk : plate, 'armor', [s * 0.1, 0.04 - k * 0.085, 0], [0, s * Math.PI / 2, s * 0.25]);
     }
-    B.part('fore' + side, ball(0.075), plateDk, 'armor');
-    B.part('fore' + side, limb(0.075, 0.062, 0.28), plateDk, 'armor');
+    B.taperedLimb('fore' + side, o.fore, 0.088, 0.062, plateDk, 'armor', { rings: 7, neighbor: { name: 'upperArm' + side, at: 'start' } });
     B.part('fore' + side, ring(0.078, 0.03), gold, 'metal', [0, -0.12, 0]);
     B.part('hand' + side, rbox(0.1, 0.11, 0.1, 0.035), plateDk, 'cloth', [0, -0.04, 0.01]);
-    // legs: haidate thigh plates, dark hakama, suneate shin guards
-    B.part('thigh' + side, ball(0.14), cloth, 'cloth', [0, 0.02, 0]);
-    B.part('thigh' + side, limb(0.14, 0.15, 0.46), cloth, 'cloth');
+    // legs: dark hakama thigh into suneate-covered shin, same joint-blend treatment
+    B.taperedLimb('thigh' + side, o.thigh, 0.145, 0.135, cloth, 'cloth', { rings: 8, neighbor: { name: 'shin' + side, at: 'end', blend: 0.28 } });
     B.part('thigh' + side, box(0.22, 0.3, 0.04), plate, 'armor', [0, -0.16, 0.13], [-0.08, 0, 0]);
-    B.part('shin' + side, ball(0.11), cloth, 'cloth', [0, 0.02, 0]);
-    B.part('shin' + side, limb(0.1, 0.075, 0.38), plateDk, 'armor', [0, -0.01, 0]);
+    B.taperedLimb('shin' + side, o.shin, 0.115, 0.088, plateDk, 'armor', { rings: 8, neighbor: { name: 'thigh' + side, at: 'start', blend: 0.28 } });
     B.part('shin' + side, box(0.14, 0.3, 0.03), archer ? plate : plateDk, 'armor', [0, -0.18, 0.08]);
     B.part('shin' + side, ring(0.1, 0.03), gold, 'metal', [0, -0.05, 0]);
     B.part('foot' + side, rbox(0.12, 0.08, 0.25, 0.03), c(0x2a2220), 'cloth', [0, -0.03, 0.05]);
@@ -547,7 +659,8 @@ function samuraiLike(kind: 'samurai' | 'archer'): Template {
 }
 
 function oniTemplate(): Template {
-  const B = new RigBuilder(humanoidBones({ hip: 0.96, shoulderX: 0.36, hipX: 0.15, thigh: 0.44, shin: 0.4, upper: 0.34, fore: 0.32 }));
+  const o = { hip: 0.96, shoulderX: 0.36, hipX: 0.15, thigh: 0.44, shin: 0.4, upper: 0.34, fore: 0.32 };
+  const B = new RigBuilder(humanoidBones(o));
   const skin = c(0xa8342a);
   const skinDk = c(0x7a2018);
   const hair = c(0xe8e0d0);
@@ -581,16 +694,11 @@ function oniTemplate(): Template {
     B.part('head', new THREE.ConeGeometry(0.07, 0.4, 6), hair, 'cloth', [Math.cos(a) * 0.19, 0.32, -Math.sin(a) * 0.19 - 0.06], [-0.9 + Math.sin(a) * 0.3, 0, Math.cos(a) * 0.9]);
   }
   for (const [side] of [['L'], ['R']] as const) {
-    B.part('upperArm' + side, ball(0.17), skin, 'skin');
-    B.part('upperArm' + side, limb(0.16, 0.14, 0.32), skin, 'skin');
-    B.part('fore' + side, ball(0.13), skin, 'skin');
-    B.part('fore' + side, limb(0.14, 0.11, 0.3), skin, 'skin');
+    B.limb2('upperArm' + side, 'fore' + side, o.upper, o.fore, [0.165, 0.135, 0.1], [skin, skin], 'skin', { ringsA: 7, ringsB: 7 });
     B.part('fore' + side, ring(0.125, 0.07), gold, 'metal', [0, -0.22, 0]);
     B.part('hand' + side, rbox(0.17, 0.17, 0.16, 0.06), skinDk, 'skin', [0, -0.06, 0.01]);
     B.part('thigh' + side, ball(0.18), tiger, 'cloth', [0, 0.02, 0]);
-    B.part('thigh' + side, limb(0.18, 0.15, 0.45), skin, 'skin');
-    B.part('shin' + side, ball(0.14), skin, 'skin', [0, 0.02, 0]);
-    B.part('shin' + side, limb(0.14, 0.1, 0.38), skin, 'skin');
+    B.limb2('thigh' + side, 'shin' + side, o.thigh, o.shin, [0.175, 0.145, 0.105], [skin, skin], 'skin', { ringsA: 8, ringsB: 8 });
     B.part('shin' + side, ring(0.12, 0.06), gold, 'metal', [0, -0.3, 0]);
     B.part('foot' + side, rbox(0.17, 0.1, 0.3, 0.04), skinDk, 'skin', [0, -0.04, 0.06]);
   }

@@ -2483,7 +2483,22 @@ export class GameEngine {
     );
 
     const want = this.camDistOverride ?? (this.camera.aspect < 1 ? 10.5 : 7.2);
-    this.camDist += (want - this.camDist) * Math.min(1, dt * 8);
+    // pull in when a trunk, pillar or pole stands between the camera and the player
+    let limit = want;
+    for (const so of this.solids) {
+      if (so.h < 2.5 || so.r > 3) continue;
+      const ox = camTarget.x - so.x;
+      const oz = camTarget.z - so.z;
+      const rr = so.r * 0.7 + 0.35;
+      const a2 = camDir.x * camDir.x + camDir.z * camDir.z;
+      const b = ox * camDir.x + oz * camDir.z;
+      const c = ox * ox + oz * oz - rr * rr;
+      const disc = b * b - a2 * c;
+      if (disc <= 0 || a2 < 1e-6) continue;
+      const t = (-b - Math.sqrt(disc)) / a2;
+      if (t > 0.4 && t < limit && camTarget.y + camDir.y * t < so.h) limit = Math.max(1.8, t - 0.3);
+    }
+    this.camDist += (limit - this.camDist) * Math.min(1, dt * (limit < this.camDist ? 18 : 5));
 
     this.camera.position.copy(camTarget).addScaledVector(camDir, this.camDist);
     if (this.shake > 0.001) {

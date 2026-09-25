@@ -1,6 +1,0 @@
-{
-  "name": "Kage — 3D Ninja Action Game",
-  "description": "Jogo de ação ninja 3D com combate dinâmico, múltiplas armas, controle sensível ao toque para celular e câmera automática inteligente.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
