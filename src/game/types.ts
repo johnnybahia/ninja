@@ -87,6 +87,12 @@ export interface RigInstance {
   flash?: { value: number };
   cloth?: Ribbon[];
   kind?: 'ninja' | 'samurai' | 'archer' | 'oni';
+  // For a rig with its own locomotion mixer: the current gait cycle position (radians,
+  // same convention as AnimInput.phase) read back from whichever of its walk/run clips is
+  // driving the legs this frame. Lets animateCharacter phase-lock any procedural bone that
+  // must stay perfectly synced with the mixer's own legs (see externalPhase usage in
+  // animation.ts) instead of drifting against it on the game's separate step clock.
+  externalPhase?: number;
   dispose?: () => void;
   // Called once, at the end of every animateCharacter() call - an imported rig uses this
   // to retarget a shadow skeleton's freshly-animated pose onto its own real bones.

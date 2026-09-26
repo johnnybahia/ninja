@@ -190,16 +190,23 @@ const PASSTHROUGH_NAMES = ['mixamorigSpine1', 'mixamorigRightShoulder', 'mixamor
 const LOCAL_JOINTS = new Set(['armR', 'foreR', 'handBoneR']);
 
 // Always driven procedurally, never by this rig's own locomotion clip, regardless of
-// combatWeight. The torso chain (hips/spine/chest rotation, neck, head) keeps exposing
-// the same failure mode: this rig's skin weights hold up fine for the small
-// bends/turns the procedural system ever asked for, but the Great Sword clips lean the
-// torso and turn the head much further (a crouched, alert stance) - first confirmed at
-// the neck (a grotesquely stretched throat during idle's look-around), then at the
-// hips/spine junction (the waist pinching into a thin twisted point during idle's
-// forward lean). Simplest fix, twice now: never hand this pack's torso rotation to the
-// mesh at all - only the limbs (arms/legs) are driven by it. hips POSITION is exempt
-// from this (handled separately below) since its vertical bob is what makes the
-// walk/run cycle read right and hasn't shown this problem.
+// combatWeight. hips/spine/chest/neck/head keep exposing the same failure mode: this
+// rig's skin weights hold up fine for the small bends/turns the procedural system ever
+// asked for, but the mocap clips lean/twist the torso much further (a crouched, alert
+// stance) - first confirmed at the neck (a grotesquely stretched throat during idle's
+// look-around), then at the hips/spine junction (the waist pinching into a thin twisted
+// point). Simplest fix, every time: never hand this pack's rotation for these joints to
+// the mesh at all.
+//
+// hips rotation staying procedural only works without desyncing the (mixer-driven) legs
+// because `animateCharacter` phase-locks it to the mixer via `r.externalPhase` (see
+// there) instead of the game's own independent step clock - an earlier version of this
+// fix instead took hips rotation FROM the mixer to solve that desync, which fixed the
+// walk-cycle twist but reopened this exact waist-pinch during ordinary locomotion
+// (the mocap clip's own hips rotation is just as far outside this mesh's safe range as
+// its torso is). Keeping hips procedural-but-phase-matched gets both: synced with the
+// legs' actual stride position, and bounded to a rotation this mesh's skin can take.
+// hips POSITION is a separate mechanism (handled below) and unaffected either way.
 const ALWAYS_PROCEDURAL = new Set(['hips', 'spine', 'chest', 'neck', 'head']);
 
 // The katana attach point's own local rotation while this hand is driven by the
@@ -494,6 +501,17 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
         locomotion.mixer.update(dt);
         for (const [bone, angle] of OFFHAND_FINGER_CURL) bone.rotation.z = angle;
         combatWeightSmoothed += (combatWeight - combatWeightSmoothed) * (1 - Math.exp(-16 * Math.max(0, dt)));
+
+        // Read the gait phase back off whichever of walk/run is currently driving the
+        // legs (the cross-fade above), so animateCharacter's next frame can compute
+        // procedural hips at the SAME point in the stride the real, mixer-driven legs
+        // are actually at - one frame stale (this runs after this frame's locomotion()
+        // call), which is inaudible at 60fps.
+        const dominant = locomotion.runAction.weight > locomotion.walkAction.weight
+          ? locomotion.runAction
+          : locomotion.walkAction;
+        const dur = dominant.getClip().duration;
+        rig.externalPhase = (((dominant.time % dur) + dur) % dur / dur) * Math.PI * 2;
       }
       // Without a locomotion clip there's nothing to blend against - stay fully
       // procedural, exactly like before this rig ever had one.

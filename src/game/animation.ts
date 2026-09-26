@@ -105,7 +105,7 @@ function neutral() {
   set('foreR', -0.18);
 }
 
-function locomotion(m: number, ph: number, t: number) {
+function locomotion(m: number, ph: number, t: number, torsoTwist = 1) {
   const run = smooth((m - 0.45) / 0.5);
   const s = Math.sin(ph);
   const co = Math.cos(ph);
@@ -116,9 +116,9 @@ function locomotion(m: number, ph: number, t: number) {
   add('shinL', Math.max(0, co) * kneeA + 0.1 * m);
   add('shinR', Math.max(0, -co) * kneeA + 0.1 * m);
   hipsY += m * 0.055 * (Math.abs(co) - 0.6) - 0.05 * run;
-  add('hips', 0, 0.12 * s * m, 0.035 * co * m);
-  add('spine', 0.04 * m, -0.16 * s * m);
-  add('chest', 0.06 * m + 0.2 * run, -0.06 * s * m);
+  add('hips', 0, 0.12 * s * m * torsoTwist, 0.035 * co * m * torsoTwist);
+  add('spine', 0.04 * m, -0.16 * s * m * torsoTwist);
+  add('chest', 0.06 * m + 0.2 * run, -0.06 * s * m * torsoTwist);
   const armA = (TUNE.armSwingBase + TUNE.armSwingRun * run) * m;
   add('armL', s * armA);
   add('armR', -s * armA);
@@ -520,7 +520,16 @@ export function animateCharacter(r: RigInstance, a: AnimInput) {
   const kind = r.kind || 'ninja';
   neutral();
   const m = a.air ? 0 : a.moveAmt;
-  locomotion(m, a.phase, a.t);
+  // Samurai's legs are driven by a Mixamo mixer running its own clock, decoupled from
+  // `a.phase`. hips/spine/chest stay forced-procedural (ALWAYS_PROCEDURAL in
+  // externalRig.ts) for mesh-safety, so evaluating them on `a.phase` would twist them
+  // out of sync with where the mixer-driven legs actually are in the stride - the
+  // torso torsion reported while walking. r.externalPhase (set in externalRig.ts's
+  // postAnimate, one frame behind) reads back the mixer's own gait position instead,
+  // so the procedural torso stays synced with the legs it can't directly drive.
+  const gaitPhase = kind === 'samurai' && r.externalPhase !== undefined ? r.externalPhase : a.phase;
+  const torsoTwist = kind === 'samurai' ? 0 : 1;
+  locomotion(m, gaitPhase, a.t, torsoTwist);
   const guardKind = kind === 'ninja' ? a.weapon || 'katana' : kind;
   // the two-handed "samurai" stance is a much bigger swing away from a natural running
   // arm-swing than the other guard poses (a static held grip, not a loose one-handed
