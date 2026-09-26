@@ -61,19 +61,36 @@ function findAnimatedClip(clips: THREE.AnimationClip[], url: string): THREE.Anim
 // against this rig's own bind-pose hips height, so it lines up with the same "feet on the
 // ground" reference the procedural system's own hipsBindY already uses). Clips also bake
 // in the character physically walking/running across Mixamo's own virtual floor - since
-// the game's own physics already drives world position, that horizontal (X/Z) travel is
-// stripped relative to frame 0, keeping only the vertical bob (Y) that reads as the
-// stride's own up-down motion.
+// the game's own physics already drives world position, that horizontal (X/Z) travel
+// needs stripping, keeping only the vertical bob (Y) that reads as the stride's own
+// up-down motion.
+//
+// A walk/run clip's horizontal motion isn't a bounded wobble around one spot - by
+// definition, over one full cycle the hips advance by exactly one stride length, so it
+// grows roughly linearly from first frame to last (confirmed: this pack's own walk clip
+// drifts to ~0.79 units by its last frame, on a ~1-unit-tall rig - most of a body length).
+// Subtracting only the FIRST frame's value (an earlier version of this function did just
+// that) leaves that entire per-cycle drift in every later frame and only zeroes it at the
+// very start, so the torso rides along with the accumulating drift for nearly the whole
+// clip and then snaps back at the loop seam - exactly what read as the torso/skirt
+// stretching and dragging away from the legs. Subtracting the straight line from first to
+// last frame instead removes that drift throughout (not just at frame 0) and both
+// endpoints land on the same value, so the loop no longer has a seam to snap across.
 function rescaleAndStripRootMotion(clip: THREE.AnimationClip, posScale: number) {
   for (const track of clip.tracks) {
     if (!track.name.endsWith('.position')) continue;
     const values = (track as THREE.VectorKeyframeTrack).values;
     for (let i = 0; i < values.length; i++) values[i] *= posScale;
+    const frameCount = values.length / 3;
+    const lastIdx = (frameCount - 1) * 3;
     const x0 = values[0];
     const z0 = values[2];
-    for (let i = 0; i < values.length; i += 3) {
-      values[i] -= x0;
-      values[i + 2] -= z0;
+    const xSlope = frameCount > 1 ? (values[lastIdx] - x0) / (frameCount - 1) : 0;
+    const zSlope = frameCount > 1 ? (values[lastIdx + 2] - z0) / (frameCount - 1) : 0;
+    for (let f = 0; f < frameCount; f++) {
+      const i = f * 3;
+      values[i] -= x0 + xSlope * f;
+      values[i + 2] -= z0 + zSlope * f;
     }
   }
 }
@@ -171,6 +188,19 @@ const PASSTHROUGH_NAMES = ['mixamorigSpine1', 'mixamorigRightShoulder', 'mixamor
 // import's right arm/forearm/hand happen to be (its LEFT forearm isn't, hence this isn't
 // applied to every limb - see copyLocalRotation below for the actual math).
 const LOCAL_JOINTS = new Set(['armR', 'foreR', 'handBoneR']);
+
+// Always driven procedurally, never by this rig's own locomotion clip, regardless of
+// combatWeight. The torso chain (hips/spine/chest rotation, neck, head) keeps exposing
+// the same failure mode: this rig's skin weights hold up fine for the small
+// bends/turns the procedural system ever asked for, but the Great Sword clips lean the
+// torso and turn the head much further (a crouched, alert stance) - first confirmed at
+// the neck (a grotesquely stretched throat during idle's look-around), then at the
+// hips/spine junction (the waist pinching into a thin twisted point during idle's
+// forward lean). Simplest fix, twice now: never hand this pack's torso rotation to the
+// mesh at all - only the limbs (arms/legs) are driven by it. hips POSITION is exempt
+// from this (handled separately below) since its vertical bob is what makes the
+// walk/run cycle read right and hasn't shown this problem.
+const ALWAYS_PROCEDURAL = new Set(['hips', 'spine', 'chest', 'neck', 'head']);
 
 // The katana attach point's own local rotation while this hand is driven by the
 // locomotion mixer instead of the shadow rig - restFlips.handBoneR (see below) only
@@ -394,6 +424,31 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
   handL.scale.setScalar(deltaScale);
   if (realHandL) realHandL.add(handL);
 
+  // The off-hand (mixamorigRightHand, see the L/R note above) reads as open, spread
+  // fingers whenever this rig's own locomotion clip drives it - Mixamo's mocap DOES
+  // animate individual fingers, but toward an open/relaxed hand, not a grip. That's fine
+  // for the MAIN gripping hand, whose open fingers are mostly hidden behind the katana's
+  // own handle geometry, but the off-hand has nothing to hide behind and visibly floats
+  // open next to the grip instead of looking like it's helping hold a two-handed weapon.
+  // Curling it into a relaxed fist every frame (has to be every frame, AFTER
+  // mixer.update() below - setting it once at load time got overwritten by the very next
+  // mixer update, since the clip has its own real keyframes for these bones, unlike every
+  // other bone this file leaves untouched) reads as a two-handed grip without needing
+  // actual arm IK to make it physically reach the hilt, which this rig doesn't have.
+  // Axis/sign calibrated in-game (screenshot comparison): negative Z curls a finger
+  // segment inward.
+  const OFFHAND_FINGER_CURL: [THREE.Object3D, number][] = (
+    [
+      ['Thumb1', -0.25], ['Thumb2', -0.35], ['Thumb3', -0.3], ['Thumb4', -0.2],
+      ['Index1', -0.55], ['Index2', -0.75], ['Index3', -0.55], ['Index4', -0.3],
+      ['Middle1', -0.6], ['Middle2', -0.8], ['Middle3', -0.6], ['Middle4', -0.3],
+      ['Ring1', -0.6], ['Ring2', -0.8], ['Ring3', -0.6], ['Ring4', -0.3],
+      ['Pinky1', -0.55], ['Pinky2', -0.7], ['Pinky3', -0.55], ['Pinky4', -0.3]
+    ] as [string, number][]
+  )
+    .map(([suffix, angle]): [THREE.Object3D | undefined, number] => [realBones[`mixamorigRightHand${suffix}`], angle])
+    .filter((pair): pair is [THREE.Object3D, number] => !!pair[0]);
+
   const rig: RigInstance = {
     root,
     body: shadow.body,
@@ -437,6 +492,7 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
           locomotion.runAction.weight = (m - 0.5) / 0.5;
         }
         locomotion.mixer.update(dt);
+        for (const [bone, angle] of OFFHAND_FINGER_CURL) bone.rotation.z = angle;
         combatWeightSmoothed += (combatWeight - combatWeightSmoothed) * (1 - Math.exp(-16 * Math.max(0, dt)));
       }
       // Without a locomotion clip there's nothing to blend against - stay fully
@@ -455,11 +511,12 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
         const dst = real[key];
         const src = (shadow as unknown as Record<string, THREE.Object3D | undefined>)[key];
         if (!src || !dst) continue;
+        const boneBlend = ALWAYS_PROCEDURAL.has(key) ? 1 : blend;
         if (LOCAL_JOINTS.has(key)) {
           const rl = restLocal[key];
-          if (rl) copyLocalRotation(src, dst, rl, blend);
+          if (rl) copyLocalRotation(src, dst, rl, boneBlend);
         } else {
-          copyWorldRotation(src, dst, restFlips[key] ?? null, blend);
+          copyWorldRotation(src, dst, restFlips[key] ?? null, boneBlend);
         }
       }
       if (real.hips) {

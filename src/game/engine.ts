@@ -1396,8 +1396,8 @@ export class GameEngine {
       return;
     }
 
-    const fx = Math.sin(this.player.yaw);
-    const fz = Math.cos(this.player.yaw);
+    let fx = Math.sin(this.player.yaw);
+    let fz = Math.cos(this.player.yaw);
     this.player.rig.root.updateMatrixWorld(true);
     this.player.rig.hand.getWorldPosition(this.tmpH);
 
@@ -1414,6 +1414,13 @@ export class GameEngine {
     this.ptMult = w.pointMult || 1;
 
     if (w.kind === 'melee') {
+      if (step === 0) {
+        // only the combo's opening hit re-aims - re-aiming on every hit would jitter the
+        // character between enemies standing on different sides mid-combo.
+        this.autoFaceNearestEnemyForAttack(w.range || 2.5);
+        fx = Math.sin(this.player.yaw);
+        fz = Math.cos(this.player.yaw);
+      }
       if (w.id === 'katana') {
         const lungeDist = step === 2 ? 0.85 : 0.45;
         this.player.pos.x += fx * lungeDist;
@@ -1937,6 +1944,38 @@ export class GameEngine {
 
   private faceEnemy(e: EnemyInstance) {
     this.player.yaw = Math.atan2(e.pos.x - this.player.pos.x, e.pos.z - this.player.pos.z);
+  }
+
+  // A regular attack never adjusted player.yaw at all - it just swung whichever way the
+  // player already happened to be facing (movement input is the only thing that ever
+  // turns the character - see updatePlayerMovementAndCamera), so an enemy standing beside
+  // or behind the player at the moment of the swing reads as "attacking the wrong way"
+  // even though the hit itself still lands via meleeHit's own arc check. This nudges yaw
+  // toward the nearest in-range enemy roughly ahead of the player - restricted to a wide
+  // front cone (not a full lock-on turning to anything anywhere) so it reads as aim
+  // assist, not the character spinning to face something the player wasn't aiming at -
+  // and only a partial turn (turnTo's own proportional step, not a hard snap like
+  // faceEnemy) so it doesn't reintroduce the instant-turn popping this session's camera
+  // work already moved away from.
+  private autoFaceNearestEnemyForAttack(range: number) {
+    const facingX = Math.sin(this.player.yaw);
+    const facingZ = Math.cos(this.player.yaw);
+    const FRONT_CONE_COS = Math.cos((100 * Math.PI) / 180);
+    let best: EnemyInstance | null = null;
+    let bestDist = Infinity;
+    for (const e of this.enemies) {
+      if (e.dead) continue;
+      const dx = e.pos.x - this.player.pos.x;
+      const dz = e.pos.z - this.player.pos.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist - e.r > range) continue;
+      const dot = (facingX * dx + facingZ * dz) / (dist || 1);
+      if (dot < FRONT_CONE_COS) continue;
+      if (dist < bestDist) { bestDist = dist; best = e; }
+    }
+    if (!best) return;
+    const targetYaw = Math.atan2(best.pos.x - this.player.pos.x, best.pos.z - this.player.pos.z);
+    this.player.yaw = turnTo(this.player.yaw, targetYaw, 0.7);
   }
 
   private addEnemyPosture(e: EnemyInstance, v: number) {
