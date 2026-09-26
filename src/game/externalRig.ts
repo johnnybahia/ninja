@@ -190,17 +190,26 @@ const PASSTHROUGH_NAMES = ['mixamorigSpine1', 'mixamorigRightShoulder', 'mixamor
 const LOCAL_JOINTS = new Set(['armR', 'foreR', 'handBoneR']);
 
 // Always driven procedurally, never by this rig's own locomotion clip, regardless of
-// combatWeight. The torso chain (hips/spine/chest rotation, neck, head) keeps exposing
-// the same failure mode: this rig's skin weights hold up fine for the small
-// bends/turns the procedural system ever asked for, but the Great Sword clips lean the
-// torso and turn the head much further (a crouched, alert stance) - first confirmed at
-// the neck (a grotesquely stretched throat during idle's look-around), then at the
-// hips/spine junction (the waist pinching into a thin twisted point during idle's
-// forward lean). Simplest fix, twice now: never hand this pack's torso rotation to the
-// mesh at all - only the limbs (arms/legs) are driven by it. hips POSITION is exempt
-// from this (handled separately below) since its vertical bob is what makes the
-// walk/run cycle read right and hasn't shown this problem.
-const ALWAYS_PROCEDURAL = new Set(['hips', 'spine', 'chest', 'neck', 'head']);
+// combatWeight. spine/chest/neck/head keep exposing the same failure mode: this rig's
+// skin weights hold up fine for the small bends/turns the procedural system ever asked
+// for, but the Great Sword clips lean the torso and turn the head much further (a
+// crouched, alert stance) - first confirmed at the neck (a grotesquely stretched throat
+// during idle's look-around), then at the spine/chest (the waist pinching into a thin
+// twisted point during idle's forward lean). Simplest fix, twice now: never hand this
+// pack's rotation for these joints to the mesh at all.
+//
+// hips is deliberately NOT in this set (unlike an earlier version of this fix) - hips
+// ROTATION needs to come from the same clock as the legs. The procedural locomotion()
+// sways hips on the game's own step-phase clock (a.phase); the mixer's legs run on the
+// clip's own independent playback clock; forcing hips rotation onto the FORMER while
+// legs follow the LATTER desyncs the two for the entire walk/run cycle (not just at one
+// extreme pose) - the pelvis and legs constantly fighting over which "moment of the
+// stride" they're each in, reading as the torso twisting against the legs while
+// walking. Letting the mixer drive hips rotation too keeps it on the same clock as the
+// legs it's attached to. hips POSITION is unaffected by this (handled separately below,
+// its vertical bob is what makes the walk/run cycle read right and never shown this
+// problem).
+const ALWAYS_PROCEDURAL = new Set(['spine', 'chest', 'neck', 'head']);
 
 // The katana attach point's own local rotation while this hand is driven by the
 // locomotion mixer instead of the shadow rig - restFlips.handBoneR (see below) only
