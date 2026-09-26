@@ -1204,8 +1204,14 @@ export class World {
       }
       d.position.copy(pt.p);
       d.rotation.copy(pt.rot);
-      // hide petals brushing the lens; up close they read as big flat squares
-      d.scale.setScalar(pt.p.distanceToSquared(camPos) < 4 ? 0 : 1);
+      // Hide petals brushing the lens (existing check) OR drifting through the player's
+      // own space - up close either way, a petal reads as a big flat square, and one that
+      // drifts to the player's position (not just the camera's) renders right on top of
+      // the character since third-person view sits several units back, well outside the
+      // lens-only radius below.
+      const nearCam = pt.p.distanceToSquared(camPos) < 4;
+      const nearPlayer = pt.p.distanceToSquared(focus) < 2.25;
+      d.scale.setScalar(nearCam || nearPlayer ? 0 : 1);
       d.updateMatrix();
       this.petals.setMatrixAt(i, d.matrix);
     }
