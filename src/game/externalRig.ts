@@ -190,12 +190,17 @@ const PASSTHROUGH_NAMES = ['mixamorigSpine1', 'mixamorigRightShoulder', 'mixamor
 const LOCAL_JOINTS = new Set(['armR', 'foreR', 'handBoneR']);
 
 // Always driven procedurally, never by this rig's own locomotion clip, regardless of
-// combatWeight - the Great Sword idle's own head/neck movement (a big alert look-around
-// turn) exposed a skin-weight seam at the neck that reads as a grotesquely stretched
-// throat at that rotation (confirmed: this pack's idle only, not the procedural system's
-// own much smaller head sway, which never bends the neck that far). Simplest fix is to
-// just never hand this pack's neck/head rotation to the mesh at all.
-const ALWAYS_PROCEDURAL = new Set(['neck', 'head']);
+// combatWeight. The torso chain (hips/spine/chest rotation, neck, head) keeps exposing
+// the same failure mode: this rig's skin weights hold up fine for the small
+// bends/turns the procedural system ever asked for, but the Great Sword clips lean the
+// torso and turn the head much further (a crouched, alert stance) - first confirmed at
+// the neck (a grotesquely stretched throat during idle's look-around), then at the
+// hips/spine junction (the waist pinching into a thin twisted point during idle's
+// forward lean). Simplest fix, twice now: never hand this pack's torso rotation to the
+// mesh at all - only the limbs (arms/legs) are driven by it. hips POSITION is exempt
+// from this (handled separately below) since its vertical bob is what makes the
+// walk/run cycle read right and hasn't shown this problem.
+const ALWAYS_PROCEDURAL = new Set(['hips', 'spine', 'chest', 'neck', 'head']);
 
 // The katana attach point's own local rotation while this hand is driven by the
 // locomotion mixer instead of the shadow rig - restFlips.handBoneR (see below) only
