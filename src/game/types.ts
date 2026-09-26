@@ -90,7 +90,11 @@ export interface RigInstance {
   dispose?: () => void;
   // Called once, at the end of every animateCharacter() call - an imported rig uses this
   // to retarget a shadow skeleton's freshly-animated pose onto its own real bones.
-  postAnimate?: () => void;
+  // combatWeight (0-1): how much of the procedural (shadow-driven) pose should override
+  // a rig's own imported locomotion animation, where one exists - 0 during plain
+  // idle/walk/run, rising to 1 for guard/attack/hit/dash/death, so those keep working
+  // exactly as before. moveAmt/dt let the rig drive its own locomotion mixer, if any.
+  postAnimate?: (combatWeight: number, moveAmt: number, dt: number) => void;
 }
 
 export interface EnemyInstance {

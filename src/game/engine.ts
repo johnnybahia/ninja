@@ -33,6 +33,11 @@ import { animateCharacter, animateDeath } from './animation';
 import { TUNE } from './tunables';
 
 const SAMURAI_MODEL_URL = '/models/samurai.glb';
+const SAMURAI_LOCOMOTION_CLIPS = {
+  idle: '/models/mixamo/sword_idle.fbx',
+  walk: '/models/mixamo/sword_walk.fbx',
+  run: '/models/mixamo/sword_run.fbx'
+};
 
 // Scroll drop chance per kill for each loaded weapon (2 weapons -> 7.5% per kill).
 const SCROLL_RATE_PER_WEAPON = 0.0375;
@@ -520,7 +525,10 @@ export class GameEngine {
     let rig: RigInstance;
     let resolvedId = id;
     try {
-      rig = id === 'samurai' ? await loadExternalRig({ url: SAMURAI_MODEL_URL, kind: 'samurai' }) : buildCharacter('ninja');
+      rig =
+        id === 'samurai'
+          ? await loadExternalRig({ url: SAMURAI_MODEL_URL, kind: 'samurai', locomotionClips: SAMURAI_LOCOMOTION_CLIPS })
+          : buildCharacter('ninja');
     } catch (e) {
       console.error('setCharacter: failed to load', id, e);
       resolvedId = 'kage';
@@ -2273,26 +2281,28 @@ export class GameEngine {
         this.camYaw += -ix * steerSens * dt;
       }
 
-      // 3. moved below: auto-follow only runs once the stick is released (see why there)
-    } else if (this.settings.autoCamera && this.lookTouch.id === null) {
-      // AJUSTE AUTOMÁTICO DE ROTAÇÃO DA CÂMERA (Auto-Follow & Virada para Trás)
+      // 3. AJUSTE AUTOMÁTICO DE ROTAÇÃO DA CÂMERA (Auto-Follow & Virada para Trás)
       //
-      // This only runs once the stick is back near center (amt <= 0.05), not while
-      // it's held. Running it inside the block above - chasing camYaw toward
-      // wrap(player.yaw - PI) every frame the stick is held - closes a loop: yaw is
-      // itself turning toward moveAngle, which is derived from THIS SAME camYaw. For
-      // held-forward input the two targets happen to already agree (moveAngle sits
-      // exactly PI from where the camera wants to end up), so it looked fine - but for
-      // any other constant direction (held backward, held strafe) there is no angle
-      // that satisfies both at once, so camYaw and player.yaw chased each other in a
-      // circle that never settles, spinning both indefinitely for as long as the
-      // stick stayed held (confirmed with a standalone simulation of this exact math).
-      // Deferring the settle-behind adjustment to when the stick is released breaks
-      // that loop - yaw has already finished turning to face the last held direction,
-      // so camBehindPlayer is a fixed target instead of a moving one chasing itself.
-      const camBehindPlayer = wrap(this.player.yaw - Math.PI);
-      const autoSpeed = TUNE.camFollowSpeed * this.settings.cameraSensitivity;
-      this.camYaw = turnTo(this.camYaw, camBehindPlayer, dt * autoSpeed);
+      // Chasing camYaw toward wrap(player.yaw - PI) every frame the stick is held closes
+      // a loop: yaw is itself turning toward moveAngle, which is derived from THIS SAME
+      // camYaw. For held-forward input the two targets happen to already agree (moveAngle
+      // sits exactly PI from where the camera wants to end up), so this is a no-op there -
+      // but for any other constant direction (held backward, held strafe) there is no
+      // angle that satisfies both at once, so camYaw and player.yaw chase each other in a
+      // circle that never settles, rotating both at a steady rate for as long as the
+      // stick stays held in that direction (confirmed with a standalone simulation of the
+      // exact math: at the old default speed this was ~300deg/s - a dizzying, obviously
+      // broken spin). It doesn't have a stable fixed point to settle into, full stop - no
+      // amount of retuning removes that. What TUNE.camFollowSpeed's now-much-lower default
+      // does is keep that unavoidable drift slow enough to read as "camera swinging around
+      // to keep up with you" instead of "spinning" - a deliberate compromise, not a fix,
+      // since disabling it while the stick is held (an earlier attempt) meant the camera
+      // never adjusts during ordinary continuous play, which is worse.
+      if (this.settings.autoCamera && this.lookTouch.id === null) {
+        const camBehindPlayer = wrap(this.player.yaw - Math.PI);
+        const autoSpeed = TUNE.camFollowSpeed * this.settings.cameraSensitivity;
+        this.camYaw = turnTo(this.camYaw, camBehindPlayer, dt * autoSpeed);
+      }
     }
 
     if (this.player.dash > 0) {
