@@ -61,19 +61,36 @@ function findAnimatedClip(clips: THREE.AnimationClip[], url: string): THREE.Anim
 // against this rig's own bind-pose hips height, so it lines up with the same "feet on the
 // ground" reference the procedural system's own hipsBindY already uses). Clips also bake
 // in the character physically walking/running across Mixamo's own virtual floor - since
-// the game's own physics already drives world position, that horizontal (X/Z) travel is
-// stripped relative to frame 0, keeping only the vertical bob (Y) that reads as the
-// stride's own up-down motion.
+// the game's own physics already drives world position, that horizontal (X/Z) travel
+// needs stripping, keeping only the vertical bob (Y) that reads as the stride's own
+// up-down motion.
+//
+// A walk/run clip's horizontal motion isn't a bounded wobble around one spot - by
+// definition, over one full cycle the hips advance by exactly one stride length, so it
+// grows roughly linearly from first frame to last (confirmed: this pack's own walk clip
+// drifts to ~0.79 units by its last frame, on a ~1-unit-tall rig - most of a body length).
+// Subtracting only the FIRST frame's value (an earlier version of this function did just
+// that) leaves that entire per-cycle drift in every later frame and only zeroes it at the
+// very start, so the torso rides along with the accumulating drift for nearly the whole
+// clip and then snaps back at the loop seam - exactly what read as the torso/skirt
+// stretching and dragging away from the legs. Subtracting the straight line from first to
+// last frame instead removes that drift throughout (not just at frame 0) and both
+// endpoints land on the same value, so the loop no longer has a seam to snap across.
 function rescaleAndStripRootMotion(clip: THREE.AnimationClip, posScale: number) {
   for (const track of clip.tracks) {
     if (!track.name.endsWith('.position')) continue;
     const values = (track as THREE.VectorKeyframeTrack).values;
     for (let i = 0; i < values.length; i++) values[i] *= posScale;
+    const frameCount = values.length / 3;
+    const lastIdx = (frameCount - 1) * 3;
     const x0 = values[0];
     const z0 = values[2];
-    for (let i = 0; i < values.length; i += 3) {
-      values[i] -= x0;
-      values[i + 2] -= z0;
+    const xSlope = frameCount > 1 ? (values[lastIdx] - x0) / (frameCount - 1) : 0;
+    const zSlope = frameCount > 1 ? (values[lastIdx + 2] - z0) / (frameCount - 1) : 0;
+    for (let f = 0; f < frameCount; f++) {
+      const i = f * 3;
+      values[i] -= x0 + xSlope * f;
+      values[i + 2] -= z0 + zSlope * f;
     }
   }
 }
