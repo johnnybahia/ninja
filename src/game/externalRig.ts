@@ -172,6 +172,14 @@ const PASSTHROUGH_NAMES = ['mixamorigSpine1', 'mixamorigRightShoulder', 'mixamor
 // applied to every limb - see copyLocalRotation below for the actual math).
 const LOCAL_JOINTS = new Set(['armR', 'foreR', 'handBoneR']);
 
+// Always driven procedurally, never by this rig's own locomotion clip, regardless of
+// combatWeight - the Great Sword idle's own head/neck movement (a big alert look-around
+// turn) exposed a skin-weight seam at the neck that reads as a grotesquely stretched
+// throat at that rotation (confirmed: this pack's idle only, not the procedural system's
+// own much smaller head sway, which never bends the neck that far). Simplest fix is to
+// just never hand this pack's neck/head rotation to the mesh at all.
+const ALWAYS_PROCEDURAL = new Set(['neck', 'head']);
+
 // The katana attach point's own local rotation while this hand is driven by the
 // locomotion mixer instead of the shadow rig - restFlips.handBoneR (see below) only
 // cancels out the flip that formula applies, so it's meaningless once the mixer's own
@@ -455,11 +463,12 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
         const dst = real[key];
         const src = (shadow as unknown as Record<string, THREE.Object3D | undefined>)[key];
         if (!src || !dst) continue;
+        const boneBlend = ALWAYS_PROCEDURAL.has(key) ? 1 : blend;
         if (LOCAL_JOINTS.has(key)) {
           const rl = restLocal[key];
-          if (rl) copyLocalRotation(src, dst, rl, blend);
+          if (rl) copyLocalRotation(src, dst, rl, boneBlend);
         } else {
-          copyWorldRotation(src, dst, restFlips[key] ?? null, blend);
+          copyWorldRotation(src, dst, restFlips[key] ?? null, boneBlend);
         }
       }
       if (real.hips) {
