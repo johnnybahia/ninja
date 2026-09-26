@@ -520,14 +520,16 @@ export function animateCharacter(r: RigInstance, a: AnimInput) {
   const kind = r.kind || 'ninja';
   neutral();
   const m = a.air ? 0 : a.moveAmt;
-  // Samurai's hips/legs are driven by a Mixamo mixer running its own clock, decoupled
-  // from `a.phase`. Spine/chest stay forced-procedural (ALWAYS_PROCEDURAL in
-  // externalRig.ts) for mesh-safety, so if they kept oscillating on `a.phase` they'd
-  // twist out of sync with where the mixer-driven hips/legs actually are in the
-  // stride - the torso torsion reported while walking. Suppressing just that
-  // oscillating twist (not the constant forward lean) removes the desync.
+  // Samurai's legs are driven by a Mixamo mixer running its own clock, decoupled from
+  // `a.phase`. hips/spine/chest stay forced-procedural (ALWAYS_PROCEDURAL in
+  // externalRig.ts) for mesh-safety, so evaluating them on `a.phase` would twist them
+  // out of sync with where the mixer-driven legs actually are in the stride - the
+  // torso torsion reported while walking. r.externalPhase (set in externalRig.ts's
+  // postAnimate, one frame behind) reads back the mixer's own gait position instead,
+  // so the procedural torso stays synced with the legs it can't directly drive.
+  const gaitPhase = kind === 'samurai' && r.externalPhase !== undefined ? r.externalPhase : a.phase;
   const torsoTwist = kind === 'samurai' ? 0 : 1;
-  locomotion(m, a.phase, a.t, torsoTwist);
+  locomotion(m, gaitPhase, a.t, torsoTwist);
   const guardKind = kind === 'ninja' ? a.weapon || 'katana' : kind;
   // the two-handed "samurai" stance is a much bigger swing away from a natural running
   // arm-swing than the other guard poses (a static held grip, not a loose one-handed
