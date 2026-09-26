@@ -424,6 +424,31 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
   handL.scale.setScalar(deltaScale);
   if (realHandL) realHandL.add(handL);
 
+  // The off-hand (mixamorigRightHand, see the L/R note above) reads as open, spread
+  // fingers whenever this rig's own locomotion clip drives it - Mixamo's mocap DOES
+  // animate individual fingers, but toward an open/relaxed hand, not a grip. That's fine
+  // for the MAIN gripping hand, whose open fingers are mostly hidden behind the katana's
+  // own handle geometry, but the off-hand has nothing to hide behind and visibly floats
+  // open next to the grip instead of looking like it's helping hold a two-handed weapon.
+  // Curling it into a relaxed fist every frame (has to be every frame, AFTER
+  // mixer.update() below - setting it once at load time got overwritten by the very next
+  // mixer update, since the clip has its own real keyframes for these bones, unlike every
+  // other bone this file leaves untouched) reads as a two-handed grip without needing
+  // actual arm IK to make it physically reach the hilt, which this rig doesn't have.
+  // Axis/sign calibrated in-game (screenshot comparison): negative Z curls a finger
+  // segment inward.
+  const OFFHAND_FINGER_CURL: [THREE.Object3D, number][] = (
+    [
+      ['Thumb1', -0.25], ['Thumb2', -0.35], ['Thumb3', -0.3], ['Thumb4', -0.2],
+      ['Index1', -0.55], ['Index2', -0.75], ['Index3', -0.55], ['Index4', -0.3],
+      ['Middle1', -0.6], ['Middle2', -0.8], ['Middle3', -0.6], ['Middle4', -0.3],
+      ['Ring1', -0.6], ['Ring2', -0.8], ['Ring3', -0.6], ['Ring4', -0.3],
+      ['Pinky1', -0.55], ['Pinky2', -0.7], ['Pinky3', -0.55], ['Pinky4', -0.3]
+    ] as [string, number][]
+  )
+    .map(([suffix, angle]): [THREE.Object3D | undefined, number] => [realBones[`mixamorigRightHand${suffix}`], angle])
+    .filter((pair): pair is [THREE.Object3D, number] => !!pair[0]);
+
   const rig: RigInstance = {
     root,
     body: shadow.body,
@@ -467,6 +492,7 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
           locomotion.runAction.weight = (m - 0.5) / 0.5;
         }
         locomotion.mixer.update(dt);
+        for (const [bone, angle] of OFFHAND_FINGER_CURL) bone.rotation.z = angle;
         combatWeightSmoothed += (combatWeight - combatWeightSmoothed) * (1 - Math.exp(-16 * Math.max(0, dt)));
       }
       // Without a locomotion clip there's nothing to blend against - stay fully
