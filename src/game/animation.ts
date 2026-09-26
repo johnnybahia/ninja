@@ -651,7 +651,22 @@ export function animateCharacter(r: RigInstance, a: AnimInput) {
   }
 
   if (r.cloth) for (const rb of r.cloth) rb.update(a.dt, a.t);
-  r.postAnimate?.();
+  // How much of the pose above (guard/attack/hit/dash/...) should override a rig's own
+  // imported locomotion clip, for rigs that have one (see postAnimate's doc in types.ts) -
+  // additive so overlapping states (e.g. hit while attacking) still read as fully
+  // procedural, clamped since it's only ever used as a blend weight.
+  const combatWeight = clamp01(
+    (attacking ? 1 : 0) +
+    (a.windup && a.windup > 0 ? smooth(a.windup) : 0) +
+    (a.guard ? 1 : 0) +
+    (a.dash ? 1 : 0) +
+    (a.air ? 1 : 0) +
+    (a.hit && a.hit > 0 ? a.hit : 0) +
+    (a.broken ? 1 : 0) +
+    (a.stagger ? 1 : 0) +
+    (a.landJuice && a.landJuice > 0 ? a.landJuice : 0)
+  );
+  r.postAnimate?.(combatWeight, m, a.dt);
 }
 
 // Fall backward with buckling knees and flung arms; the engine sinks the root.

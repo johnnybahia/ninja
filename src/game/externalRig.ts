@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { buildCharacter, patchCharacter } from './characters';
 import type { RigInstance } from './types';
@@ -18,6 +19,87 @@ function loadTemplate(url: string): Promise<THREE.Group> {
   if (!p) {
     p = new GLTFLoader().loadAsync(url).then((gltf) => gltf.scene);
     templateCache.set(url, p);
+  }
+  return p;
+}
+
+// ===========================================================================
+// Idle/walk/run for this rig, played directly as mocap on its own real skeleton via
+// THREE.AnimationMixer - no retargeting math needed, since the source clips (Mixamo,
+// "mixamorig"-prefixed bone names) match this skeleton's own bone names exactly. Used
+// only while nothing else is happening (see combatWeight in postAnimate below); guard,
+// attack, hit, dash and death keep using the shadow-rig procedural system above, since
+// these locomotion clips have no data for any of that.
+// ===========================================================================
+
+export interface LocomotionClipUrls {
+  idle: string;
+  walk: string;
+  run: string;
+}
+
+interface LocomotionClips {
+  idle: THREE.AnimationClip;
+  walk: THREE.AnimationClip;
+  run: THREE.AnimationClip;
+}
+
+const locomotionClipCache = new Map<string, Promise<LocomotionClips>>();
+
+// Mixamo FBX exports can carry more than one clip (an empty reference pose alongside the
+// real one, or the real data at a different index than expected - confirmed happening for
+// at least one of these clips) - the actual animated one is whichever has tracks.
+function findAnimatedClip(clips: THREE.AnimationClip[], url: string): THREE.AnimationClip {
+  const clip = clips.find((c) => c.tracks.length > 0);
+  if (!clip) throw new Error('loadExternalRig: no animated clip in ' + url);
+  return clip;
+}
+
+// Mixamo authors position tracks in centimeters at real-human scale; this rig uses its
+// own, much smaller native scale - quaternion tracks are unit-agnostic and need no
+// correction, but position tracks (in practice just the hips) do, by posScale (measured
+// against this rig's own bind-pose hips height, so it lines up with the same "feet on the
+// ground" reference the procedural system's own hipsBindY already uses). Clips also bake
+// in the character physically walking/running across Mixamo's own virtual floor - since
+// the game's own physics already drives world position, that horizontal (X/Z) travel is
+// stripped relative to frame 0, keeping only the vertical bob (Y) that reads as the
+// stride's own up-down motion.
+function rescaleAndStripRootMotion(clip: THREE.AnimationClip, posScale: number) {
+  for (const track of clip.tracks) {
+    if (!track.name.endsWith('.position')) continue;
+    const values = (track as THREE.VectorKeyframeTrack).values;
+    for (let i = 0; i < values.length; i++) values[i] *= posScale;
+    const x0 = values[0];
+    const z0 = values[2];
+    for (let i = 0; i < values.length; i += 3) {
+      values[i] -= x0;
+      values[i + 2] -= z0;
+    }
+  }
+}
+
+function loadLocomotionClips(urls: LocomotionClipUrls, hipsBindY: number): Promise<LocomotionClips> {
+  const key = `${urls.idle}|${urls.walk}|${urls.run}`;
+  let p = locomotionClipCache.get(key);
+  if (!p) {
+    p = (async () => {
+      const loader = new FBXLoader();
+      const [idleFbx, walkFbx, runFbx] = await Promise.all([
+        loader.loadAsync(urls.idle),
+        loader.loadAsync(urls.walk),
+        loader.loadAsync(urls.run)
+      ]);
+      const idle = findAnimatedClip(idleFbx.animations, urls.idle);
+      const walk = findAnimatedClip(walkFbx.animations, urls.walk);
+      const run = findAnimatedClip(runFbx.animations, urls.run);
+      const hipsTrack = walk.tracks.find((t) => t.name === 'mixamorigHips.position') as
+        | THREE.VectorKeyframeTrack
+        | undefined;
+      const posScale = hipsTrack ? hipsBindY / hipsTrack.values[1] : 1;
+      for (const clip of [idle, walk, run]) rescaleAndStripRootMotion(clip, posScale);
+      return { idle, walk, run };
+    })();
+    locomotionClipCache.set(key, p);
   }
   return p;
 }
@@ -90,8 +172,19 @@ const PASSTHROUGH_NAMES = ['mixamorigSpine1', 'mixamorigRightShoulder', 'mixamor
 // applied to every limb - see copyLocalRotation below for the actual math).
 const LOCAL_JOINTS = new Set(['armR', 'foreR', 'handBoneR']);
 
+// The katana attach point's own local rotation while this hand is driven by the
+// locomotion mixer instead of the shadow rig - restFlips.handBoneR (see below) only
+// cancels out the flip that formula applies, so it's meaningless once the mixer's own
+// clip data is driving the hand bone directly instead. Measured empirically in-game
+// (screenshot comparison against several candidate rotations) against this rig's actual
+// Great Sword idle/walk clips, since there's no formula to derive it from - a fixed
+// local offset from the hand bone that happens to hold the blade in a natural
+// forward/up two-handed grip for this specific mocap pack's own hand convention.
+const MIXAMO_GRIP_FLIP = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, -Math.PI / 12, 0));
+
 const qWorld = new THREE.Quaternion();
 const qParentWorld = new THREE.Quaternion();
+const qLocalTmp = new THREE.Quaternion();
 
 // For each synced bone, measures the constant rotation `flip` such that
 // `shadowRestWorld * flip == realRestWorld` - i.e. exactly what's needed so that
@@ -130,11 +223,22 @@ function buildRestFlips(
 // (parent-relative) space, then rebuilds just target's own matrixWorld from that -
 // cheap (no subtree traversal) and correct as long as target.parent's matrixWorld is
 // already current, which SYNC_ORDER guarantees.
-function copyWorldRotation(source: THREE.Object3D, target: THREE.Object3D, flip: THREE.Quaternion | null) {
-  source.getWorldQuaternion(qWorld);
-  if (flip) qWorld.multiply(flip);
-  target.parent!.getWorldQuaternion(qParentWorld);
-  target.quaternion.copy(qParentWorld.invert().multiply(qWorld));
+//
+// blend (0-1): how much of this procedural rotation to apply, the rest being whatever
+// target.quaternion already holds (a rig's own locomotion mixer, when blend < 1 - see
+// postAnimate). 0 skips the computation entirely, both as a small perf win during plain
+// locomotion and because there's nothing to blend toward yet on the very first frame
+// (target's rest pose is a fine stand-in for "untouched"). The matrixWorld refresh still
+// always runs, since target's local rotation may have just changed via the mixer instead.
+function copyWorldRotation(source: THREE.Object3D, target: THREE.Object3D, flip: THREE.Quaternion | null, blend = 1) {
+  if (blend > 0) {
+    source.getWorldQuaternion(qWorld);
+    if (flip) qWorld.multiply(flip);
+    target.parent!.getWorldQuaternion(qParentWorld);
+    qParentWorld.invert().multiply(qWorld);
+    if (blend >= 1) target.quaternion.copy(qParentWorld);
+    else target.quaternion.slerp(qParentWorld, blend);
+  }
   target.updateMatrix();
   target.matrixWorld.multiplyMatrices(target.parent!.matrixWorld, target.matrix);
 }
@@ -144,8 +248,12 @@ function copyWorldRotation(source: THREE.Object3D, target: THREE.Object3D, flip:
 // conjugating with that bone's own natural bind-pose local rotation `restLocal`
 // (captured once, before this bone is ever touched) - standard retargeting math, exact
 // for any rotation magnitude as long as restLocal itself is small (see LOCAL_JOINTS).
-function copyLocalRotation(source: THREE.Object3D, target: THREE.Object3D, restLocal: THREE.Quaternion) {
-  target.quaternion.copy(restLocal).invert().multiply(source.quaternion).multiply(restLocal);
+// blend: see copyWorldRotation above.
+function copyLocalRotation(source: THREE.Object3D, target: THREE.Object3D, restLocal: THREE.Quaternion, blend = 1) {
+  if (blend <= 0) return;
+  qLocalTmp.copy(restLocal).invert().multiply(source.quaternion).multiply(restLocal);
+  if (blend >= 1) target.quaternion.copy(qLocalTmp);
+  else target.quaternion.slerp(qLocalTmp, blend);
 }
 
 // Refreshes a bone's matrixWorld from its own (unchanged) local matrix and its parent's
@@ -160,6 +268,7 @@ export interface ExternalRigOptions {
   url: string;
   height?: number; // target standing height in our world's units (the procedural ninja rig measures 2.32 - it's deliberately stylized/elongated, not a realistic human height)
   kind?: RigInstance['kind'];
+  locomotionClips?: LocomotionClipUrls;
 }
 
 export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInstance> {
@@ -213,6 +322,28 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
   const hipsBindY = real.hips?.position.y ?? 0;
   const shadowHipsRestY = shadow.hipsRestY ?? 0;
 
+  let locomotion: {
+    mixer: THREE.AnimationMixer;
+    idleAction: THREE.AnimationAction;
+    walkAction: THREE.AnimationAction;
+    runAction: THREE.AnimationAction;
+  } | null = null;
+  if (opts.locomotionClips) {
+    const clips = await loadLocomotionClips(opts.locomotionClips, hipsBindY);
+    const mixer = new THREE.AnimationMixer(model);
+    const idleAction = mixer.clipAction(clips.idle);
+    const walkAction = mixer.clipAction(clips.walk);
+    const runAction = mixer.clipAction(clips.run);
+    idleAction.play();
+    walkAction.play();
+    runAction.play();
+    locomotion = { mixer, idleAction, walkAction, runAction };
+  }
+  // Eased toward postAnimate's combatWeight rather than snapping straight to it, so
+  // entering/leaving a combat state doesn't visibly pop between this rig's own
+  // locomotion clip and the procedural pose - see postAnimate below.
+  let combatWeightSmoothed = 0;
+
   const flash = { value: 0 };
   const rim = new THREE.Color(1.0, 0.5, 0.3).multiplyScalar(0.28);
   const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
@@ -246,14 +377,19 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
   // isn't skinned, it's a rigid child: it needs the hand's true physical orientation,
   // shadowWrist alone. Giving the attach point that flip's inverse as its own local
   // rotation cancels the parent's flip back out, restoring the same "+Z forward, arm
-  // hanging down" convention weapon meshes are authored in.
+  // hanging down" convention weapon meshes are authored in. Only valid while this hand is
+  // procedurally driven, though - see MIXAMO_GRIP_FLIP below for the locomotion case.
   const realHandR = realBones.mixamorigLeftHand; // see the L/R note above
   const realHandL = realBones.mixamorigRightHand;
+  const proceduralGripFlip = restFlips.handBoneR ? restFlips.handBoneR.clone().invert() : new THREE.Quaternion();
   const hand = new THREE.Group();
-  if (restFlips.handBoneR) hand.quaternion.copy(restFlips.handBoneR).invert();
+  hand.quaternion.copy(proceduralGripFlip);
   hand.scale.setScalar(deltaScale);
   if (realHandR) realHandR.add(hand);
   const handL = new THREE.Group();
+  // handL only ever holds the healing gourd (see attachGourd() in engine.ts), which is
+  // only visible during the drink animation - always a combatWeight=1 (fully procedural)
+  // state - so unlike `hand` above, this one never needs a locomotion-mode counterpart.
   if (restFlips.handBoneL) handL.quaternion.copy(restFlips.handBoneL).invert();
   handL.scale.setScalar(deltaScale);
   if (realHandL) realHandL.add(handL);
@@ -287,7 +423,27 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
     footR: shadow.footR,
     flash,
     kind: opts.kind ?? 'samurai',
-    postAnimate: () => {
+    postAnimate: (combatWeight, moveAmt, dt) => {
+      if (locomotion) {
+        const m = Math.max(0, Math.min(1, moveAmt));
+        // triangular cross-fade: idle at 0, full walk at 0.5, full run at 1
+        if (m <= 0.5) {
+          locomotion.idleAction.weight = 1 - m / 0.5;
+          locomotion.walkAction.weight = m / 0.5;
+          locomotion.runAction.weight = 0;
+        } else {
+          locomotion.idleAction.weight = 0;
+          locomotion.walkAction.weight = 1 - (m - 0.5) / 0.5;
+          locomotion.runAction.weight = (m - 0.5) / 0.5;
+        }
+        locomotion.mixer.update(dt);
+        combatWeightSmoothed += (combatWeight - combatWeightSmoothed) * (1 - Math.exp(-16 * Math.max(0, dt)));
+      }
+      // Without a locomotion clip there's nothing to blend against - stay fully
+      // procedural, exactly like before this rig ever had one.
+      const blend = locomotion ? combatWeightSmoothed : 1;
+      if (locomotion) hand.quaternion.copy(MIXAMO_GRIP_FLIP).slerp(proceduralGripFlip, blend);
+
       shadow.root.updateMatrixWorld(true);
       let passIdx = 0;
       for (const key of SYNC_ORDER) {
@@ -301,13 +457,25 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
         if (!src || !dst) continue;
         if (LOCAL_JOINTS.has(key)) {
           const rl = restLocal[key];
-          if (rl) copyLocalRotation(src, dst, rl);
+          if (rl) copyLocalRotation(src, dst, rl, blend);
         } else {
-          copyWorldRotation(src, dst, restFlips[key] ?? null);
+          copyWorldRotation(src, dst, restFlips[key] ?? null, blend);
         }
       }
       if (real.hips) {
-        real.hips.position.y = hipsBindY + (shadow.hips!.position.y - shadowHipsRestY) * deltaScale;
+        const proceduralY = hipsBindY + (shadow.hips!.position.y - shadowHipsRestY) * deltaScale;
+        if (locomotion) {
+          // Y: blend toward the procedural height instead of snapping (the mixer already
+          // wrote its own vertical bob this frame). X/Z: the procedural system never
+          // moves the hips horizontally (world movement comes from `root`, not this bone)
+          // but the mixer does (small weight-shift sway, left in on purpose) - fade that
+          // back out as combat takes over so it doesn't linger into a static combat pose.
+          real.hips.position.y += (proceduralY - real.hips.position.y) * blend;
+          real.hips.position.x *= 1 - blend;
+          real.hips.position.z *= 1 - blend;
+        } else {
+          real.hips.position.y = proceduralY;
+        }
         real.hips.updateMatrix();
         real.hips.matrixWorld.multiplyMatrices(real.hips.parent!.matrixWorld, real.hips.matrix);
       }
@@ -319,6 +487,7 @@ export async function loadExternalRig(opts: ExternalRigOptions): Promise<RigInst
     },
     dispose: () => {
       shadow.dispose?.();
+      locomotion?.mixer.stopAllAction();
       // Geometry, materials and textures come from the cached template (shared with
       // every other clone made from it) and must outlive this one instance - nothing
       // to dispose for the imported mesh itself beyond dropping this clone's own

@@ -33,6 +33,11 @@ import { animateCharacter, animateDeath } from './animation';
 import { TUNE } from './tunables';
 
 const SAMURAI_MODEL_URL = '/models/samurai.glb';
+const SAMURAI_LOCOMOTION_CLIPS = {
+  idle: '/models/mixamo/sword_idle.fbx',
+  walk: '/models/mixamo/sword_walk.fbx',
+  run: '/models/mixamo/sword_run.fbx'
+};
 
 // Scroll drop chance per kill for each loaded weapon (2 weapons -> 7.5% per kill).
 const SCROLL_RATE_PER_WEAPON = 0.0375;
@@ -520,7 +525,10 @@ export class GameEngine {
     let rig: RigInstance;
     let resolvedId = id;
     try {
-      rig = id === 'samurai' ? await loadExternalRig({ url: SAMURAI_MODEL_URL, kind: 'samurai' }) : buildCharacter('ninja');
+      rig =
+        id === 'samurai'
+          ? await loadExternalRig({ url: SAMURAI_MODEL_URL, kind: 'samurai', locomotionClips: SAMURAI_LOCOMOTION_CLIPS })
+          : buildCharacter('ninja');
     } catch (e) {
       console.error('setCharacter: failed to load', id, e);
       resolvedId = 'kage';
