@@ -30,6 +30,7 @@ import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
 import { loadExternalRig } from './externalRig';
 import { animateCharacter, animateDeath } from './animation';
+import { TUNE } from './tunables';
 
 const SAMURAI_MODEL_URL = '/models/samurai.glb';
 
@@ -2262,13 +2263,13 @@ export class GameEngine {
       // 1. O PERSONAGEM VIRA NA DIREÇÃO DO MOVIMENTO (Acaba com andar de costas!)
       const moveAngle = Math.atan2(mx, mz);
       this.lastMove.set(mx, 0, mz);
-      const turnK = this.player.anim ? 14 : 26;
+      const turnK = this.player.anim ? TUNE.turnSpeedAttacking : TUNE.turnSpeedIdle;
       this.player.yaw = turnTo(this.player.yaw, moveAngle, dt * turnK);
 
       // 2. O DIRECIONAL GIRA A CÂMERA DINAMICAMENTE
       if (this.settings.autoTurnWithStick) {
         // Ao desviar para a esquerda/direita com o analógico, a câmera gira suavemente junto
-        const steerSens = 2.6 * this.settings.cameraSensitivity;
+        const steerSens = TUNE.camSteerSpeed * this.settings.cameraSensitivity;
         this.camYaw += -ix * steerSens * dt;
       }
 
@@ -2290,13 +2291,13 @@ export class GameEngine {
       // that loop - yaw has already finished turning to face the last held direction,
       // so camBehindPlayer is a fixed target instead of a moving one chasing itself.
       const camBehindPlayer = wrap(this.player.yaw - Math.PI);
-      const autoSpeed = 1.8 * this.settings.cameraSensitivity;
+      const autoSpeed = TUNE.camFollowSpeed * this.settings.cameraSensitivity;
       this.camYaw = turnTo(this.camYaw, camBehindPlayer, dt * autoSpeed);
     }
 
     if (this.player.dash > 0) {
       this.player.dash -= dt;
-      this.player.pos.addScaledVector(this.player.dashDir, 23 * dt);
+      this.player.pos.addScaledVector(this.player.dashDir, TUNE.dashSpeed * dt);
       this.player.vel.set(0, 0, 0);
       this.emitParticles(this.player.pos.x, this.player.pos.y + 0.9, this.player.pos.z, 1, 0x8a86c8, 0.7, 0.2, 0, 0.4);
       this.ghostT -= dt;
@@ -2307,17 +2308,17 @@ export class GameEngine {
     } else {
       const penalty =
         this.cine ? 0 : this.player.staggerT > 0 ? 0.25 : this.player.healT > 0 ? 0.35 : this.input.guardHeld ? 0.45 : this.player.anim ? 0.6 : this.player.tornado > 0 ? 0.55 : 1;
-      const maxSp = 7.6 * penalty;
+      const maxSp = TUNE.moveMaxSpeed * penalty;
       const dvx = amt > 0.05 ? (mx / amt) * maxSp * amt : 0;
       const dvz = amt > 0.05 ? (mz / amt) * maxSp * amt : 0;
-      const accelK = 1 - Math.exp(-(amt > 0.05 ? 12 : 9) * dt);
+      const accelK = 1 - Math.exp(-(amt > 0.05 ? TUNE.accelToward : TUNE.accelDecay) * dt);
       this.player.vel.x += (dvx - this.player.vel.x) * accelK;
       this.player.vel.z += (dvz - this.player.vel.z) * accelK;
       this.player.pos.x += this.player.vel.x * dt;
       this.player.pos.z += this.player.vel.z * dt;
     }
 
-    const velAmt = Math.min(1, Math.hypot(this.player.vel.x, this.player.vel.z) / 7.6);
+    const velAmt = Math.min(1, Math.hypot(this.player.vel.x, this.player.vel.z) / TUNE.moveMaxSpeed);
     this.player.moveAmt +=
       ((this.player.dash > 0 ? 1 : Math.max(amt > 0.05 ? amt : 0, velAmt * 0.7)) - this.player.moveAmt) *
       Math.min(1, dt * 12);
@@ -2512,7 +2513,7 @@ export class GameEngine {
     // raycast below (which still keys off the player's own followed position), so this
     // is purely cosmetic and safe to rip out (delete camLead + this block + the two
     // lookTarget uses below) if it doesn't feel right.
-    const leadTarget = this.player.vel.clone().multiplyScalar(0.12);
+    const leadTarget = this.player.vel.clone().multiplyScalar(TUNE.camLeadAmount);
     this.camLead.lerp(leadTarget, 1 - Math.exp(-4 * dt));
     const lookTarget = camTarget.clone().add(this.camLead);
     this.fovKick *= Math.exp(-5 * dt);

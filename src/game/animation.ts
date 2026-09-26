@@ -1,4 +1,5 @@
 import type { RigInstance } from './types';
+import { TUNE } from './tunables';
 
 // ===========================================================================
 // Procedural pose animation. Every frame we build a target pose from layers
@@ -108,8 +109,8 @@ function locomotion(m: number, ph: number, t: number) {
   const run = smooth((m - 0.45) / 0.5);
   const s = Math.sin(ph);
   const co = Math.cos(ph);
-  const legA = (0.55 + 0.38 * run) * m;
-  const kneeA = (0.55 + 0.75 * run) * m;
+  const legA = (TUNE.legSwingBase + TUNE.legSwingRun * run) * m;
+  const kneeA = (TUNE.kneeSwingBase + TUNE.kneeSwingRun * run) * m;
   add('legL', -s * legA);
   add('legR', s * legA);
   add('shinL', Math.max(0, co) * kneeA + 0.1 * m);
@@ -118,7 +119,7 @@ function locomotion(m: number, ph: number, t: number) {
   add('hips', 0, 0.12 * s * m, 0.035 * co * m);
   add('spine', 0.04 * m, -0.16 * s * m);
   add('chest', 0.06 * m + 0.2 * run, -0.06 * s * m);
-  const armA = (0.45 + 0.4 * run) * m;
+  const armA = (TUNE.armSwingBase + TUNE.armSwingRun * run) * m;
   add('armL', s * armA);
   add('armR', -s * armA);
   add('foreL', -(0.3 + 0.75 * run) * m);

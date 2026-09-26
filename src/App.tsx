@@ -6,7 +6,9 @@ import { ICON_URLS } from './game/icons';
 import { initAudio } from './game/audio';
 import type { Quality, QualitySetting } from './game/postfx';
 import type { AtmosMode } from './game/atmosphere';
-import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft, ArrowUp } from 'lucide-react';
+import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft, ArrowUp, SlidersHorizontal } from 'lucide-react';
+import { TunePanel } from './TunePanel';
+import { loadTune } from './game/tunables';
 
 const SLOT_COUNT = 2;
 const SLOT_LABELS = ['Principal', 'Secundária'];
@@ -153,6 +155,20 @@ export default function App() {
 
   // Settings Modal
   const [showSettings, setShowSettings] = useState(false);
+
+  // Movement-tuning panel: dev/QA only, opt-in via ?tune=1 - never shown to a regular
+  // player who didn't ask for it.
+  const [tuneEnabled] = useState(() => {
+    try {
+      return new URLSearchParams(window.location.search).get('tune') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [showTune, setShowTune] = useState(false);
+  useEffect(() => {
+    if (tuneEnabled) loadTune();
+  }, [tuneEnabled]);
   const [qualitySetting, setQualitySetting] = useState<QualitySetting>(() => {
     try {
       const v = localStorage.getItem('kage_quality');
@@ -547,7 +563,19 @@ export default function App() {
             >
               <Settings className="w-5 h-5 text-[var(--paper)]" />
             </button>
+            {tuneEnabled && (
+              <button
+                onClick={() => setShowTune(!showTune)}
+                className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(239,230,210,0.3)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform"
+                title="Ajuste de movimento"
+                aria-label="Ajuste de movimento"
+              >
+                <SlidersHorizontal className="w-5 h-5 text-[var(--ember)]" />
+              </button>
+            )}
           </div>
+
+          {tuneEnabled && showTune && <TunePanel onClose={() => setShowTune(false)} />}
 
           {/* Banner message */}
           {banner && (
