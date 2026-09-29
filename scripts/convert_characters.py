@@ -1,22 +1,22 @@
-"""Builds public/models/ronin.glb from the Mixamo exports in assets_src/.
+"""Builds the mocap characters (public/models/ronin.glb, archer.glb) from the Mixamo
+exports in assets_src/.
 
 Run with Blender's Python module (pip install bpy==5.0.1, Python 3.11):
-    python scripts/convert_ronin.py [--all] [--out path.glb]
+    python scripts/convert_characters.py ronin|archer [--all] [--only a,b] [--out path.glb]
 
 Imports the rigged character FBX, then every selected animation FBX (all downloaded
 from Mixamo for this same character, so bone names and rest poses match 1:1 - no
 retargeting), attaches each one as a named action on the character's own armature and
 exports a single GLB. --all exports every clip in the pack (for previewing); the default
-exports only the clips the game uses (CLIPS below). Texture/mesh compression happens
+exports only the clips the game uses (the *_CLIPS tables below). Texture/mesh compression happens
 afterwards in scripts/optimize_models.mjs, which writes the file the game loads.
 
-Clips from other skeletons (RETARGET below - same Mixamo bone names, but a different
+Clips from other skeletons (RONIN_RETARGET below - same Mixamo bone names, but a different
 rest pose, scale and up axis) are retargeted onto the character's own skeleton here, so
 the game only ever plays clips authored for this one skeleton.
 
-The GLB also carries a decimated copy of the body (RoninLOD), skinned to the same
-skeleton - the enemy samurai reuse this character recoloured, and there can be up to 9
-of them on screen.
+Each GLB carries a decimated copy of the body (<Name>LOD) skinned to the same skeleton,
+for enemies (up to 9 samurai and 4 archers on screen); the archer ships only that one.
 """
 import os
 import sys
@@ -27,13 +27,10 @@ import bpy
 from mathutils import Matrix, Quaternion, Vector
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PACK = os.path.join(ROOT, 'assets_src', 'Great Sword Pack (1) samurai.zip')
-CHARACTER = 'samurai+armor+3d+model (2).fbx'
 TEX_SIZE = 1024
-LOD_RATIO = 0.22
 
 # game clip name -> file in the Mixamo pack
-CLIPS = {
+RONIN_CLIPS = {
     'idle': 'great sword idle.fbx',
     'walk': 'great sword walk.fbx',
     'run': 'great sword run (2).fbx',
@@ -64,7 +61,7 @@ CLIPS = {
 }
 
 # game clip name -> (source FBX in assets_src/, action name inside it)
-RETARGET = {
+RONIN_RETARGET = {
     'fightIdle': ('movimentos de luta.fbx', 'Armature|Fighting_Idle'),
     'jab': ('movimentos de luta.fbx', 'Armature|Punch_Jab'),
     'cross': ('movimentos de luta.fbx', 'Armature|Punch_Cross'),
@@ -72,6 +69,34 @@ RETARGET = {
     'jabR': ('movimentos de luta.fbx', 'Armature|Fighting_Right_Jab'),
     'eSwordAttack': ('inimigo com espada.fbx', 'Armature|Sword_Attack'),
     'eSwordSlash': ('inimigo com espada.fbx', 'Armature|Sword_Regular_C'),
+}
+
+# Pro Longbow pack, downloaded for the archer itself. Locomotion keeps the Rōnin's names
+# so the same clip controller drives both.
+ARCHER_CLIPS = {
+    'idle': 'standing idle 01.fbx',
+    'walk': 'standing walk forward.fbx',
+    'run': 'standing run forward.fbx',
+    'walkBack': 'standing walk back.fbx',
+    'strafeL': 'standing walk left.fbx',
+    'strafeR': 'standing walk right.fbx',
+    'draw': 'standing draw arrow.fbx',
+    'aim': 'standing aim overdraw.fbx',
+    'release': 'standing aim recoil.fbx',
+    'hit1': 'standing react small from front.fbx',
+    'hit2': 'standing react small from headshot.fbx',
+    'death': 'standing death backward 01.fbx',
+    'death2': 'standing death forward 01.fbx',
+    'dodgeL': 'standing dodge left.fbx',
+    'dodgeR': 'standing dodge right.fbx',
+    'kick': 'standing melee kick.fbx',
+}
+
+CHARACTERS = {
+    'ronin': dict(name='Ronin', pack='Great Sword Pack (1) samurai.zip', fbx='samurai+armor+3d+model (2).fbx',
+                  clips=RONIN_CLIPS, retarget=RONIN_RETARGET, full=True, lod_ratio=0.22),
+    'archer': dict(name='Archer', pack='inimigo 1 arqueiro pronto.zip', fbx='inimigo 1 atualizado.fbx',
+                   clips=ARCHER_CLIPS, retarget={}, full=False, lod_ratio=0.24),
 }
 
 
@@ -246,13 +271,13 @@ def push_clip(arm, name, act):
     track.mute = True
 
 
-def make_lod(body):
+def make_lod(body, name, ratio):
     lod = body.copy()
     lod.data = body.data.copy()
-    lod.name = 'RoninLOD'
+    lod.name = name + 'LOD'
     body.users_collection[0].objects.link(lod)
     dec = lod.modifiers.new('Decimate', 'DECIMATE')
-    dec.ratio = LOD_RATIO
+    dec.ratio = ratio
     dec.use_collapse_triangulate = True
     bpy.ops.object.select_all(action='DESELECT')
     bpy.context.view_layer.objects.active = lod
@@ -264,7 +289,9 @@ def make_lod(body):
 
 
 def main():
-    out_path = arg('--out', os.path.join(ROOT, 'assets_src', 'build', 'ronin.raw.glb'))
+    which = next((a for a in sys.argv[1:] if a in CHARACTERS), 'ronin')
+    spec = CHARACTERS[which]
+    out_path = arg('--out', os.path.join(ROOT, 'assets_src', 'build', which + '.raw.glb'))
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     export_all = bool(arg('--all', False))
 
@@ -272,14 +299,14 @@ def main():
     bpy.context.scene.render.fps = 30
 
     tmp = tempfile.mkdtemp(prefix='ronin_')
-    with zipfile.ZipFile(PACK) as z:
+    with zipfile.ZipFile(os.path.join(ROOT, 'assets_src', spec['pack'])) as z:
         z.extractall(tmp)
 
-    objs = import_fbx(os.path.join(tmp, CHARACTER))
+    objs = import_fbx(os.path.join(tmp, spec['fbx']))
     arm = next(o for o in objs if o.type == 'ARMATURE')
     body = next(o for o in objs if o.type == 'MESH')
-    arm.name = 'Ronin'
-    body.name = 'RoninBody'
+    arm.name = spec['name']
+    body.name = spec['name'] + 'Body'
 
     # This Mixamo "with skin" export stores its rest pose lying on its back and stands the
     # character up only through a one-frame bind action - while every animation FBX's own
@@ -327,20 +354,22 @@ def main():
             img.scale(TEX_SIZE, TEX_SIZE)
     for m in body.data.materials:
         rebuild_material(m, by_path)
-        m.name = 'Ronin'
+        m.name = spec['name']
 
     if export_all:
-        files = sorted(f for f in os.listdir(tmp) if f.endswith('.fbx') and f != CHARACTER)
+        files = sorted(f for f in os.listdir(tmp) if f.endswith('.fbx') and f != spec['fbx'])
         clips = {os.path.splitext(f)[0]: f for f in files}
     else:
-        clips = CLIPS
+        clips = spec['clips']
     only = arg('--only')
     if only:
         keep = only.split(',')
         clips = {k: v for k, v in clips.items() if k in keep}
 
     if not export_all:
-        make_lod(body)
+        make_lod(body, spec['name'], spec['lod_ratio'])
+        if not spec['full']:
+            bpy.data.objects.remove(body, do_unlink=True)
 
     arm.animation_data_create()
     for name, fname in clips.items():
@@ -352,9 +381,9 @@ def main():
             bpy.data.objects.remove(o, do_unlink=True)
         print('clip', name, act.frame_range[:])
 
-    retarget_clips = {} if export_all else RETARGET
+    retarget_clips = {} if export_all else spec['retarget']
     if only:
-        retarget_clips = {k: v for k, v in RETARGET.items() if k in keep}
+        retarget_clips = {k: v for k, v in retarget_clips.items() if k in keep}
     by_file = {}
     for name, (fname, action_name) in retarget_clips.items():
         by_file.setdefault(fname, {})[name] = action_name

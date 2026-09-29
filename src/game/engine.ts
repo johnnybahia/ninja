@@ -28,8 +28,8 @@ import { Afterimages, BladeTrail, DustPool, ImpactPool, InkDecals, softDotTextur
 import { PostFX, NINJA_LOOK, Quality, QualitySetting, QualityProfile, qualityProfile, detectQuality } from './postfx';
 import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
-import { createClipRig, OneShot, PlayOptions } from './clipRig';
-import { loadRonin, loadWeapons, preloadModels, roninIfReady, RoninTemplate } from './models';
+import { createClipRig, Grip, OneShot, PlayOptions } from './clipRig';
+import { loadCharacter, loadWeapons, preloadModels, characterIfReady, CharacterTemplate } from './models';
 import { COMBOS, SPECIAL_MOVES, RUSH, ENEMY_STRIKES, ClipMove } from './moves';
 import { animateCharacter, animateDeath } from './animation';
 import { TUNE } from './tunables';
@@ -37,6 +37,12 @@ import { TUNE } from './tunables';
 // Enemy samurai reuse the Rōnin's mesh, armour darkened toward blued steel
 const ENEMY_TINT = new THREE.Color(0.42, 0.46, 0.62);
 const ENEMY_RIM = new THREE.Color(0.35, 0.45, 1.0).multiplyScalar(0.18);
+// Archer's bow hand, measured from its own aiming clip: arrow flight along the line from
+// the drawing hand to the bow hand, limbs as upright as the pose allows
+const ARCHER_BOW_GRIP: Grip = { axis: new THREE.Vector3(-0.038, 0.93, -0.366), edge: new THREE.Vector3(-0.798, 0.193, 0.571) };
+// how long the archer holds full draw before loosing (the readable part of its telegraph)
+const ARCHER_AIM_HOLD = 0.45;
+const Z_AXIS = new THREE.Vector3(0, 0, 1);
 
 // Scroll drop chance per kill for each loaded weapon (2 weapons -> 7.5% per kill).
 const SCROLL_RATE_PER_WEAPON = 0.0375;
@@ -543,7 +549,7 @@ export class GameEngine {
     let resolvedId = id;
     try {
       if (id === 'samurai') {
-        const [tpl] = await Promise.all([loadRonin(), loadWeapons()]);
+        const [tpl] = await Promise.all([loadCharacter('ronin'), loadWeapons()]);
         rig = createClipRig(tpl);
       } else {
         rig = buildCharacter('ninja');
@@ -568,7 +574,7 @@ export class GameEngine {
     this.scene.add(this.player.rig.root);
     this.act = null;
     this.equipWeapons();
-    this.rebuildGhosts(rig.clip ? roninIfReady() : null);
+    this.rebuildGhosts(rig.clip ? characterIfReady('ronin') : null);
   }
 
   // One mesh per weapon slot, only the active one visible. On the mocap rig the
@@ -591,7 +597,7 @@ export class GameEngine {
   }
 
   // Dash afterimages copy the player's pose bone-by-bone, so they need the same skeleton
-  private rebuildGhosts(tpl: RoninTemplate | null) {
+  private rebuildGhosts(tpl: CharacterTemplate | null) {
     this.ghosts?.dispose();
     this.ghosts = new Afterimages(this.scene, () => {
       const r = tpl ? createClipRig(tpl, { lod: true }) : buildCharacter('ninja');
@@ -780,6 +786,7 @@ export class GameEngine {
   private spawnEnemy(type: 'samurai' | 'archer' | 'boss', x: number, z: number) {
     const hpMul = 1 + (this.wave - 1) * 0.15;
     let rig: RigInstance;
+    let bowObj: THREE.Object3D | null = null;
     let hp = 60;
     let speed = 3.7;
     let r = 0.5;
@@ -788,14 +795,21 @@ export class GameEngine {
     if (type === 'samurai') {
       // mocap samurai (the Rōnin recoloured, decimated body) once its model is in;
       // the procedural samurai otherwise
-      const tpl = roninIfReady();
+      const tpl = characterIfReady('ronin');
       rig = tpl ? createClipRig(tpl, { lod: true, tint: ENEMY_TINT, rim: ENEMY_RIM }) : buildCharacter('samurai');
       rig.hand.add(makeWeapon('ekatana'));
       hp = 60 * hpMul;
       speed = 3.7;
     } else if (type === 'archer') {
-      rig = buildCharacter('archer');
-      rig.handL.add(makeWeapon('bow'));
+      const tpl = characterIfReady('archer');
+      if (tpl) {
+        rig = createClipRig(tpl, { lod: true, kind: 'archer', height: 2.3, grips: { left: ARCHER_BOW_GRIP } });
+        bowObj = makeWeapon('longbow');
+        rig.handL.add(bowObj);
+      } else {
+        rig = buildCharacter('archer');
+        rig.handL.add(makeWeapon('bow'));
+      }
       hp = 40 * hpMul;
       speed = 3.3;
     } else {
@@ -910,13 +924,70 @@ export class GameEngine {
       this.scene.add(enemy.tele);
     }
 
+    if (bowObj && rig.model) enemy.bowFx = this.makeBowFx(rig, bowObj);
+
     this.scene.add(rig.root);
     this.emitParticles(x, 1, z, 26, 0x8a7aa8, 5, 2, 3, 0.9);
     this.enemies.push(enemy);
     return enemy;
   }
 
+  // The bow model is unstrung: its string is a live 3-point line, tip -> nock -> tip, the
+  // nock following the drawing hand at full draw (with an arrow on it), else straight
+  private makeBowFx(rig: RigInstance, bow: THREE.Object3D): NonNullable<EnemyInstance['bowFx']> {
+    rig.root.updateMatrixWorld(true);
+    const top = new THREE.Vector3(0, -Infinity, 0);
+    const bottom = new THREE.Vector3(0, Infinity, 0);
+    const v = new THREE.Vector3();
+    bow.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (!m.isMesh) return;
+      const pos = m.geometry.attributes.position;
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld);
+        bow.worldToLocal(v);
+        if (v.y > top.y) top.copy(v);
+        if (v.y < bottom.y) bottom.copy(v);
+      }
+    });
+    const geo = new THREE.BufferGeometry().setFromPoints([top, top.clone().lerp(bottom, 0.5), bottom]);
+    const string = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xe6dcc4 }));
+    string.frustumCulled = false;
+    bow.add(string);
+    const arrow = makeWeapon('arrow');
+    arrow.visible = false;
+    bow.add(arrow);
+    const nock = rig.model!.getObjectByName('mixamorigRightHandIndex2') ?? rig.model!.getObjectByName('mixamorigRightHand')!;
+    return { bow, string, arrow, nock, mid: top.clone().lerp(bottom, 0.5) };
+  }
+
+  private updateBowFx(e: EnemyInstance) {
+    const fx = e.bowFx;
+    if (!fx) return;
+    const b = e.bow;
+    const cur = e.rig.clip?.current;
+    const drawn = !!b && !e.dead && ((b.phase === 'draw' && cur?.name === 'draw' && cur.t >= 0.62) || b.phase === 'aim');
+    const pos = fx.string.geometry.attributes.position as THREE.BufferAttribute;
+    if (drawn) {
+      e.rig.root.updateMatrixWorld(true);
+      fx.nock.getWorldPosition(this.tmpV);
+      fx.bow.worldToLocal(this.tmpV);
+      pos.setXYZ(1, this.tmpV.x, this.tmpV.y, this.tmpV.z);
+      fx.arrow.visible = true;
+      fx.arrow.position.copy(this.tmpV);
+      fx.arrow.quaternion.setFromUnitVectors(Z_AXIS, this.tmpV.negate().normalize());
+    } else {
+      pos.setXYZ(1, fx.mid.x, fx.mid.y, fx.mid.z);
+      fx.arrow.visible = false;
+    }
+    pos.needsUpdate = true;
+  }
+
   private removeEnemy(e: EnemyInstance) {
+    if (e.bowFx) {
+      e.bowFx.string.geometry.dispose();
+      (e.bowFx.string.material as THREE.Material).dispose();
+    }
     this.scene.remove(e.rig.root);
     this.scene.remove(e.bar);
     if (e.tele) this.scene.remove(e.tele);
@@ -2065,6 +2136,39 @@ export class GameEngine {
     this.stepPlayerAct();
   }
 
+  // draw (clip) -> hold at full draw -> loose, the arrow leaving from the bow itself
+  private stepArcherShot(e: EnemyInstance, nx: number, nz: number, dt: number) {
+    const b = e.bow!;
+    const ctl = e.rig.clip!;
+    b.t += dt;
+    if (b.phase === 'draw') {
+      if (ctl.current?.name !== 'draw') {
+        b.phase = 'aim';
+        b.t = 0;
+        this.enemyClip(e, 'aim', { from: 0.15, fadeIn: 0.08, fadeOut: 0.1 });
+      }
+    } else if (b.phase === 'aim') {
+      if (b.t >= ARCHER_AIM_HOLD) {
+        b.phase = 'release';
+        b.t = 0;
+        e.rig.root.updateMatrixWorld(true);
+        e.rig.handL.getWorldPosition(this.tmpH);
+        this.spawnProj({
+          type: 'arrow',
+          friendly: false,
+          pos: new THREE.Vector3(this.tmpH.x + nx * 0.3, this.tmpH.y, this.tmpH.z + nz * 0.3),
+          vel: new THREE.Vector3(nx * 22, 0, nz * 22),
+          dmg: 8,
+          life: 2
+        });
+        sfx.arrow();
+        this.enemyClip(e, 'release', { from: 0.12, fadeIn: 0.04 });
+      }
+    } else if (b.t >= 0.45) {
+      e.bow = undefined;
+    }
+  }
+
   // Mocap enemy reactions: no-ops on the procedural rigs
   private enemyClip(e: EnemyInstance, name: string, o: PlayOptions = {}): OneShot | null {
     return e.rig.clip?.play(name, { fadeIn: 0.1, fadeOut: 0.25, ...o }) ?? null;
@@ -2154,6 +2258,13 @@ export class GameEngine {
     e.kb.x += nx * kb * res;
     e.kb.z += nz * kb * res;
     // heavy blows interrupt an ordinary samurai wind-up (the Oni and perilous moves shrug them off)
+    if (heavy && e.type === 'archer' && e.rig.clip && e.hp > dmg) {
+      // a heavy blow knocks the archer out of its shot or kick
+      e.bow = undefined;
+      e.kick = undefined;
+      e.staggerT = 0.4;
+      this.enemyClip(e, 'hit2', { speed: 1.1, fadeIn: 0.05 });
+    }
     if (heavy && e.type === 'samurai' && e.strike && !e.strike.perilous) {
       this.cancelStrike(e);
       this.enemyClip(e, 'hit3', { speed: 1.4, to: 0.95, fadeIn: 0.05 });
@@ -2205,7 +2316,8 @@ export class GameEngine {
       // a flinch layered over whatever the samurai is doing (a full reaction would
       // cancel its footwork on every hit)
       if (e.rig.clip && !e.strike && e.brokenT <= 0 && e.staggerT <= 0) {
-        this.enemyClip(e, 'hit3', { from: 0.12, to: 0.62, speed: 1.4, weight: 0.5, fadeIn: 0.05, fadeOut: 0.18 });
+        if (e.type === 'archer') this.enemyClip(e, 'hit1', { from: 0.05, to: 0.55, speed: 1.3, weight: 0.5, fadeIn: 0.05, fadeOut: 0.18 });
+        else this.enemyClip(e, 'hit3', { from: 0.12, to: 0.62, speed: 1.4, weight: 0.5, fadeIn: 0.05, fadeOut: 0.18 });
       }
       this.addEnemyPosture(e, dmg * 0.55 * (heavy ? 1.5 : 1));
     }
@@ -2214,6 +2326,9 @@ export class GameEngine {
   private killEnemy(e: EnemyInstance) {
     e.dead = true;
     e.deathT = 0;
+    e.bow = undefined;
+    e.kick = undefined;
+    this.updateBowFx(e);
     this.enemyClip(e, Math.random() < 0.5 ? 'death' : 'death2', { hold: true, fadeIn: 0.08 });
     e.bar.visible = false;
     e.token = false;
@@ -2514,6 +2629,8 @@ export class GameEngine {
     this.cancelStrike(e);
     e.token = false;
     e.anim = undefined;
+    e.bow = undefined;
+    e.kick = undefined;
     // doubled over, held there until the posture recovers or a deathblow lands
     this.enemyClip(e, 'hit2', { to: 0.62, hold: true, fadeIn: 0.08 });
     sfx.postureBreak();
@@ -3222,6 +3339,56 @@ export class GameEngine {
       } else if (e.staggerT > 0) {
         e.staggerT -= dt;
         e.yaw = turnTo(e.yaw, toP, dt * 4);
+      } else if (e.type === 'archer' && e.rig.clip) {
+        // ---- mocap archer: keep range and shoot (draw -> hold -> loose), kick anyone
+        // who closes in, and (from wave 4) sidestep a swing it sees coming
+        const ctl = e.rig.clip;
+        e.yaw = turnTo(e.yaw, toP, dt * (e.bow ? 3.5 : 6));
+        if (e.cd3 !== undefined) e.cd3 -= dt;
+        const reacting = !!ctl.current && !e.bow && !e.kick; // dodge / hit reaction playing
+        const swingStarting = this.act
+          ? (this.act.kind === 'attack' || this.act.kind === 'special') && this.act.shot.t < 0.3
+          : !!this.player.anim && this.player.anim.t < 0.1;
+        if (e.kick) {
+          e.kick.t += dt;
+          if (!e.kick.done && e.kick.t >= 0.55) {
+            e.kick.done = true;
+            sfx.swing();
+            this.resolveStrike(e, { kind: 'slash', windup: 0, t: 0, perilous: false, feint: false, reach: 2.3, dmg: 10, side: 0 });
+          }
+          if (e.kick.t >= 1.15) e.kick = undefined;
+        } else if (e.bow) {
+          this.stepArcherShot(e, nx, nz, dt);
+        } else if (!reacting && !freezeAttacks && this.wave >= 4 && (e.cd3 ?? 0) <= 0 && d < 3.8 && swingStarting) {
+          e.cd3 = 3.5;
+          if (Math.random() < 0.65) this.enemyClip(e, Math.random() < 0.5 ? 'dodgeL' : 'dodgeR', { rootMotion: true, fadeIn: 0.06, fadeOut: 0.2 });
+        } else if (!reacting && !freezeAttacks && d < 2.1 && e.cd2 <= 0) {
+          e.kick = { t: 0, done: false };
+          e.cd2 = 2.6;
+          this.enemyClip(e, 'kick', { fadeIn: 0.08 });
+        } else if (!reacting) {
+          if (d < 5) {
+            mvx = -nx;
+            mvz = -nz;
+            spd = e.speed;
+          } else if (d > 14) {
+            mvx = nx;
+            mvz = nz;
+            spd = e.speed;
+          } else if (e.cd <= 0 && !freezeAttacks) {
+            e.cd = 2.6 + Math.random() * 0.8 - Math.min(0.6, this.wave * 0.04);
+            e.bow = { phase: 'draw', t: 0 };
+            this.enemyClip(e, 'draw', { speed: 1.35, fadeIn: 0.12, fadeOut: 0.08 });
+          } else {
+            mvx = -nz * e.circleDir * 0.5;
+            mvz = nx * e.circleDir * 0.5;
+            spd = e.speed * 0.6;
+            if (e.modeT > 2.5) {
+              e.modeT = 0;
+              e.circleDir *= -1;
+            }
+          }
+        }
       } else if (e.type === 'archer') {
         e.yaw = turnTo(e.yaw, toP, dt * 6);
         if (d < 5) {
@@ -3409,7 +3576,13 @@ export class GameEngine {
           dirZ: wx * sn + wz * c,
           guard: e.mode === 'guard' && e.guardT > 0
         });
+        // root travel of a move that owns it (the archer's dodge)
         e.rig.clip.consumeRoot(this.rootTmp);
+        if (this.rootTmp.lengthSq() > 0) {
+          e.pos.x += this.rootTmp.x * c + this.rootTmp.y * sn;
+          e.pos.z += -this.rootTmp.x * sn + this.rootTmp.y * c;
+        }
+        this.updateBowFx(e);
       } else animateCharacter(e.rig, {
         moveAmt: e.moveAmt,
         phase: e.phase,
@@ -3481,7 +3654,10 @@ export class GameEngine {
               exploded = true;
               break;
             }
-            this.hitEnemy(e, p.dmg, p.vel.x, p.vel.z, p.kb || 3, false);
+            // knockback wants a unit direction, not the projectile's speed (which flung
+            // targets tens of metres)
+            const vl = Math.hypot(p.vel.x, p.vel.z) || 1;
+            this.hitEnemy(e, p.dmg, p.vel.x / vl, p.vel.z / vl, p.kb || 3, false);
             if (p.pierce) p.hit?.add(e);
             else {
               dead = true;
@@ -3504,7 +3680,8 @@ export class GameEngine {
             this.addPlayerPosture(10);
             sfx.block();
           } else {
-            this.damagePlayer(p.dmg, p.vel.x, p.vel.z);
+            const vl = Math.hypot(p.vel.x, p.vel.z) || 1;
+            this.damagePlayer(p.dmg, p.vel.x / vl, p.vel.z / vl);
           }
         }
       }

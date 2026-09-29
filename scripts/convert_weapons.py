@@ -15,9 +15,13 @@ files the game loads (public/models/weapons/).
 """
 import os
 import sys
+import tempfile
+import zipfile
 
 import bpy
+import bmesh  # only importable once bpy is loaded
 from mathutils import Matrix, Vector
+from mathutils.geometry import intersect_point_line
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, 'assets_src')
@@ -31,6 +35,13 @@ TEX_SIZE = 512
 #   edge:  direction the cutting edge faces ('sagitta' = the convex side of a curved blade)
 #   grip:  where the hand holds it, as a fraction of the length from the butt
 #   length: target length along the blade axis, in game units
+# Optional:
+#   axis_vec:  force the +Z axis (else the mesh's principal axis)
+#   grip_mat:  put the origin at the centroid of this material's faces instead of `grip`
+#   size_on:   'edge' to scale by the extent along +Y instead of along the axis
+#   colors:    material name -> (r, g, b, metalness, roughness), for untextured sources
+#   strip_string: delete a bow's baked-in straight string (the game draws a live one)
+#   src may also be a .blend (objects picked with `keep`)
 SPECS = {
     'katana': dict(src='katana.glb', tip=(0, 0, 1), edge='sagitta', grip=0.2, length=1.7),
     'ekatana': dict(src='KATANA INIMIGO.glb', tip=(0.55, 0.36, 0.75), edge='sagitta', grip=0.18, length=1.6),
@@ -41,6 +52,16 @@ SPECS = {
     # ring + handle + blade define the axis; the explosive tag and its string hang off it
     'kunai': dict(src='exposive_kunai.glb', axis=['pTorus1', 'pCylinder1', 'pCube1'], tip=(0.25, -0.5, -0.8), edge=(1, 0, 0), grip=0.3, length=0.62, axis_len=True),
     'shuriken': dict(src='shuriken ESTRELA.glb', tip=(1, 0, 0), edge=(0, 0, 1), grip=0.5, length=0.42),
+    # Enemy archer's longbow (untextured, stringless source - the game strings it, see
+    # clipRig's bow string): limbs up (+Y), shooting toward +Z, the origin on the grip
+    # wrap so the left hand holds it there
+    'bow': dict(src='BOW AND ARROW/BLEND FILE/bow and arow.blend', zip='arco e flecha inimigo 1.zip', keep=['Cube'],
+                axis_vec=(1, 0, 0), tip=(1, 0, 0), edge=(0, 1, 0), grip_mat='Material.002', size_on='edge', length=1.55, strip_string=True,
+                colors={'Material': (0.92, 0.88, 0.78, 0.0, 0.8), 'Material.001': (0.16, 0.07, 0.05, 0.1, 0.45), 'Material.002': (0.42, 0.12, 0.08, 0.0, 0.7)}),
+    # origin at the nock, so it sits on the drawing hand / string
+    'arrow': dict(src='BOW AND ARROW/BLEND FILE/bow and arow.blend', zip='arco e flecha inimigo 1.zip', keep=['Cylinder.001'],
+                  tip=(1, 0, 0), edge=(0, 1, 0), grip=0.0, length=1.0,
+                  colors={'Material.003': (0.72, 0.72, 0.74, 0.9, 0.3), 'Material.004': (0.62, 0.48, 0.3, 0.0, 0.75)}),
 }
 
 # three.js (x, y, z) -> Blender (x, -z, y)
@@ -87,9 +108,58 @@ def unlit_to_pbr(mat):
         nt.links.new(t.outputs['Color'], bsdf.inputs['Base Color'])
 
 
+def recolor(mat, rgb):
+    r, g, b, metal, rough = rgb
+    mat.use_nodes = True
+    nt = mat.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+    out = nt.nodes.new('ShaderNodeOutputMaterial')
+    bsdf = nt.nodes.new('ShaderNodeBsdfPrincipled')
+    bsdf.inputs['Base Color'].default_value = (r, g, b, 1)
+    bsdf.inputs['Metallic'].default_value = metal
+    bsdf.inputs['Roughness'].default_value = rough
+    nt.links.new(bsdf.outputs['BSDF'], out.inputs['Surface'])
+
+
+def strip_string(obj):
+    # the string is the thin run of faces hugging the straight line between the two limb
+    # tips; the limbs themselves only meet that line at the very ends (kept, as loops)
+    pts = [to_three(v.co) for v in obj.data.vertices]
+    top = max(pts, key=lambda p: p.y)
+    bot = min(pts, key=lambda p: p.y)
+    half = (top.y - bot.y) / 2
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    doomed = []
+    for f in bm.faces:
+        ok = True
+        for v in f.verts:
+            p = to_three(v.co)
+            q, _ = intersect_point_line(p, top, bot)
+            if (p - q).length > 0.012 or abs(p.y) > half * 0.93:
+                ok = False
+                break
+        if ok:
+            doomed.append(f)
+    bmesh.ops.delete(bm, geom=doomed, context='FACES')
+    bm.to_mesh(obj.data)
+    bm.free()
+    print(f'  stripped {len(doomed)} string faces')
+
+
 def convert(wid, spec):
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    bpy.ops.import_scene.gltf(filepath=os.path.join(SRC, spec['src']))
+    src = os.path.join(SRC, spec['src'])
+    if spec.get('zip'):
+        tmp = tempfile.mkdtemp(prefix='weapon_')
+        with zipfile.ZipFile(os.path.join(SRC, spec['zip'])) as z:
+            z.extractall(tmp)
+        src = os.path.join(tmp, spec['src'])
+    if src.endswith('.blend'):
+        bpy.ops.wm.open_mainfile(filepath=src)
+    else:
+        bpy.ops.import_scene.gltf(filepath=src)
 
     # bake skinning (the katana is a rigged prop) and every parent transform into the
     # mesh data itself, then drop everything that isn't a kept mesh
@@ -126,6 +196,8 @@ def convert(wid, spec):
     pts = [to_three(v.co) for o in axis_objs for v in o.data.vertices]
     all_pts = [to_three(v.co) for o in keep for v in o.data.vertices]
     c, a = principal_axis(pts)
+    if spec.get('axis_vec'):
+        a = Vector(spec['axis_vec']).normalized()
     if a.dot(Vector(spec['tip'])) < 0:
         a = -a
     ref = pts if spec.get('axis_len') else all_pts
@@ -150,8 +222,21 @@ def convert(wid, spec):
 
     # rows = where each source axis lands: X <- side, Y <- edge, Z <- axis
     rot = Matrix((side, e, a)).to_4x4()
-    s = spec['length'] / length
-    grip = butt + a * (spec['grip'] * length)
+    if spec.get('size_on') == 'edge':
+        es = [p.dot(e) for p in all_pts]
+        s = spec['length'] / (max(es) - min(es))
+    else:
+        s = spec['length'] / length
+    grip = butt + a * (spec['grip'] * length) if 'grip' in spec else c
+    if spec.get('grip_mat'):
+        sel = []
+        for o in keep:
+            idx = [i for i, m in enumerate(o.data.materials) if m and m.name == spec['grip_mat']]
+            for poly in o.data.polygons:
+                if poly.material_index in idx:
+                    sel.extend(to_three(o.data.vertices[vi].co) for vi in poly.vertices)
+        if sel:
+            grip = sum(sel, Vector()) / len(sel)
     m_three = Matrix.Scale(s, 4) @ rot @ Matrix.Translation(-grip)
     m_blender = C @ m_three @ C.inverted()
 
@@ -160,9 +245,13 @@ def convert(wid, spec):
     obj.name = wid
     obj.data.transform(m_blender)
     obj.data.update()
+    if spec.get('strip_string'):
+        strip_string(obj)
 
     for mat in obj.data.materials:
-        if mat and mat.node_tree and not any(n.type == 'BSDF_PRINCIPLED' for n in mat.node_tree.nodes):
+        if mat and spec.get('colors', {}).get(mat.name):
+            recolor(mat, spec['colors'][mat.name])
+        elif mat and mat.node_tree and not any(n.type == 'BSDF_PRINCIPLED' for n in mat.node_tree.nodes):
             unlit_to_pbr(mat)
         if mat:
             mat.use_backface_culling = False

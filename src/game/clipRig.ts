@@ -1,15 +1,15 @@
 import * as THREE from 'three';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { patchCharacter } from './characters';
-import type { RoninTemplate } from './models';
+import type { CharacterTemplate } from './models';
 import type { RigInstance } from './types';
 
 // ===========================================================================
-// Mocap-driven character: the Rōnin GLB (Mixamo skeleton + clips, see
-// scripts/convert_ronin.py) played straight through THREE.AnimationMixer - no
-// retargeting at runtime, every clip was authored (or retargeted offline) for this exact
-// skeleton. Used by the player and, recoloured on the decimated LOD mesh, by the enemy
-// samurai.
+// Mocap-driven characters: a GLB (Mixamo skeleton + clips, see
+// scripts/convert_characters.py) played straight through THREE.AnimationMixer - no
+// retargeting at runtime, every clip was authored (or retargeted offline) for that exact
+// skeleton. The Rōnin drives the player and, recoloured on its decimated LOD mesh, the
+// enemy samurai; the archer has a model of its own.
 //
 // The mixer itself only blends. ClipController owns all timing: each frame it sets every
 // action's time and weight explicitly and then evaluates the mixer once, so a one-shot's
@@ -29,11 +29,13 @@ const KEEP_ROOT = new Set(['death', 'death2']);
 // from the left palm to the right palm = the hilt, and of the tip's swing direction =
 // where the edge leads). Every weapon file shares one convention (blade +Z, edge +Y,
 // grip at origin), so this one frame fits them all.
-const GRIP_AXIS = new THREE.Vector3(0.7, -0.2, -0.68).normalize();
-const GRIP_EDGE = new THREE.Vector3(-0.884, 0.141, -0.445);
+export interface Grip {
+  axis: THREE.Vector3; // hand-local direction weapon +Z (blade / arrow flight) points
+  edge: THREE.Vector3; // hand-local hint for weapon +Y (cutting edge / bow limbs)
+}
+const SWORD_GRIP: Grip = { axis: new THREE.Vector3(0.7, -0.2, -0.68).normalize(), edge: new THREE.Vector3(-0.884, 0.141, -0.445) };
 // Off hand (throwables, the healing gourd): pointing along the fingers.
-const OFF_AXIS = new THREE.Vector3(0, 1, 0);
-const OFF_EDGE = new THREE.Vector3(0, 0, 1);
+const OFF_GRIP: Grip = { axis: new THREE.Vector3(0, 1, 0), edge: new THREE.Vector3(0, 0, 1) };
 
 function gripQuat(axis: THREE.Vector3, edgeHint: THREE.Vector3) {
   const z = axis.clone().normalize();
@@ -56,7 +58,7 @@ interface Prepared {
   height: number; // bind-pose standing height, model units
 }
 
-const prepared = new WeakMap<RoninTemplate, Prepared>();
+const prepared = new WeakMap<CharacterTemplate, Prepared>();
 
 function sampleVec(track: THREE.KeyframeTrack, t: number, out: THREE.Vector3) {
   const times = track.times;
@@ -74,7 +76,7 @@ function sampleVec(track: THREE.KeyframeTrack, t: number, out: THREE.Vector3) {
 // Root motion clean-up, once per template: hips position keys live in the armature
 // node's space (Blender export: rotated, 1/100 scale), so each key goes to model space,
 // gets fixed there, and comes back.
-function prepare(tpl: RoninTemplate): Prepared {
+function prepare(tpl: CharacterTemplate): Prepared {
   const cached = prepared.get(tpl);
   if (cached) return cached;
   const scene = tpl.scene;
@@ -451,17 +453,24 @@ export class ClipController {
 }
 
 export interface ClipRigOptions {
-  lod?: boolean; // decimated body (enemies)
+  lod?: boolean; // decimated body (enemies); a model that only ships one body uses it either way
   tint?: THREE.Color; // multiplies the armor's base color (enemies)
   rim?: THREE.Color;
   height?: number;
+  grips?: { right?: Grip; left?: Grip };
+  kind?: RigInstance['kind'];
 }
 
-export function createClipRig(tpl: RoninTemplate, opts: ClipRigOptions = {}): RigInstance {
+export function createClipRig(tpl: CharacterTemplate, opts: ClipRigOptions = {}): RigInstance {
   const prep = prepare(tpl);
   const model = cloneSkeleton(tpl.scene) as THREE.Group;
 
-  const keep = opts.lod ? 'RoninLOD' : 'RoninBody';
+  const bodies: THREE.SkinnedMesh[] = [];
+  model.traverse((o) => {
+    if ((o as THREE.SkinnedMesh).isSkinnedMesh) bodies.push(o as THREE.SkinnedMesh);
+  });
+  const wanted = bodies.filter((b) => b.name.endsWith('LOD') === !!opts.lod);
+  const keep = (wanted[0] ?? bodies[0])?.name;
   const drop: THREE.Object3D[] = [];
   const flash = { value: 0 };
   const rim = opts.rim ?? new THREE.Color(1.0, 0.5, 0.3).multiplyScalar(0.22);
@@ -515,8 +524,10 @@ export function createClipRig(tpl: RoninTemplate, opts: ClipRigOptions = {}): Ri
     bone.add(g);
     return g;
   };
-  const hand = attach('Right', GRIP_AXIS, GRIP_EDGE);
-  const handL = attach('Left', OFF_AXIS, OFF_EDGE);
+  const gr = opts.grips?.right ?? SWORD_GRIP;
+  const gl = opts.grips?.left ?? OFF_GRIP;
+  const hand = attach('Right', gr.axis, gr.edge);
+  const handL = attach('Left', gl.axis, gl.edge);
 
   const ctl = new ClipController(model, prep, scale);
   const stub = () => new THREE.Object3D();
@@ -535,7 +546,7 @@ export function createClipRig(tpl: RoninTemplate, opts: ClipRigOptions = {}): Ri
     scarf: stub(),
     mats,
     flash,
-    kind: 'samurai',
+    kind: opts.kind ?? 'samurai',
     clip: ctl,
     model,
     dispose: () => {

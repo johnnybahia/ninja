@@ -1,4 +1,4 @@
-// Compresses the *.raw.glb files written by convert_ronin.py / convert_weapons.py
+// Compresses the *.raw.glb files written by convert_characters.py / convert_weapons.py
 // (assets_src/build/) into the GLBs the game loads (public/models/).
 //
 //   npm i --no-save @gltf-transform/core@4 @gltf-transform/extensions@4 @gltf-transform/functions@4 meshoptimizer@0.22
