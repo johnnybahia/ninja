@@ -424,7 +424,11 @@ export class Afterimages {
   private ghosts: { root: THREE.Object3D; bones: Map<string, THREE.Object3D>; mat: THREE.MeshBasicMaterial; t: number; dur: number }[] = [];
   private next = 0;
 
-  constructor(scene: THREE.Scene, make: () => THREE.Object3D, count = 4) {
+  constructor(
+    private scene: THREE.Scene,
+    make: () => THREE.Object3D,
+    count = 4
+  ) {
     for (let i = 0; i < count; i++) {
       const root = make();
       const mat = new THREE.MeshBasicMaterial({ color: 0x2a2260, transparent: true, opacity: 0, depthWrite: false, fog: true });
@@ -482,5 +486,13 @@ export class Afterimages {
 
   clear() {
     for (const g of this.ghosts) g.root.visible = false;
+  }
+
+  dispose() {
+    for (const g of this.ghosts) {
+      this.scene.remove(g.root);
+      g.mat.dispose();
+    }
+    this.ghosts = [];
   }
 }

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { cloneWeaponModel } from './models';
 
 const std = (color: number, roughness = 0.5, metalness = 0.0) =>
   new THREE.MeshStandardMaterial({ color, roughness, metalness });
@@ -293,7 +294,13 @@ function mergeByMaterial(g: THREE.Group) {
   return out;
 }
 
+// Imported models stand in for these procedural ids; their fallback when not loaded
+const PROCEDURAL_FALLBACK: Record<string, string> = { ekatana: 'katana', greatsword: 'kanabo' };
+
 export function makeWeapon(id: string): THREE.Group {
+  const imported = cloneWeaponModel(id);
+  if (imported) return imported;
+  id = PROCEDURAL_FALLBACK[id] ?? id;
   let parts = weaponCache.get(id);
   if (!parts) {
     parts = mergeByMaterial(buildWeaponGroup(id));

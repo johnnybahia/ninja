@@ -1,6 +1,6 @@
 # Kage — jogo ninja 3D
 
-Jogo de ação em terceira pessoa no navegador, feito com React, Vite e Three.js. Cenário, personagens procedurais, texturas e efeitos são gerados por código. Um segundo personagem jogável (O Rōnin) usa um modelo 3D externo gerado por IA (`public/models/samurai.glb`), animado pelo mesmo sistema procedural via um adaptador de retargeting (`src/game/externalRig.ts`). Controles sensíveis ao toque para celular e câmera automática.
+Jogo de ação em terceira pessoa no navegador, feito com React, Vite e Three.js. Cenário, texturas e efeitos são gerados por código. O personagem jogável (O Rōnin) é um modelo rigado no Mixamo com animações de captura de movimento (`public/models/ronin.glb`), com combate em estilo Souls: cada golpe causa dano no frame de impacto do próprio clipe, combos só encadeiam dentro da janela de cada golpe e a esquiva só corta a recuperação. Os samurais inimigos usam o mesmo modelo recolorido (versão leve) com os golpes de espada próprios; armas do jogador, do samurai inimigo e do Oni são modelos 3D (`public/models/weapons/`). Controles sensíveis ao toque para celular e câmera automática.
 
 ## Rodando localmente
 
@@ -26,8 +26,24 @@ O repositório já traz `netlify.toml` (comando de build, pasta publicada, vers�
 
 ## Estrutura
 
-- `src/game/` — motor do jogo (Three.js puro): cenário (`world.ts`, `garden.ts`), personagens (`characters.ts`, `animation.ts`, `rigs.ts`), personagem importado (`externalRig.ts`), combate e loop principal (`engine.ts`), pós-processamento (`postfx.ts`), texturas com relevo (`surfaces.ts`).
-- `public/models/` — modelos 3D externos já rigados (GLB), servidos como estão.
+- `src/game/` — motor do jogo (Three.js puro): cenário (`world.ts`, `garden.ts`), personagens procedurais (`characters.ts`, `animation.ts`, `rigs.ts`), personagem com mocap (`clipRig.ts`), tabela de golpes com frames de impacto e janelas de combo (`moves.ts`), carregamento dos modelos (`models.ts`), combate e loop principal (`engine.ts`), pós-processamento (`postfx.ts`), texturas com relevo (`surfaces.ts`).
+- `public/models/` — modelos que o jogo carrega: `ronin.glb` (personagem + malha leve dos inimigos + todos os clipes) e `weapons/*.glb` (armas normalizadas: lâmina em +Z, fio em +Y, empunhadura na origem).
+- `assets_src/` — arquivos originais enviados (FBX do Mixamo, pacotes de animação, GLBs das armas). Não vão para o deploy.
+- `scripts/convert_ronin.py`, `scripts/convert_weapons.py`, `scripts/optimize_models.mjs` — pipeline que gera `public/models/` a partir de `assets_src/` (veja abaixo).
 - `src/App.tsx` — UI (menu, HUD, configurações) em React.
 - `scripts/bake_textures.py` — gera as texturas procedurais em `public/tex/` (opcional, o resultado já fica versionado no repositório).
 - `scripts/fetch_cc0_textures.py` — alternativa que baixa texturas CC0 do Poly Haven no lugar das procedurais.
+
+## Pipeline de modelos 3D
+
+Os arquivos em `public/models/` são gerados a partir de `assets_src/` — só é preciso rodar de novo ao trocar um modelo ou animação.
+
+```bash
+pip install bpy==5.0.1                 # Blender como módulo Python (Python 3.11)
+python scripts/convert_ronin.py        # personagem + clipes (e retarget dos clipes de outros esqueletos)
+python scripts/convert_weapons.py      # normaliza escala/eixo/empunhadura das armas
+npm i --no-save @gltf-transform/core@4 @gltf-transform/extensions@4 @gltf-transform/functions@4 meshoptimizer@0.22
+node scripts/optimize_models.mjs       # compressão meshopt -> public/models/
+```
+
+Para acrescentar um clipe do Mixamo, adicione-o em `CLIPS` (mesmo esqueleto do personagem) ou em `RETARGET` (outro esqueleto com nomes Mixamo) no `convert_ronin.py`, e defina o uso dele em `moves.ts`.
