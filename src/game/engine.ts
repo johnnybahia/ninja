@@ -1862,6 +1862,7 @@ export class GameEngine {
       m.clip,
       {
         speed: (m.speed ?? 1) * TUNE.attackSpeed,
+        from: m.from,
         rootMotion: !!m.root,
         fadeIn: chaining ? 0.14 : 0.1,
         chain: m.chain,
@@ -1983,7 +1984,8 @@ export class GameEngine {
     if (!m) return;
     this.actQueued = false;
     this.fovKick = Math.min(this.fovKick, -4);
-    const opts = { speed: (m.speed ?? 1) * TUNE.attackSpeed, rootMotion: !!m.root, chain: m.chain, cancel: m.cancel, end: m.end, turnUntil: m.hit[0] ?? m.release ?? 0 };
+    const speed = (m.speed ?? 1) * TUNE.attackSpeed;
+    const opts = { speed, from: m.from, rootMotion: !!m.root, chain: m.chain, cancel: m.cancel, end: m.end, turnUntil: m.hit[0] ?? m.release ?? 0 };
     if (w.id === 'karate') {
       this.playRush(0);
       return;
@@ -2022,7 +2024,7 @@ export class GameEngine {
     this.player.atkCd += 0.05;
     if (w.id === 'bo') {
       // Tornado: the spin clip whirls while updatePlayer ticks the AoE
-      this.player.tornado = (m.end - 0.1) / (m.speed ?? 1);
+      this.player.tornado = (m.end - (m.from ?? 0) - 0.1) / speed;
       this.player.torTick = 0;
       sfx.dash();
       return;
@@ -2061,7 +2063,7 @@ export class GameEngine {
             sp: true,
             pos: new THREE.Vector3(this.tmpH.x, Math.max(0.6, this.tmpH.y - 0.3), this.tmpH.z),
             vel: new THREE.Vector3(fx * 22, 0, fz * 22),
-            dmg: 55,
+            dmg: 41,
             pierce: true,
             life: 0.8,
             r: 1.5,
@@ -2079,7 +2081,7 @@ export class GameEngine {
   // previous one's chain window
   private playRush(i: number) {
     const m = RUSH[i];
-    const act = this.startAct('special', m.clip, { speed: m.speed ?? 1, chain: m.chain, cancel: m.cancel, end: m.end, turnUntil: m.hit[0] }, m);
+    const act = this.startAct('special', m.clip, { speed: (m.speed ?? 1) * TUNE.attackSpeed, from: m.from, chain: m.chain, cancel: m.cancel, end: m.end, turnUntil: m.hit[0] }, m);
     if (!act) return;
     this.player.atkCd += 0.05;
     act.events.push({
