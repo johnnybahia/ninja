@@ -520,16 +520,7 @@ export function animateCharacter(r: RigInstance, a: AnimInput) {
   const kind = r.kind || 'ninja';
   neutral();
   const m = a.air ? 0 : a.moveAmt;
-  // Samurai's legs are driven by a Mixamo mixer running its own clock, decoupled from
-  // `a.phase`. hips/spine/chest stay forced-procedural (ALWAYS_PROCEDURAL in
-  // externalRig.ts) for mesh-safety, so evaluating them on `a.phase` would twist them
-  // out of sync with where the mixer-driven legs actually are in the stride - the
-  // torso torsion reported while walking. r.externalPhase (set in externalRig.ts's
-  // postAnimate, one frame behind) reads back the mixer's own gait position instead,
-  // so the procedural torso stays synced with the legs it can't directly drive.
-  const gaitPhase = kind === 'samurai' && r.externalPhase !== undefined ? r.externalPhase : a.phase;
-  const torsoTwist = kind === 'samurai' ? 0 : 1;
-  locomotion(m, gaitPhase, a.t, torsoTwist);
+  locomotion(m, a.phase, a.t);
   const guardKind = kind === 'ninja' ? a.weapon || 'katana' : kind;
   // the two-handed "samurai" stance is a much bigger swing away from a natural running
   // arm-swing than the other guard poses (a static held grip, not a loose one-handed
@@ -660,22 +651,6 @@ export function animateCharacter(r: RigInstance, a: AnimInput) {
   }
 
   if (r.cloth) for (const rb of r.cloth) rb.update(a.dt, a.t);
-  // How much of the pose above (guard/attack/hit/dash/...) should override a rig's own
-  // imported locomotion clip, for rigs that have one (see postAnimate's doc in types.ts) -
-  // additive so overlapping states (e.g. hit while attacking) still read as fully
-  // procedural, clamped since it's only ever used as a blend weight.
-  const combatWeight = clamp01(
-    (attacking ? 1 : 0) +
-    (a.windup && a.windup > 0 ? smooth(a.windup) : 0) +
-    (a.guard ? 1 : 0) +
-    (a.dash ? 1 : 0) +
-    (a.air ? 1 : 0) +
-    (a.hit && a.hit > 0 ? a.hit : 0) +
-    (a.broken ? 1 : 0) +
-    (a.stagger ? 1 : 0) +
-    (a.landJuice && a.landJuice > 0 ? a.landJuice : 0)
-  );
-  r.postAnimate?.(combatWeight, m, a.dt);
 }
 
 // Fall backward with buckling knees and flung arms; the engine sinks the root.

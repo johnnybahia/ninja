@@ -28,16 +28,15 @@ import { Afterimages, BladeTrail, DustPool, ImpactPool, InkDecals, softDotTextur
 import { PostFX, NINJA_LOOK, Quality, QualitySetting, QualityProfile, qualityProfile, detectQuality } from './postfx';
 import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
-import { loadExternalRig } from './externalRig';
+import { createClipRig, OneShot, PlayOptions } from './clipRig';
+import { loadRonin, loadWeapons, preloadModels, roninIfReady, RoninTemplate } from './models';
+import { COMBOS, SPECIAL_MOVES, RUSH, ENEMY_STRIKES, ClipMove } from './moves';
 import { animateCharacter, animateDeath } from './animation';
 import { TUNE } from './tunables';
 
-const SAMURAI_MODEL_URL = '/models/samurai.glb';
-const SAMURAI_LOCOMOTION_CLIPS = {
-  idle: '/models/mixamo/sword_idle.fbx',
-  walk: '/models/mixamo/sword_walk.fbx',
-  run: '/models/mixamo/sword_run.fbx'
-};
+// Enemy samurai reuse the Rōnin's mesh, armour darkened toward blued steel
+const ENEMY_TINT = new THREE.Color(0.42, 0.46, 0.62);
+const ENEMY_RIM = new THREE.Color(0.35, 0.45, 1.0).multiplyScalar(0.18);
 
 // Scroll drop chance per kill for each loaded weapon (2 weapons -> 7.5% per kill).
 const SCROLL_RATE_PER_WEAPON = 0.0375;
@@ -72,7 +71,7 @@ function prdConstant(p: number): number {
 
 // Blade span (local Z on the weapon mesh) swept by the melee trail
 const TRAIL_SPEC: Record<string, { base: number; tip: number; tint: THREE.Color }> = {
-  katana: { base: 0.25, tip: 1.45, tint: new THREE.Color(1.25, 1.4, 1.75) },
+  katana: { base: 0.25, tip: 1.33, tint: new THREE.Color(1.25, 1.4, 1.75) },
   bo: { base: -0.95, tip: 1.55, tint: new THREE.Color(1.7, 1.25, 0.6) },
   kama: { base: 0.3, tip: 0.62, tint: new THREE.Color(1.3, 1.55, 1.35) }
 };
@@ -147,6 +146,19 @@ export interface GameEngineCallbacks {
   onCinematic?: (active: boolean) => void;
   onDeathblowReady?: (ready: boolean) => void;
   onHealsChange?: (heals: number) => void;
+}
+
+// A committed move or reaction on the mocap rig. Times are clip seconds (see moves.ts).
+interface PlayerAct {
+  kind: 'attack' | 'special' | 'hurt' | 'deflect' | 'block' | 'stagger' | 'heal' | 'deathblow' | 'draw' | 'death';
+  shot: OneShot;
+  move?: ClipMove;
+  events: { t: number; fn: () => void }[];
+  chainAt: number;
+  cancelAt: number;
+  endAt: number;
+  turnUntil: number;
+  onChain?: () => void;
 }
 
 export class GameEngine {
@@ -358,6 +370,13 @@ export class GameEngine {
   private desatFx = 0;
   // deathblow cinematic in progress
   private cine: { t: number; e: EnemyInstance; struck: boolean } | null = null;
+  // Mocap rig only: the move/reaction currently playing (see startAct), a buffered
+  // attack press waiting for its combo window, and the death animation's countdown to
+  // the game-over screen
+  private act: PlayerAct | null = null;
+  private actQueued = false;
+  private deadT = -1;
+  private rootTmp = new THREE.Vector2();
   private gourd: THREE.Group | null = null;
 
   constructor(canvas: HTMLCanvasElement, minimapCanvas: HTMLCanvasElement, callbacks: GameEngineCallbacks) {
@@ -371,6 +390,8 @@ export class GameEngine {
     this.initPlayer();
     this.initSlashEffects();
     this.setQuality(this.qualitySetting);
+    // start fetching the imported models while the menu is up
+    void preloadModels();
 
     this.isRunning = true;
     this.clock.start();
@@ -479,11 +500,7 @@ export class GameEngine {
     this.impacts = new ImpactPool(this.scene);
     this.decals = new InkDecals(this.scene);
     this.dust = new DustPool(this.scene);
-    this.ghosts = new Afterimages(this.scene, () => {
-      const r = buildCharacter('ninja');
-      r.dispose?.();
-      return r.root;
-    });
+    this.rebuildGhosts(null);
 
     this.slashGeos = {
       katana: new THREE.RingGeometry(1.1, 2.9, 24, 1, -Math.PI / 2 - 1.05, 2.1).rotateX(-Math.PI / 2),
@@ -515,9 +532,9 @@ export class GameEngine {
   }
 
   // Building the ninja is synchronous (procedural geometry); loading the samurai means
-  // awaiting a GLB fetch+parse. Either way the old rig stays on screen, live and
-  // rendering, until the new one is fully ready - the swap below is the only place
-  // this.player.rig changes, so the render loop never sees it null or half-built.
+  // awaiting its GLB (plus the weapon models). Either way the old rig stays on screen,
+  // live and rendering, until the new one is fully ready - the swap below is the only
+  // place this.player.rig changes, so the render loop never sees it null or half-built.
   public async setCharacter(id: CharacterId): Promise<void> {
     if (this.state === 'play') return;
     const reqId = ++this.charReqId;
@@ -525,10 +542,12 @@ export class GameEngine {
     let rig: RigInstance;
     let resolvedId = id;
     try {
-      rig =
-        id === 'samurai'
-          ? await loadExternalRig({ url: SAMURAI_MODEL_URL, kind: 'samurai', locomotionClips: SAMURAI_LOCOMOTION_CLIPS })
-          : buildCharacter('ninja');
+      if (id === 'samurai') {
+        const [tpl] = await Promise.all([loadRonin(), loadWeapons()]);
+        rig = createClipRig(tpl);
+      } else {
+        rig = buildCharacter('ninja');
+      }
     } catch (e) {
       console.error('setCharacter: failed to load', id, e);
       resolvedId = 'kage';
@@ -537,27 +556,52 @@ export class GameEngine {
 
     // A newer selection (or a Play press) already landed while this one was loading -
     // its result is stale, drop it instead of clobbering whatever is live now.
-    if (reqId !== this.charReqId) return;
+    if (reqId !== this.charReqId) {
+      rig.dispose?.();
+      return;
+    }
     this.charId = resolvedId;
 
     this.scene.remove(this.player.rig.root);
     this.player.rig.dispose?.();
     this.player.rig = rig;
     this.scene.add(this.player.rig.root);
+    this.act = null;
+    this.equipWeapons();
+    this.rebuildGhosts(rig.clip ? roninIfReady() : null);
+  }
 
+  // One mesh per weapon slot, only the active one visible. On the mocap rig the
+  // throwables sit in the off hand - the spell-cast clip used for throwing snaps the left
+  // arm forward.
+  private equipWeapons() {
+    for (const m of this.player.weaponMeshes) m.removeFromParent();
     this.weapons = WEAPONS_KAGE;
     this.player.weaponMeshes = [];
+    const rig = this.player.rig;
     this.weapons.forEach((w) => {
       const m = makeWeapon(w.id);
       m.visible = false;
-      this.player.rig.hand.add(m);
+      const offHand = !!rig.clip && (w.kind === 'proj' || w.kind === 'bomb');
+      (offHand ? rig.handL : rig.hand).add(m);
       this.player.weaponMeshes.push(m);
     });
     this.attachGourd();
     this.setWeapon(0);
   }
 
+  // Dash afterimages copy the player's pose bone-by-bone, so they need the same skeleton
+  private rebuildGhosts(tpl: RoninTemplate | null) {
+    this.ghosts?.dispose();
+    this.ghosts = new Afterimages(this.scene, () => {
+      const r = tpl ? createClipRig(tpl, { lod: true }) : buildCharacter('ninja');
+      r.dispose?.();
+      return r.root;
+    });
+  }
+
   private attachGourd() {
+    this.gourd?.removeFromParent();
     const g = new THREE.Group();
     const body = new THREE.MeshStandardMaterial({ color: 0xc89a4a, roughness: 0.55 });
     const cord = new THREE.MeshStandardMaterial({ color: 0x8a2a22, roughness: 0.8 });
@@ -578,11 +622,16 @@ export class GameEngine {
 
   public setWeapon(idx: number) {
     if (idx < 0 || idx >= this.weapons.length) return;
+    const changed = idx !== this.activeWeaponIdx;
     this.activeWeaponIdx = idx;
     this.player.weaponMeshes.forEach((m, k) => {
       m.visible = k === idx;
     });
     this.callbacks.onWeaponChange(idx, this.weapons[idx]);
+    // standing still, a swap reads as drawing the new weapon (any input cancels it)
+    if (changed && this.state === 'play' && this.player.rig.clip && !this.act && this.player.grounded && this.player.moveAmt < 0.25) {
+      this.startAct('draw', 'draw', { from: 0.25, cancel: 0, end: 0.83 });
+    }
   }
 
   public recenterCamera() {
@@ -661,6 +710,10 @@ export class GameEngine {
     this.callbacks.onDeathblowReady?.(false);
     this.cine = null;
     this.callbacks.onCinematic?.(false);
+    this.act = null;
+    this.actQueued = false;
+    this.deadT = -1;
+    this.player.rig.clip?.stop(0);
     this.attackQueueT = 0;
     this.input.attackHeld = false;
     this.input.guardHeld = false;
@@ -733,8 +786,11 @@ export class GameEngine {
     let h = 2.5;
 
     if (type === 'samurai') {
-      rig = buildCharacter('samurai');
-      rig.hand.add(makeWeapon('katana'));
+      // mocap samurai (the Rōnin recoloured, decimated body) once its model is in;
+      // the procedural samurai otherwise
+      const tpl = roninIfReady();
+      rig = tpl ? createClipRig(tpl, { lod: true, tint: ENEMY_TINT, rim: ENEMY_RIM }) : buildCharacter('samurai');
+      rig.hand.add(makeWeapon('ekatana'));
       hp = 60 * hpMul;
       speed = 3.7;
     } else if (type === 'archer') {
@@ -744,7 +800,7 @@ export class GameEngine {
       speed = 3.3;
     } else {
       rig = buildCharacter('oni', 2.1);
-      rig.hand.add(makeWeapon('kanabo'));
+      rig.hand.add(makeWeapon('greatsword'));
       hp = 480 * hpMul;
       speed = 3.1;
       r = 1.1;
@@ -1311,9 +1367,10 @@ export class GameEngine {
 
   public jump() {
     if (this.state !== 'play' || this.player.jumps >= 2) return;
-    if (this.player.staggerT > 0 || this.cine) return;
+    if (this.player.staggerT > 0 || this.cine || !this.freeToCancel()) return;
     this.player.vy = this.player.jumps === 0 ? 10.5 : 9.5;
     this.player.jumps++;
+    this.cancelAct(0.1);
     this.player.grounded = false;
     this.emitParticles(this.player.pos.x, this.player.pos.y + 0.2, this.player.pos.z, 10, 0xbfb3d8, 3, 1, 4, 0.4);
     sfx.jump();
@@ -1321,9 +1378,10 @@ export class GameEngine {
 
   public dash() {
     if (this.state !== 'play' || this.player.dash > 0 || this.player.st < 28) return;
-    if (this.player.staggerT > 0 || this.cine) return;
+    if (this.player.staggerT > 0 || this.cine || !this.freeToCancel()) return;
     this.player.st -= 28;
     this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
+    this.cancelAct(0.08);
     this.player.dash = 0.2;
     this.player.inv = Math.max(this.player.inv, 0.3);
     this.player.dashInv = true;
@@ -1353,6 +1411,10 @@ export class GameEngine {
   }
 
   public tryAttack() {
+    if (this.player.rig.clip) {
+      this.soulsAttack();
+      return;
+    }
     if (this.player.atkCd > 0 || this.state !== 'play') return;
     if (this.player.staggerT > 0 || this.cine || this.input.guardHeld || this.player.healT > 0) return;
     const w = this.weapons[this.activeWeaponIdx];
@@ -1470,6 +1532,10 @@ export class GameEngine {
   private trySpecial(w: WeaponDef) {
     const S = SPECIALS[w.id];
     if (!S) return;
+    if (this.player.rig.clip) {
+      this.soulsSpecial(w);
+      return;
+    }
     this.player.atkCd = S.cd;
     this.fovKick = Math.min(this.fovKick, -4);
     const fx = Math.sin(this.player.yaw);
@@ -1582,6 +1648,428 @@ export class GameEngine {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Mocap rig: Souls-style moves (see moves.ts). A move commits: damage lands on the
+  // clip's own hit frame, the next combo step only starts inside its chain window, and a
+  // dodge/guard can only cut into the recovery (after `cancel`).
+  // ---------------------------------------------------------------------------
+  private startAct(
+    kind: PlayerAct['kind'],
+    clip: string,
+    o: PlayOptions & { chain?: number; cancel?: number; end?: number; turnUntil?: number } = {},
+    move?: ClipMove
+  ): PlayerAct | null {
+    const ctl = this.player.rig.clip;
+    if (!ctl) return null;
+    const shot = ctl.play(clip, { fadeIn: 0.1, fadeOut: 0.3, ...o });
+    if (!shot) return null;
+    const a: PlayerAct = {
+      kind,
+      shot,
+      move,
+      events: [],
+      chainAt: o.chain ?? 99,
+      cancelAt: o.cancel ?? 0,
+      endAt: o.end ?? shot.o.to,
+      turnUntil: o.turnUntil ?? 0
+    };
+    this.act = a;
+    return a;
+  }
+
+  // Steering: free when idle, only through a move's wind-up, locked once it lands
+  private clipTurnSpeed() {
+    const a = this.act;
+    if (!a || a.kind === 'draw') return TUNE.turnSpeedIdle;
+    if ((a.kind === 'attack' || a.kind === 'special') && a.shot.t < a.turnUntil) return TUNE.turnSpeedAttacking;
+    return 0;
+  }
+
+  /** Nothing committed is playing (or it's past its cancel point) - dodge/jump/guard OK. */
+  private freeToCancel() {
+    if (!this.player.rig.clip) return true;
+    if (this.player.hp <= 0) return false;
+    const a = this.act;
+    return !a || a.shot.t >= a.cancelAt;
+  }
+
+  private cancelAct(fade = 0.12) {
+    if (!this.act) return;
+    this.act = null;
+    this.actQueued = false;
+    this.player.rig.clip?.stop(fade);
+  }
+
+  /** Guard is up (mocap rig: only when not committed to something else). */
+  private guarding() {
+    if (!this.input.guardHeld || this.player.staggerT > 0) return false;
+    const a = this.act;
+    return !a || a.kind === 'deflect' || a.kind === 'block' || a.kind === 'draw';
+  }
+
+  private soulsAttack() {
+    if (this.state !== 'play' || this.player.hp <= 0) return;
+    if (this.player.staggerT > 0 || this.cine || this.player.healT > 0) return;
+    if (this.player.rush || this.player.tornado > 0) return;
+    const a = this.act;
+    if (a) {
+      const counter = (a.kind === 'deflect' || a.kind === 'block' || a.kind === 'hurt') && a.shot.t >= a.cancelAt;
+      const chain = a.kind === 'attack' && a.shot.t >= a.chainAt;
+      if (a.kind !== 'draw' && !counter && !chain) {
+        // too early: remember the press for the combo window (see stepPlayerAct)
+        if (a.kind === 'attack' || a.kind === 'deflect' || a.kind === 'block') this.actQueued = true;
+        this.player.atkCd += 0.001; // tells pressAttack() the press was taken
+        return;
+      }
+    }
+    if (this.input.guardHeld && !a) return;
+
+    const db = this.findDeathblowTarget();
+    if (db) {
+      this.performDeathblow(db);
+      return;
+    }
+    const w = this.weapons[this.activeWeaponIdx];
+    if (this.player.special[this.activeWeaponIdx] > 0) {
+      this.trySpecial(w);
+      return;
+    }
+    const combo = COMBOS[w.id];
+    if (!combo) return;
+    const chaining = !!a && a.kind === 'attack' && this.player.comboW === this.activeWeaponIdx;
+    const step = chaining ? (this.player.combo + 1) % combo.length : 0;
+    const m = combo[step];
+    if (w.stamina && this.player.st < w.stamina) return;
+    if (m.stamina && this.player.st <= 0) return;
+    this.player.st = Math.max(0, this.player.st - m.stamina - (w.stamina || 0));
+    this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
+    this.player.combo = step;
+    this.player.comboW = this.activeWeaponIdx;
+    this.player.comboT = 0;
+    this.ptMult = w.pointMult || 1;
+    this.actQueued = false;
+    if (step === 0) this.autoFaceNearestEnemyForAttack(Math.max(2.5, m.range));
+
+    const act = this.startAct(
+      'attack',
+      m.clip,
+      {
+        speed: (m.speed ?? 1) * TUNE.attackSpeed,
+        rootMotion: !!m.root,
+        fadeIn: chaining ? 0.14 : 0.1,
+        chain: m.chain,
+        cancel: m.cancel,
+        end: m.end,
+        turnUntil: m.hit[0] ?? m.release ?? 0
+      },
+      m
+    );
+    if (!act) return;
+    this.player.atkCd = Math.max(0, this.player.atkCd) + 0.05;
+    if (w.kind === 'karate') {
+      const lunge = KARATE[step]?.lunge ?? 0.3;
+      this.player.pos.x += Math.sin(this.player.yaw) * lunge;
+      this.player.pos.z += Math.cos(this.player.yaw) * lunge;
+    }
+    for (const t of m.hit) act.events.push({ t, fn: () => this.soulsStrike(w, m, step) });
+    if (m.release !== undefined) act.events.push({ t: m.release, fn: () => this.throwWeapon(w, false) });
+  }
+
+  // a move's hit frame
+  private soulsStrike(w: WeaponDef, m: ClipMove, step: number) {
+    if (w.kind === 'chain') {
+      this.meleeHit(m.range, m.arc, m.dmg, m.kb, true);
+      this.chainT = 0;
+      sfx.swing();
+      return;
+    }
+    this.meleeHit(m.range, m.arc, m.dmg, m.kb, !!m.heavy);
+    if (w.kind === 'karate') {
+      if (m.clip === 'kick2') {
+        this.slash.geometry = this.slashGeos.kick;
+        this.slash.rotation.set(0, this.player.yaw, 0);
+        this.slashT = 0;
+        this.slashDur = 0.22;
+      }
+    } else {
+      this.slash.geometry = this.slashGeos[w.id === 'bo' ? 'bo' : 'katana'];
+      this.slash.rotation.set(0, this.player.yaw, 0);
+      this.slashT = 0;
+      this.slashDur = w.id === 'bo' ? 0.3 : 0.16;
+    }
+    m.heavy || step === 2 ? sfx.heavy() : sfx.swing();
+  }
+
+  // Throwables leave the off hand (normal throw or the weapon's special volley)
+  private throwWeapon(w: WeaponDef, special: boolean) {
+    this.player.rig.root.updateMatrixWorld(true);
+    (this.player.rig.clip ? this.player.rig.handL : this.player.rig.hand).getWorldPosition(this.tmpH);
+    const h = this.tmpH;
+    const fx = Math.sin(this.player.yaw);
+    const fz = Math.cos(this.player.yaw);
+    if (w.kind === 'proj' && !special) {
+      const n = w.count || 1;
+      const dmg = COMBOS[w.id]?.[0]?.dmg ?? w.dmg[0];
+      for (let i = 0; i < n; i++) {
+        const a = this.player.yaw + (i - (n - 1) / 2) * (w.spread || 0);
+        this.spawnProj({
+          type: w.id,
+          friendly: true,
+          ptMult: w.pointMult || 1,
+          pos: new THREE.Vector3(h.x, h.y, h.z),
+          vel: new THREE.Vector3(Math.sin(a) * (w.speed || 30), 0, Math.cos(a) * (w.speed || 30)),
+          dmg,
+          pierce: !!w.pierce,
+          life: w.life || 1.2
+        });
+      }
+    } else if (w.kind === 'bomb' && !special) {
+      this.spawnProj({
+        type: 'bomb',
+        friendly: true,
+        pos: new THREE.Vector3(h.x, h.y, h.z),
+        vel: new THREE.Vector3(fx * 14, 7.5, fz * 14),
+        grav: 16,
+        dmg: COMBOS.bomb[0].dmg,
+        life: 3,
+        bomb: true
+      });
+    } else if (w.id === 'shuriken') {
+      for (let i = 0; i < 12; i++) {
+        const a = this.player.yaw + (i / 12) * TAU;
+        this.spawnProj({
+          type: 'shuriken',
+          friendly: true,
+          sp: true,
+          homing: true,
+          speed: 18,
+          pos: new THREE.Vector3(h.x, h.y, h.z),
+          vel: new THREE.Vector3(Math.sin(a) * 18, 0, Math.cos(a) * 18),
+          dmg: SPECIAL_MOVES.shuriken.dmg,
+          life: 2.2
+        });
+      }
+    } else if (w.id === 'bomb') {
+      const n = 5;
+      for (let i = 0; i < n; i++) {
+        const a = this.player.yaw + (i - (n - 1) / 2) * 0.3 + rand(-0.05, 0.05);
+        this.spawnProj({
+          type: 'bomb',
+          friendly: true,
+          sp: true,
+          bomb: true,
+          pos: new THREE.Vector3(h.x, h.y + 0.2, h.z),
+          vel: new THREE.Vector3(Math.sin(a) * 13, 7 + rand(-1, 2), Math.cos(a) * 13),
+          grav: 16,
+          dmg: SPECIAL_MOVES.bomb.dmg,
+          aoeR: 3.2,
+          kb: 8,
+          life: 2.5
+        });
+      }
+    }
+    sfx.throw();
+  }
+
+  private soulsSpecial(w: WeaponDef) {
+    const m = SPECIAL_MOVES[w.id];
+    if (!m) return;
+    this.actQueued = false;
+    this.fovKick = Math.min(this.fovKick, -4);
+    const opts = { speed: (m.speed ?? 1) * TUNE.attackSpeed, rootMotion: !!m.root, chain: m.chain, cancel: m.cancel, end: m.end, turnUntil: m.hit[0] ?? m.release ?? 0 };
+    if (w.id === 'karate') {
+      this.playRush(0);
+      return;
+    }
+    if (w.id === 'kunai') {
+      // Relâmpago: blink to the target, then cut
+      const tg = this.findTarget(14);
+      if (!tg) return;
+      const dx = tg.pos.x - this.player.pos.x;
+      const dz = tg.pos.z - this.player.pos.z;
+      const d = Math.hypot(dx, dz) || 0.001;
+      this.player.pos.x = tg.pos.x - (dx / d) * (tg.r + 1.1);
+      this.player.pos.z = tg.pos.z - (dz / d) * (tg.r + 1.1);
+      this.player.yaw = Math.atan2(dx, dz);
+      this.ghosts.spawn(this.player.rig.root, GHOST_DASH);
+      sfx.dash();
+      const act = this.startAct('special', m.clip, opts, m);
+      act?.events.push({
+        t: m.hit[0],
+        fn: () => {
+          if (tg.dead) return;
+          const ex = tg.pos.x - this.player.pos.x;
+          const ez = tg.pos.z - this.player.pos.z;
+          const ed = Math.hypot(ex, ez) || 0.001;
+          this.spHit = true;
+          this.hitEnemy(tg, m.dmg, ex / ed, ez / ed, m.kb, true);
+          this.spHit = false;
+          sfx.heavy();
+        }
+      });
+      this.player.atkCd += 0.05;
+      return;
+    }
+    const act = this.startAct('special', m.clip, opts, m);
+    if (!act) return;
+    this.player.atkCd += 0.05;
+    if (w.id === 'bo') {
+      // Tornado: the spin clip whirls while updatePlayer ticks the AoE
+      this.player.tornado = (m.end - 0.1) / (m.speed ?? 1);
+      this.player.torTick = 0;
+      sfx.dash();
+      return;
+    }
+    if (m.release !== undefined) {
+      act.events.push({ t: m.release, fn: () => this.throwWeapon(w, true) });
+      return;
+    }
+    act.events.push({
+      t: m.hit[0],
+      fn: () => {
+        this.spHit = true;
+        if (w.id === 'kama') {
+          this.chainSpin = 0.45;
+          for (const e of this.enemies) {
+            if (e.dead) continue;
+            const dx = e.pos.x - this.player.pos.x;
+            const dz = e.pos.z - this.player.pos.z;
+            const d = Math.hypot(dx, dz) || 0.001;
+            if (d < m.range + e.r) this.hitEnemy(e, m.dmg, -dx / d, -dz / d, m.kb, true);
+          }
+        } else {
+          // katana: Corte do Vento - the cut plus a travelling wave
+          this.meleeHit(m.range, m.arc, m.dmg, m.kb, true);
+          this.slash.geometry = this.slashGeos.katana;
+          this.slash.rotation.set(0, this.player.yaw, 0);
+          this.slashT = 0;
+          this.slashDur = 0.2;
+          this.player.rig.root.updateMatrixWorld(true);
+          this.player.rig.hand.getWorldPosition(this.tmpH);
+          const fx = Math.sin(this.player.yaw);
+          const fz = Math.cos(this.player.yaw);
+          this.spawnProj({
+            type: 'wave',
+            friendly: true,
+            sp: true,
+            pos: new THREE.Vector3(this.tmpH.x, Math.max(0.6, this.tmpH.y - 0.3), this.tmpH.z),
+            vel: new THREE.Vector3(fx * 22, 0, fz * 22),
+            dmg: 55,
+            pierce: true,
+            life: 0.8,
+            r: 1.5,
+            kb: 6,
+            noSolid: true
+          });
+        }
+        this.spHit = false;
+        sfx.heavy();
+      }
+    });
+  }
+
+  // Punho do Dragão: a flurry of jabs into a spinning kick, each step starting in the
+  // previous one's chain window
+  private playRush(i: number) {
+    const m = RUSH[i];
+    const act = this.startAct('special', m.clip, { speed: m.speed ?? 1, chain: m.chain, cancel: m.cancel, end: m.end, turnUntil: m.hit[0] }, m);
+    if (!act) return;
+    this.player.atkCd += 0.05;
+    act.events.push({
+      t: m.hit[0],
+      fn: () => {
+        const tg = this.findTarget(3.2);
+        if (tg) {
+          const dx = tg.pos.x - this.player.pos.x;
+          const dz = tg.pos.z - this.player.pos.z;
+          const d = Math.hypot(dx, dz) || 0.001;
+          this.player.yaw = Math.atan2(dx, dz);
+          this.hitEnemy(tg, m.dmg, dx / d, dz / d, m.kb, !!m.heavy);
+        }
+        m.heavy ? sfx.heavy() : sfx.swing();
+      }
+    });
+    if (i + 1 < RUSH.length) act.onChain = () => this.playRush(i + 1);
+  }
+
+  // Runs every frame on the mocap rig: fires due hit frames, starts a buffered combo
+  // step inside its window, and releases the character when the move ends
+  private stepPlayerAct() {
+    const a = this.act;
+    const ctl = this.player.rig.clip!;
+    if (!a) {
+      this.player.anim = null;
+      return;
+    }
+    if (ctl.current !== a.shot) {
+      this.act = null;
+      this.player.anim = null;
+      return;
+    }
+    const sh = a.shot;
+    for (let i = 0; i < a.events.length; ) {
+      if (sh.t >= a.events[i].t) {
+        const ev = a.events.splice(i, 1)[0];
+        ev.fn();
+        if (this.act !== a) return;
+      } else i++;
+    }
+    if (a.onChain && sh.t >= a.chainAt) {
+      const next = a.onChain;
+      a.onChain = undefined;
+      next();
+      return;
+    }
+    if (this.actQueued && (a.kind === 'attack' ? sh.t >= a.chainAt : (a.kind === 'deflect' || a.kind === 'block') && sh.t >= a.cancelAt)) {
+      this.actQueued = false;
+      this.soulsAttack();
+      if (this.act !== a) return;
+    }
+    if (a.kind === 'draw' && this.player.moveAmt > 0.25) {
+      this.cancelAct(0.2);
+      this.player.anim = null;
+      return;
+    }
+    if (a.kind !== 'death' && sh.t >= a.endAt) {
+      this.act = null;
+      ctl.stop(0.3);
+      this.player.anim = null;
+      return;
+    }
+    const swinging = a.kind === 'attack' || a.kind === 'special' || a.kind === 'deathblow';
+    this.player.anim = swinging ? { kind: a.kind, t: sh.t, dur: a.endAt, side: 0 } : null;
+  }
+
+  private updatePlayerClip(dt: number) {
+    const rig = this.player.rig;
+    const ctl = rig.clip!;
+    const w = this.weapons[this.activeWeaponIdx];
+    const speed = this.player.dash > 0 ? TUNE.moveMaxSpeed * 1.6 : Math.hypot(this.player.vel.x, this.player.vel.z);
+    ctl.update(dt, {
+      speed,
+      runSpeed: TUNE.moveMaxSpeed,
+      dirX: 0,
+      dirZ: 1,
+      guard: this.guarding(),
+      air: !this.player.grounded,
+      fight: w?.kind === 'karate'
+    });
+    ctl.consumeRoot(this.rootTmp);
+    if (this.rootTmp.lengthSq() > 0) {
+      const k = this.act?.move?.root ?? 1;
+      const c = Math.cos(this.player.yaw);
+      const sn = Math.sin(this.player.yaw);
+      this.player.pos.x += (this.rootTmp.x * c + this.rootTmp.y * sn) * k;
+      this.player.pos.z += (-this.rootTmp.x * sn + this.rootTmp.y * c) * k;
+    }
+    this.stepPlayerAct();
+  }
+
+  // Mocap enemy reactions: no-ops on the procedural rigs
+  private enemyClip(e: EnemyInstance, name: string, o: PlayOptions = {}): OneShot | null {
+    return e.rig.clip?.play(name, { fadeIn: 0.1, fadeOut: 0.25, ...o }) ?? null;
+  }
+
   private findTarget(maxD: number): EnemyInstance | null {
     let best: EnemyInstance | null = null;
     let bs = Infinity;
@@ -1633,6 +2121,7 @@ export class GameEngine {
       this.emitParticles(p.x, p.y, p.z, 12, 0xffc27a, 6, 1.5, 16, 0.25);
       sfx.block();
       this.player.atkCd += 0.1;
+      this.enemyClip(e, 'hit1', { speed: 1.5, to: 0.8, fadeIn: 0.05 });
       this.addEnemyPosture(e, dmg * 1.35 * (heavy ? 1.4 : 1));
       return;
     }
@@ -1667,6 +2156,7 @@ export class GameEngine {
     // heavy blows interrupt an ordinary samurai wind-up (the Oni and perilous moves shrug them off)
     if (heavy && e.type === 'samurai' && e.strike && !e.strike.perilous) {
       this.cancelStrike(e);
+      this.enemyClip(e, 'hit3', { speed: 1.4, to: 0.95, fadeIn: 0.05 });
       e.staggerT = 0.35;
       e.mode = 'recover';
       e.modeT = 0;
@@ -1711,12 +2201,20 @@ export class GameEngine {
     this.callbacks.onComboChange(Math.max(this.player.hitCombo, this.player.killCombo));
 
     if (e.hp <= 0) this.killEnemy(e);
-    else this.addEnemyPosture(e, dmg * 0.55 * (heavy ? 1.5 : 1));
+    else {
+      // a flinch layered over whatever the samurai is doing (a full reaction would
+      // cancel its footwork on every hit)
+      if (e.rig.clip && !e.strike && e.brokenT <= 0 && e.staggerT <= 0) {
+        this.enemyClip(e, 'hit3', { from: 0.12, to: 0.62, speed: 1.4, weight: 0.5, fadeIn: 0.05, fadeOut: 0.18 });
+      }
+      this.addEnemyPosture(e, dmg * 0.55 * (heavy ? 1.5 : 1));
+    }
   }
 
   private killEnemy(e: EnemyInstance) {
     e.dead = true;
     e.deathT = 0;
+    this.enemyClip(e, Math.random() < 0.5 ? 'death' : 'death2', { hold: true, fadeIn: 0.08 });
     e.bar.visible = false;
     e.token = false;
     this.cancelStrike(e);
@@ -1876,6 +2374,11 @@ export class GameEngine {
       this.player.healT = 0;
       this.player.anim = null;
     }
+    if (this.player.rig.clip && this.player.hp > 0 && this.act?.kind !== 'stagger') {
+      // no hyper armour: a hit knocks you out of whatever you were doing
+      this.actQueued = false;
+      this.startAct('hurt', Math.random() < 0.5 ? 'hit3' : 'hit2', { speed: 1.35, to: 1.1, cancel: 0.5, end: 1.0, fadeIn: 0.06 });
+    }
     this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.3, this.player.pos.z), IMPACT_HURT, 1.4, 0.18);
     this.player.dashInv = false;
     this.player.killCombo = 0;
@@ -1901,23 +2404,33 @@ export class GameEngine {
     this.callbacks.onHpChange(this.player.hp, this.player.maxHp);
 
     if (this.player.hp <= 0) {
-      this.state = 'over';
-      this.callbacks.onGameOver(
-        Math.round(this.player.score),
-        this.wave,
-        this.player.level,
-        this.player.kills,
-        this.player.bestCombo
-      );
+      if (this.player.rig.clip) {
+        // play the fall out before the game-over screen (see updatePlayerMovementAndCamera)
+        this.actQueued = false;
+        this.input.guardHeld = false;
+        this.player.inv = 99;
+        this.deadT = 0;
+        this.startAct('death', Math.random() < 0.5 ? 'death' : 'death2', { hold: true, fadeIn: 0.12 });
+        return;
+      }
+      this.gameOver();
     }
+  }
+
+  private gameOver() {
+    this.state = 'over';
+    this.callbacks.onGameOver(Math.round(this.player.score), this.wave, this.player.level, this.player.kills, this.player.bestCombo);
   }
 
   // ---------------------------------------------------------------------------
   // Guard, deflect, posture and deathblow (Sekiro-style combat)
   // ---------------------------------------------------------------------------
   public guardDown() {
-    if (this.state !== 'play' || this.player.healT > 0) return;
+    if (this.state !== 'play' || this.player.healT > 0 || this.player.hp <= 0) return;
     this.input.guardHeld = true;
+    // mocap rig: a committed swing can't be turned into a parry, only its recovery
+    if (!this.freeToCancel()) return;
+    if (this.act && this.act.kind !== 'deflect' && this.act.kind !== 'block') this.cancelAct(0.1);
     this.player.guardPressT = this.time;
   }
 
@@ -1929,10 +2442,18 @@ export class GameEngine {
   public heal() {
     if (this.state !== 'play' || this.player.heals <= 0 || this.player.healT > 0) return;
     if (this.player.staggerT > 0 || this.cine || this.player.hp >= this.player.maxHp) return;
+    if (this.act && this.act.kind !== 'draw') return;
     this.player.heals--;
-    this.player.healT = 0.85;
     this.player.healDone = false;
-    this.player.anim = { kind: 'drink', t: 0, dur: 0.85, side: 0 };
+    if (this.player.rig.clip) {
+      // a slow, committed drink (the "power up" clip's head-back moment)
+      const speed = 1.3;
+      this.player.healT = (2.1 - 0.3) / speed;
+      this.startAct('heal', 'powerUp', { from: 0.3, to: 2.1, speed, cancel: 99, end: 2.1, fadeIn: 0.15 });
+    } else {
+      this.player.healT = 0.85;
+      this.player.anim = { kind: 'drink', t: 0, dur: 0.85, side: 0 };
+    }
     this.input.guardHeld = false;
     this.callbacks.onHealsChange?.(this.player.heals);
   }
@@ -1993,6 +2514,8 @@ export class GameEngine {
     this.cancelStrike(e);
     e.token = false;
     e.anim = undefined;
+    // doubled over, held there until the posture recovers or a deathblow lands
+    this.enemyClip(e, 'hit2', { to: 0.62, hold: true, fadeIn: 0.08 });
     sfx.postureBreak();
     this.impacts.spawn(this.tmpV.set(e.pos.x, e.pos.y + 1.5 * e.rig.root.scale.x, e.pos.z), IMPACT_DEFLECT, 2.6, 0.3);
     this.shake = Math.max(this.shake, 0.25);
@@ -2029,9 +2552,20 @@ export class GameEngine {
     const windup = boss ? (kind === 'sweep' ? 0.85 : first ? 0.62 : 0.46) : perilous ? 0.64 : first ? 0.46 : 0.32;
     const reach = boss ? (kind === 'sweep' ? 4.6 : 3.9) : kind === 'thrust' ? 3.4 : kind === 'sweep' ? 2.8 : 2.3;
     const dmg = boss ? (kind === 'sweep' ? 22 : 24) : kind === 'thrust' ? 18 : kind === 'sweep' ? 15 : 12;
+    let wind = windup;
+    if (e.rig.clip && !boss) {
+      // the wind-up IS the clip up to its hit frame: readable, and the blade really
+      // arrives when the damage does (combo follow-ups come a little quicker)
+      const opts = ENEMY_STRIKES[kind];
+      const pick = opts[Math.floor(Math.random() * opts.length)];
+      const speed = perilous ? 0.95 : first ? 1.05 : 1.25;
+      const from = pick.from ?? 0;
+      wind = (pick.hit - from) / speed;
+      this.enemyClip(e, pick.clip, { from, speed, fadeIn: 0.12, fadeOut: 0.3 });
+    }
     const strike: EnemyStrike = {
       kind,
-      windup,
+      windup: wind,
       t: 0,
       perilous,
       feint: first && !perilous && !boss && Math.random() < 0.08,
@@ -2040,7 +2574,7 @@ export class GameEngine {
       side: e.strike ? e.strike.side ^ 1 : Math.random() < 0.5 ? 0 : 1
     };
     e.strike = strike;
-    e.windup = windup;
+    e.windup = wind;
     if (e.tele) {
       const m = e.tele.material as THREE.MeshBasicMaterial;
       m.color.set(perilous ? 0xff1e1e : boss ? 0xff5a30 : 0xff8a30);
@@ -2104,7 +2638,7 @@ export class GameEngine {
       this.lastHS = performance.now();
       this.shake = Math.max(this.shake, 0.2);
       this.fovKick = Math.min(this.fovKick, -3);
-      this.player.anim = { kind: 'deflect', t: 0, dur: 0.2, side: 0 };
+      this.playerDeflectAnim();
       this.addPlayerPosture(3);
       sfx.clang();
       if (st.kind === 'thrust') {
@@ -2113,12 +2647,14 @@ export class GameEngine {
       }
       e.staggerT = e.type === 'boss' ? 0.18 : 0.32;
       e.anim = { kind: 'erecoil', t: 0, dur: 0.32, side: 0 };
+      this.enemyClip(e, 'hit1', { from: 0.1, to: 0.75, speed: 1.6 });
       this.addEnemyPosture(e, (e.type === 'boss' ? 34 : 28) * (st.kind === 'thrust' ? 1.7 : 1));
       return;
     }
 
-    const blocking = canAct && this.input.guardHeld && st.kind !== 'sweep' && st.kind !== 'thrust';
+    const blocking = canAct && this.guarding() && st.kind !== 'sweep' && st.kind !== 'thrust';
     if (blocking) {
+      if (this.player.rig.clip) this.startAct('block', 'hit1', { speed: 1.25, to: 0.85, cancel: 0.4, end: 0.8, fadeIn: 0.06 });
       this.faceEnemy(e);
       const mid = this.tmpV.set(this.player.pos.x - nx * 0.7, this.player.pos.y + 1.3, this.player.pos.z - nz * 0.7);
       this.impacts.spawn(mid, IMPACT_BLOCK, 1.3, 0.12);
@@ -2133,6 +2669,7 @@ export class GameEngine {
         this.player.staggerT = 1.1;
         this.player.posture = PLAYER_MAX_POSTURE * 0.6;
         this.input.guardHeld = false;
+        if (this.player.rig.clip) this.startAct('stagger', 'hit2', { speed: 1.1, cancel: 99, end: 1.2, fadeIn: 0.06 });
         sfx.guardBreak();
         this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'GUARDA QUEBRADA', '#ff5a5a', 1.2);
         this.damagePlayer(Math.round(st.dmg * 0.5), nx, nz);
@@ -2142,6 +2679,11 @@ export class GameEngine {
 
     this.addPlayerPosture(st.dmg * 0.8);
     this.damagePlayer(st.dmg, nx, nz);
+  }
+
+  private playerDeflectAnim() {
+    if (this.player.rig.clip) this.startAct('deflect', 'hit1', { from: 0.05, to: 0.6, speed: 1.7, cancel: 0.22, end: 0.6, fadeIn: 0.04 });
+    else this.player.anim = { kind: 'deflect', t: 0, dur: 0.2, side: 0 };
   }
 
   private findDeathblowTarget(): EnemyInstance | null {
@@ -2170,7 +2712,14 @@ export class GameEngine {
     this.player.inv = Math.max(this.player.inv, 1.6);
     this.player.dashInv = false;
     this.player.atkCd = 0.85;
-    this.player.anim = { kind: 'deathblow', t: 0, dur: 0.8, side: 0 };
+    if (this.player.rig.clip) {
+      // the leaping slam, timed so it lands on the cinematic's strike (0.3s in): skip
+      // its run-up, play the rest in place (its own leap would carry past the target)
+      this.actQueued = false;
+      this.startAct('deathblow', 'jumpAttack', { from: 0.55, speed: (1.07 - 0.55) / 0.3, cancel: 99, end: 2.1, fadeIn: 0.06 });
+    } else {
+      this.player.anim = { kind: 'deathblow', t: 0, dur: 0.8, side: 0 };
+    }
     e.brokenT = Math.max(e.brokenT, 3);
     this.cine = { t: 0, e, struck: false };
     this.triggerSlowmo(0.75, 0.38);
@@ -2310,7 +2859,7 @@ export class GameEngine {
       // 1. O PERSONAGEM VIRA NA DIREÇÃO DO MOVIMENTO (Acaba com andar de costas!)
       const moveAngle = Math.atan2(mx, mz);
       this.lastMove.set(mx, 0, mz);
-      const turnK = this.player.anim ? TUNE.turnSpeedAttacking : TUNE.turnSpeedIdle;
+      const turnK = this.player.rig.clip ? this.clipTurnSpeed() : this.player.anim ? TUNE.turnSpeedAttacking : TUNE.turnSpeedIdle;
       this.player.yaw = turnTo(this.player.yaw, moveAngle, dt * turnK);
 
       // 2. O DIRECIONAL GIRA A CÂMERA DINAMICAMENTE
@@ -2355,8 +2904,10 @@ export class GameEngine {
         this.ghosts.spawn(this.player.rig.root, GHOST_DASH);
       }
     } else {
+      // mocap rig: a committed move owns the feet (its root motion is all the movement)
+      const committed = !!this.player.rig.clip && (this.player.hp <= 0 || (!!this.act && this.act.kind !== 'draw'));
       const penalty =
-        this.cine ? 0 : this.player.staggerT > 0 ? 0.25 : this.player.healT > 0 ? 0.35 : this.input.guardHeld ? 0.45 : this.player.anim ? 0.6 : this.player.tornado > 0 ? 0.55 : 1;
+        this.cine || committed ? 0 : this.player.staggerT > 0 ? 0.25 : this.player.healT > 0 ? 0.35 : this.input.guardHeld ? 0.45 : this.player.anim ? 0.6 : this.player.tornado > 0 ? 0.55 : 1;
       const maxSp = TUNE.moveMaxSpeed * penalty;
       const dvx = amt > 0.05 ? (mx / amt) * maxSp * amt : 0;
       const dvz = amt > 0.05 ? (mz / amt) * maxSp * amt : 0;
@@ -2528,7 +3079,12 @@ export class GameEngine {
     const yawRate = dt > 0 ? wrap(this.player.yaw - this.prevYaw) / dt : 0;
     this.prevYaw = this.player.yaw;
     if (this.player.rig.flash) this.player.rig.flash.value = this.hurtFx * this.hurtFx * 0.35;
-    animateCharacter(this.player.rig, {
+    if (this.deadT >= 0) {
+      this.deadT += dt;
+      if (this.deadT > 2.6 && this.state === 'play') this.gameOver();
+    }
+    if (this.player.rig.clip) this.updatePlayerClip(dt);
+    else animateCharacter(this.player.rig, {
       moveAmt: this.player.moveAmt,
       phase: this.player.phase,
       air: !this.player.grounded,
@@ -2615,9 +3171,12 @@ export class GameEngine {
         if (e.rig.flash) e.rig.flash.value = Math.max(0, 0.6 - e.deathT * 2);
         if (e.dbMark) e.dbMark.visible = false;
         if (e.danger) e.danger.visible = false;
-        animateDeath(e.rig, e.deathT, dt);
-        e.rig.root.position.y = -Math.max(0, e.deathT - 0.8) * 1.4;
-        if (e.deathT > 1.8) {
+        // the mocap fall takes longer than the procedural collapse before sinking away
+        const sinkAt = e.rig.clip ? 2.3 : 0.8;
+        if (e.rig.clip) e.rig.clip.update(dt, { speed: 0, runSpeed: 1, dirX: 0, dirZ: 1 });
+        else animateDeath(e.rig, e.deathT, dt);
+        e.rig.root.position.y = -Math.max(0, e.deathT - sinkAt) * 1.4;
+        if (e.deathT > sinkAt + 1) {
           this.removeEnemy(e);
           this.enemies.splice(i, 1);
         }
@@ -2658,6 +3217,7 @@ export class GameEngine {
           e.posture = e.maxPosture * 0.45;
           e.mode = 'recover';
           e.modeT = 0;
+          e.rig.clip?.stop(0.35);
         }
       } else if (e.staggerT > 0) {
         e.staggerT -= dt;
@@ -2717,6 +3277,7 @@ export class GameEngine {
         }
         if (st.feint && st.t >= st.windup * 0.6) {
           this.cancelStrike(e);
+          e.rig.clip?.stop(0.3);
           e.mode = 'recover';
           e.modeT = 0;
           e.token = false;
@@ -2834,7 +3395,22 @@ export class GameEngine {
       const wind = st ? Math.min(1, st.t / st.windup) : 0;
       const hitK = Math.max(0, e.flash) / 0.14;
       if (e.rig.flash) e.rig.flash.value = hitK * hitK;
-      animateCharacter(e.rig, {
+      if (e.rig.clip) {
+        // movement in the samurai's own frame (+Z forward, +X its left) picks walk,
+        // back-pedal or strafe; the strike/reaction clips play over it
+        const c = Math.cos(e.yaw);
+        const sn = Math.sin(e.yaw);
+        const wx = mvx * spd;
+        const wz = mvz * spd;
+        e.rig.clip.update(dt, {
+          speed: Math.hypot(wx, wz),
+          runSpeed: e.speed * 1.2,
+          dirX: wx * c - wz * sn,
+          dirZ: wx * sn + wz * c,
+          guard: e.mode === 'guard' && e.guardT > 0
+        });
+        e.rig.clip.consumeRoot(this.rootTmp);
+      } else animateCharacter(e.rig, {
         moveAmt: e.moveAmt,
         phase: e.phase,
         air: false,
@@ -2921,9 +3497,9 @@ export class GameEngine {
           if (canAct && this.time - this.player.guardPressT <= DEFLECT_WINDOW) {
             this.impacts.spawn(mid, IMPACT_DEFLECT, 1.4, 0.14);
             this.emitParticles(mid.x, mid.y, mid.z, 14, 0xffb347, 7, 2, 16, 0.25);
-            this.player.anim = { kind: 'deflect', t: 0, dur: 0.2, side: 0 };
+            this.playerDeflectAnim();
             sfx.clang();
-          } else if (canAct && this.input.guardHeld) {
+          } else if (canAct && this.guarding()) {
             this.impacts.spawn(mid, IMPACT_BLOCK, 1, 0.1);
             this.addPlayerPosture(10);
             sfx.block();
@@ -3090,14 +3666,18 @@ export class GameEngine {
       this.reticle.visible = false;
       this.camYaw += real * 0.12;
       this.player.phase += real * 2;
-      animateCharacter(this.player.rig, {
-        moveAmt: 0,
-        phase: this.player.phase,
-        air: false,
-        t: this.time,
-        dt: real,
-        weapon: this.weapons[this.activeWeaponIdx]?.id
-      });
+      if (this.player.rig.clip) {
+        this.player.rig.clip.update(real, { speed: 0, runSpeed: TUNE.moveMaxSpeed, dirX: 0, dirZ: 1, fight: this.weapons[this.activeWeaponIdx]?.kind === 'karate' });
+      } else {
+        animateCharacter(this.player.rig, {
+          moveAmt: 0,
+          phase: this.player.phase,
+          air: false,
+          t: this.time,
+          dt: real,
+          weapon: this.weapons[this.activeWeaponIdx]?.id
+        });
+      }
       this.player.rig.root.position.copy(this.player.pos);
       this.player.rig.root.rotation.y = this.player.yaw;
     }
