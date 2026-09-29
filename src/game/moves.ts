@@ -77,3 +77,13 @@ export const ENEMY_STRIKES: Record<string, { clip: string; hit: number; from?: n
   thrust: [{ clip: 'eSwordAttack', hit: 0.52 }],
   sweep: [{ clip: 'slash2', hit: 0.87, from: 0.1 }]
 };
+
+// The giant (boss): the Rōnin's heavy two-handed moves at its size - an overhead smash or
+// a leaping slam for its normal strike, the wide sweep (jump it) for its perilous one
+export const BOSS_STRIKES: Record<string, { clip: string; hit: number; from?: number }[]> = {
+  smash: [
+    { clip: 'slash1', hit: 0.62 },
+    { clip: 'jumpAttack', hit: 1.07, from: 0.45 }
+  ],
+  sweep: [{ clip: 'slash2', hit: 0.87, from: 0.1 }]
+};

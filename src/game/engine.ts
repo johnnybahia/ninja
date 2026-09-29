@@ -30,7 +30,7 @@ import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
 import { createClipRig, Grip, OneShot, PlayOptions } from './clipRig';
 import { loadCharacter, loadWeapons, preloadModels, characterIfReady, CharacterTemplate } from './models';
-import { COMBOS, SPECIAL_MOVES, RUSH, ENEMY_STRIKES, ClipMove } from './moves';
+import { COMBOS, SPECIAL_MOVES, RUSH, ENEMY_STRIKES, BOSS_STRIKES, ClipMove } from './moves';
 import { animateCharacter, animateDeath } from './animation';
 import { TUNE } from './tunables';
 
@@ -40,6 +40,11 @@ const ENEMY_RIM = new THREE.Color(0.35, 0.45, 1.0).multiplyScalar(0.18);
 // Archer's bow hand, measured from its own aiming clip: arrow flight along the line from
 // the drawing hand to the bow hand, limbs as upright as the pose allows
 const ARCHER_BOW_GRIP: Grip = { axis: new THREE.Vector3(-0.038, 0.93, -0.366), edge: new THREE.Vector3(-0.798, 0.193, 0.571) };
+// Sword hand of the other mocap enemies: the Rōnin's measured grip carried over through
+// each skeleton's own hand orientation (sampled on the same retargeted clip frames)
+const SAMURAI2_GRIP: Grip = { axis: new THREE.Vector3(0.295, -0.267, -0.918), edge: new THREE.Vector3(-0.988, 0.151, 0.016) };
+const GIANT_GRIP: Grip = { axis: new THREE.Vector3(0.97, 0.025, 0.243), edge: new THREE.Vector3(-0.124, -0.45, -0.885) };
+const GIANT_HEIGHT = 5;
 // how long the archer holds full draw before loosing (the readable part of its telegraph)
 const ARCHER_AIM_HOLD = 0.45;
 const Z_AXIS = new THREE.Vector3(0, 0, 1);
@@ -795,8 +800,13 @@ export class GameEngine {
     if (type === 'samurai') {
       // mocap samurai (the Rōnin recoloured, decimated body) once its model is in;
       // the procedural samurai otherwise
+      // two looks, one fighter: the Rōnin recoloured or the second samurai model, picked
+      // per spawn, same clips and AI
       const tpl = characterIfReady('ronin');
-      rig = tpl ? createClipRig(tpl, { lod: true, tint: ENEMY_TINT, rim: ENEMY_RIM }) : buildCharacter('samurai');
+      const tpl2 = characterIfReady('samurai2');
+      if (tpl2 && (!tpl || Math.random() < 0.5)) rig = createClipRig(tpl2, { lod: true, grips: { right: SAMURAI2_GRIP } });
+      else if (tpl) rig = createClipRig(tpl, { lod: true, tint: ENEMY_TINT, rim: ENEMY_RIM });
+      else rig = buildCharacter('samurai');
       rig.hand.add(makeWeapon('ekatana'));
       hp = 60 * hpMul;
       speed = 3.7;
@@ -813,8 +823,17 @@ export class GameEngine {
       hp = 40 * hpMul;
       speed = 3.3;
     } else {
-      rig = buildCharacter('oni', 2.1);
-      rig.hand.add(makeWeapon('greatsword'));
+      const tpl = characterIfReady('giant');
+      if (tpl) {
+        rig = createClipRig(tpl, { lod: true, kind: 'oni', height: GIANT_HEIGHT, grips: { right: GIANT_GRIP } });
+        // the great sword is modelled at human scale - sized to the giant's hand
+        const sword = makeWeapon('greatsword');
+        sword.scale.setScalar(rig.sizeScale ?? 1);
+        rig.hand.add(sword);
+      } else {
+        rig = buildCharacter('oni', 2.1);
+        rig.hand.add(makeWeapon('greatsword'));
+      }
       hp = 480 * hpMul;
       speed = 3.1;
       r = 1.1;
@@ -892,12 +911,17 @@ export class GameEngine {
       postureBar: pfg
     };
     {
+      // markers ride a group sized to the enemy (a mocap root's own scale is a unit
+      // conversion, not the character's size - see sizeOf)
+      const overlay = new THREE.Group();
+      overlay.scale.setScalar(this.sizeOf(enemy) / rig.root.scale.x);
+      rig.root.add(overlay);
       const { dangerTex, deathblowTex } = markTextures();
       const danger = new THREE.Sprite(new THREE.SpriteMaterial({ map: dangerTex, transparent: true, depthTest: false, depthWrite: false, fog: false }));
       danger.position.set(0, 2.95, 0);
       danger.visible = false;
       danger.renderOrder = 32;
-      rig.root.add(danger);
+      overlay.add(danger);
       enemy.danger = danger;
       const mark = new THREE.Sprite(
         new THREE.SpriteMaterial({ map: deathblowTex, color: new THREE.Color(2.2, 1.2, 1.2), transparent: true, depthTest: false, depthWrite: false, fog: false, blending: THREE.AdditiveBlending })
@@ -905,7 +929,7 @@ export class GameEngine {
       mark.position.set(0, 1.5, 0.25);
       mark.visible = false;
       mark.renderOrder = 33;
-      rig.root.add(mark);
+      overlay.add(mark);
       enemy.dbMark = mark;
     }
 
@@ -929,6 +953,12 @@ export class GameEngine {
     this.scene.add(rig.root);
     this.emitParticles(x, 1, z, 26, 0x8a7aa8, 5, 2, 3, 0.9);
     this.enemies.push(enemy);
+    if (type === 'boss' && rig.clip) {
+      // entrance: the giant roars before it moves (held in place like a stagger)
+      this.enemyClip(enemy, 'powerUp', { from: 0.3, to: 2.5, speed: 1.2, fadeIn: 0.2 });
+      enemy.staggerT = (2.5 - 0.3) / 1.2;
+      enemy.cd = Math.max(enemy.cd, 2.4);
+    }
     return enemy;
   }
 
@@ -2169,6 +2199,12 @@ export class GameEngine {
     }
   }
 
+  // How big an enemy is relative to a standard character: a procedural rig's root scale,
+  // or the mocap rig's own sizeScale (its root carries the model's unit conversion too)
+  private sizeOf(e: EnemyInstance) {
+    return e.rig.sizeScale ?? e.rig.root.scale.x;
+  }
+
   // Mocap enemy reactions: no-ops on the procedural rigs
   private enemyClip(e: EnemyInstance, name: string, o: PlayOptions = {}): OneShot | null {
     return e.rig.clip?.play(name, { fadeIn: 0.1, fadeOut: 0.25, ...o }) ?? null;
@@ -2235,7 +2271,7 @@ export class GameEngine {
     e.flash = 0.14;
     {
       const nl = Math.hypot(nx, nz) || 1;
-      const sc = e.rig.root.scale.x;
+      const sc = this.sizeOf(e);
       this.tmpV.set(e.pos.x - (nx / nl) * e.r * 0.7, e.pos.y + 1.25 * sc, e.pos.z - (nz / nl) * e.r * 0.7);
       const crit = rolled.tier === 'crit';
       const size = (crit ? 1.9 : heavy ? 1.55 : 1.1) * (e.type === 'boss' ? 1.4 : 1);
@@ -2634,9 +2670,9 @@ export class GameEngine {
     // doubled over, held there until the posture recovers or a deathblow lands
     this.enemyClip(e, 'hit2', { to: 0.62, hold: true, fadeIn: 0.08 });
     sfx.postureBreak();
-    this.impacts.spawn(this.tmpV.set(e.pos.x, e.pos.y + 1.5 * e.rig.root.scale.x, e.pos.z), IMPACT_DEFLECT, 2.6, 0.3);
+    this.impacts.spawn(this.tmpV.set(e.pos.x, e.pos.y + 1.5 * this.sizeOf(e), e.pos.z), IMPACT_DEFLECT, 2.6, 0.3);
     this.shake = Math.max(this.shake, 0.25);
-    this.spawnLabel(e.pos.x, e.pos.y + 3.1 * e.rig.root.scale.x, e.pos.z, 'POSTURA!', '#ff5a3a', 1.2);
+    this.spawnLabel(e.pos.x, e.pos.y + 3.1 * this.sizeOf(e), e.pos.z, 'POSTURA!', '#ff5a3a', 1.2);
   }
 
   private cancelStrike(e: EnemyInstance) {
@@ -2670,7 +2706,14 @@ export class GameEngine {
     const reach = boss ? (kind === 'sweep' ? 4.6 : 3.9) : kind === 'thrust' ? 3.4 : kind === 'sweep' ? 2.8 : 2.3;
     const dmg = boss ? (kind === 'sweep' ? 22 : 24) : kind === 'thrust' ? 18 : kind === 'sweep' ? 15 : 12;
     let wind = windup;
-    if (e.rig.clip && !boss) {
+    if (e.rig.clip && boss) {
+      const opts = BOSS_STRIKES[kind] ?? BOSS_STRIKES.smash;
+      const pick = opts[Math.floor(Math.random() * opts.length)];
+      const speed = kind === 'sweep' ? 0.85 : first ? 0.9 : 1.05;
+      const from = pick.from ?? 0;
+      wind = (pick.hit - from) / speed;
+      this.enemyClip(e, pick.clip, { from, speed, fadeIn: 0.15, fadeOut: 0.35 });
+    } else if (e.rig.clip && !boss) {
       // the wind-up IS the clip up to its hit frame: readable, and the blade really
       // arrives when the damage does (combo follow-ups come a little quicker)
       const opts = ENEMY_STRIKES[kind];
@@ -2852,7 +2895,7 @@ export class GameEngine {
     const e = c.e;
     if (!c.struck && c.t >= 0.3) {
       c.struck = true;
-      const sc = e.rig.root.scale.x;
+      const sc = this.sizeOf(e);
       const p = this.tmpV.set(e.pos.x, e.pos.y + 1.3 * sc, e.pos.z);
       this.impacts.spawn(p, IMPACT_CRIT, 3.2 * (sc > 1 ? 1.4 : 1), 0.35);
       this.emitBlood(e.pos.x, e.pos.y + 1.2 * sc, e.pos.z, Math.sin(this.player.yaw), Math.cos(this.player.yaw), 70, true, true);
@@ -2872,6 +2915,7 @@ export class GameEngine {
         e.modeT = 0;
         e.staggerT = 1.2;
         e.flash = 0.14;
+        this.enemyClip(e, 'hit2', { speed: 1.0, fadeIn: 0.08 });
         this.spawnLabel(e.pos.x, e.pos.y + 6, e.pos.z, 'FERIDO!', '#ff5a3a', 1.6);
       } else {
         e.hp = 0;

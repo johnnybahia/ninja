@@ -260,6 +260,9 @@ def convert(wid, spec):
         if max(w, h) > TEX_SIZE:
             k = TEX_SIZE / max(w, h)
             img.scale(max(1, round(w * k)), max(1, round(h * k)))
+            # the exporter writes a packed image's original bytes, not its edited pixels
+            if img.packed_file:
+                img.pack()
 
     os.makedirs(OUT, exist_ok=True)
     out = os.path.join(OUT, wid + '.raw.glb')

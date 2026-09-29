@@ -93,6 +93,9 @@ export interface RigInstance {
   // and every procedural joint above is an inert stub.
   clip?: ClipController;
   model?: THREE.Object3D;
+  // size relative to a standard character (mocap rigs: their root scale is a unit
+  // conversion, not a size - see sizeOf in engine.ts)
+  sizeScale?: number;
 }
 
 export interface EnemyInstance {

@@ -27,7 +27,6 @@ import bpy
 from mathutils import Matrix, Quaternion, Vector
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TEX_SIZE = 1024
 
 # game clip name -> file in the Mixamo pack
 RONIN_CLIPS = {
@@ -92,11 +91,42 @@ ARCHER_CLIPS = {
     'kick': 'standing melee kick.fbx',
 }
 
+RONIN_PACK = 'Great Sword Pack (1) samurai.zip'
+
+
+def from_ronin(*names):
+    """Retarget entries reusing the Rōnin's clips (its Great Sword pack, inside its zip, or
+    its own retarget sources) for another Mixamo-rigged character."""
+    out = {}
+    for n in names:
+        out[n] = (RONIN_PACK + '::' + RONIN_CLIPS[n], None) if n in RONIN_CLIPS else RONIN_RETARGET[n]
+    return out
+
+
+# The second enemy samurai fights exactly like the Rōnin copy, so it gets the same clips
+# (its own upload only carried a longbow pack).
+SAMURAI2_RETARGET = from_ronin(
+    'idle', 'walk', 'run', 'walkBack', 'strafeL', 'strafeR', 'guard', 'hit1', 'hit2', 'hit3',
+    'death', 'death2', 'attack', 'slash2', 'eSwordSlash', 'eSwordAttack')
+
+# The giant (boss) came without animation: the Rōnin's heavy two-handed moves suit its
+# great sword - overhead smash, wide sweep, leaping slam - plus a roar for its entrance.
+GIANT_RETARGET = from_ronin(
+    'idle', 'walk', 'run', 'walkBack', 'strafeL', 'strafeR', 'hit1', 'hit2', 'hit3',
+    'death', 'death2', 'attack', 'slash1', 'slash2', 'jumpAttack', 'powerUp')
+
+# tex: max size of the base color / of the other maps. Enemy-only models keep base color
+# sharp but halve the normal/roughness/metal maps - they never fill the screen, and four
+# characters' worth of 1K maps adds up in a phone's GPU memory.
 CHARACTERS = {
-    'ronin': dict(name='Ronin', pack='Great Sword Pack (1) samurai.zip', fbx='samurai+armor+3d+model (2).fbx',
-                  clips=RONIN_CLIPS, retarget=RONIN_RETARGET, full=True, lod_ratio=0.22),
+    'ronin': dict(name='Ronin', pack=RONIN_PACK, fbx='samurai+armor+3d+model (2).fbx',
+                  clips=RONIN_CLIPS, retarget=RONIN_RETARGET, full=True, lod_ratio=0.22, tex=(1024, 1024)),
     'archer': dict(name='Archer', pack='inimigo 1 arqueiro pronto.zip', fbx='inimigo 1 atualizado.fbx',
-                   clips=ARCHER_CLIPS, retarget={}, full=False, lod_ratio=0.24),
+                   clips=ARCHER_CLIPS, retarget={}, full=False, lod_ratio=0.24, tex=(1024, 512)),
+    'samurai2': dict(name='Samurai2', pack='inimigo 2 samurai pronto.zip', fbx='inimigo 2 atualizado.fbx',
+                     clips={}, retarget=SAMURAI2_RETARGET, full=False, lod_ratio=0.24, tex=(1024, 512)),
+    'giant': dict(name='Giant', pack=None, fbx='chefe grande atualizado pronto.fbx',
+                  clips={}, retarget=GIANT_RETARGET, full=False, lod_ratio=0.34, tex=(1024, 512)),
 }
 
 
@@ -173,6 +203,7 @@ def retarget(arm, src_path, clips):
     Hips translation is scaled by the two rigs' leg-length ratio."""
     new = import_fbx(src_path)
     src = next(o for o in new if o.type == 'ARMATURE')
+    own_action = src.animation_data.action if src.animation_data else None
     src_fps = bpy.context.scene.render.fps / bpy.context.scene.render.fps_base
     bpy.context.scene.render.fps = 30
     bpy.context.scene.render.fps_base = 1
@@ -208,7 +239,7 @@ def retarget(arm, src_path, clips):
             align[pb.name] = align.get(pb.parent.name, Quaternion()) if pb.parent else Quaternion()
 
     for game_name, action_name in clips.items():
-        act = bpy.data.actions[action_name]
+        act = bpy.data.actions[action_name] if action_name else own_action
         src.animation_data.action = act
         if act.slots:
             src.animation_data.action_slot = act.slots[0]
@@ -298,11 +329,13 @@ def main():
     bpy.ops.wm.read_factory_settings(use_empty=True)
     bpy.context.scene.render.fps = 30
 
-    tmp = tempfile.mkdtemp(prefix='ronin_')
-    with zipfile.ZipFile(os.path.join(ROOT, 'assets_src', spec['pack'])) as z:
-        z.extractall(tmp)
-
-    objs = import_fbx(os.path.join(tmp, spec['fbx']))
+    tmp = tempfile.mkdtemp(prefix='character_')
+    if spec['pack']:
+        with zipfile.ZipFile(os.path.join(ROOT, 'assets_src', spec['pack'])) as z:
+            z.extractall(tmp)
+        objs = import_fbx(os.path.join(tmp, spec['fbx']))
+    else:
+        objs = import_fbx(os.path.join(ROOT, 'assets_src', spec['fbx']))
     arm = next(o for o in objs if o.type == 'ARMATURE')
     body = next(o for o in objs if o.type == 'MESH')
     arm.name = spec['name']
@@ -349,9 +382,12 @@ def main():
             by_path['rough'] = img
         elif 'metallic' in p:
             by_path['metal'] = img
-    for img in by_path.values():
-        if img.size[0] > TEX_SIZE:
-            img.scale(TEX_SIZE, TEX_SIZE)
+    for key, img in by_path.items():
+        cap = spec['tex'][0] if key == 'base' else spec['tex'][1]
+        if img.size[0] > cap:
+            img.scale(cap, cap)
+            # the exporter writes a packed image's original bytes, not its edited pixels
+            img.pack()
     for m in body.data.materials:
         rebuild_material(m, by_path)
         m.name = spec['name']
@@ -388,7 +424,14 @@ def main():
     for name, (fname, action_name) in retarget_clips.items():
         by_file.setdefault(fname, {})[name] = action_name
     for fname, group in by_file.items():
-        retarget(arm, os.path.join(ROOT, 'assets_src', fname), group)
+        if '::' in fname:
+            # a clip inside a zipped Mixamo pack
+            zname, member = fname.split('::')
+            with zipfile.ZipFile(os.path.join(ROOT, 'assets_src', zname)) as z:
+                z.extract(member, tmp)
+            retarget(arm, os.path.join(tmp, member), group)
+        else:
+            retarget(arm, os.path.join(ROOT, 'assets_src', fname), group)
     bpy.context.scene.render.fps = 30
 
     bpy.ops.export_scene.gltf(
