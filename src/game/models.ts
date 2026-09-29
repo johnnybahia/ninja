@@ -10,7 +10,9 @@ import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.j
 
 const CHARACTER_FILES = {
   ronin: '/models/ronin.glb',
-  archer: '/models/archer.glb'
+  archer: '/models/archer.glb',
+  samurai2: '/models/samurai2.glb',
+  giant: '/models/giant.glb'
 };
 export type CharacterModel = keyof typeof CHARACTER_FILES;
 
@@ -105,5 +107,5 @@ export function cloneWeaponModel(id: string): THREE.Group | null {
 }
 
 export function preloadModels(): Promise<unknown> {
-  return Promise.allSettled([loadCharacter('ronin'), loadCharacter('archer'), loadWeapons()]);
+  return Promise.allSettled([...(Object.keys(CHARACTER_FILES) as CharacterModel[]).map(loadCharacter), loadWeapons()]);
 }

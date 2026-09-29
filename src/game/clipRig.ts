@@ -549,6 +549,7 @@ export function createClipRig(tpl: CharacterTemplate, opts: ClipRigOptions = {})
     kind: opts.kind ?? 'samurai',
     clip: ctl,
     model,
+    sizeScale: height / 2.32,
     dispose: () => {
       ctl.dispose();
       for (const m of mats) m.dispose();
