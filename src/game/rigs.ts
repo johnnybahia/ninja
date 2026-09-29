@@ -295,7 +295,7 @@ function mergeByMaterial(g: THREE.Group) {
 }
 
 // Imported models stand in for these procedural ids; their fallback when not loaded
-const PROCEDURAL_FALLBACK: Record<string, string> = { ekatana: 'katana', greatsword: 'kanabo' };
+const PROCEDURAL_FALLBACK: Record<string, string> = { ekatana: 'katana', greatsword: 'kanabo', longbow: 'bow' };
 
 export function makeWeapon(id: string): THREE.Group {
   const imported = cloneWeaponModel(id);

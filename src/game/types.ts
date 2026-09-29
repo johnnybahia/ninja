@@ -147,6 +147,11 @@ export interface EnemyInstance {
   guardT: number;
   staggerT: number;
   dbCount?: number; // deathblows already taken (boss needs two)
+  // mocap archer: the shot in progress, a close-range kick, and the live bow string /
+  // nocked arrow drawn over the (stringless) bow model
+  bow?: { phase: 'draw' | 'aim' | 'release'; t: number };
+  kick?: { t: number; done: boolean };
+  bowFx?: { bow: THREE.Object3D; string: THREE.Line; arrow: THREE.Object3D; nock: THREE.Object3D; mid: THREE.Vector3 };
   postureBar?: THREE.Mesh;
   danger?: THREE.Sprite;
   dbMark?: THREE.Sprite;
