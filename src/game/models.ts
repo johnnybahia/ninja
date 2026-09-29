@@ -8,11 +8,14 @@ import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.j
 // ever clones what's already here - and falls back to the procedural models (rigs.ts) for
 // anything that failed to load.
 
+// Relative to the deploy's base path: '/' on Netlify, '/ninja/' on GitHub Pages
+const M = `${import.meta.env.BASE_URL}models/`;
+
 const CHARACTER_FILES = {
-  ronin: '/models/ronin.glb',
-  archer: '/models/archer.glb',
-  samurai2: '/models/samurai2.glb',
-  giant: '/models/giant.glb'
+  ronin: `${M}ronin.glb`,
+  archer: `${M}archer.glb`,
+  samurai2: `${M}samurai2.glb`,
+  giant: `${M}giant.glb`
 };
 export type CharacterModel = keyof typeof CHARACTER_FILES;
 
@@ -20,15 +23,15 @@ export type CharacterModel = keyof typeof CHARACTER_FILES;
 // same convention as the procedural weapons: blade along +Z, edge toward +Y, grip at the
 // origin, sized in world units.
 const WEAPON_FILES: Record<string, string> = {
-  katana: '/models/weapons/katana.glb',
-  ekatana: '/models/weapons/ekatana.glb',
-  greatsword: '/models/weapons/greatsword.glb',
-  bo: '/models/weapons/bo.glb',
-  kama: '/models/weapons/kama.glb',
-  kunai: '/models/weapons/kunai.glb',
-  shuriken: '/models/weapons/shuriken.glb',
-  longbow: '/models/weapons/bow.glb',
-  arrow: '/models/weapons/arrow.glb'
+  katana: `${M}weapons/katana.glb`,
+  ekatana: `${M}weapons/ekatana.glb`,
+  greatsword: `${M}weapons/greatsword.glb`,
+  bo: `${M}weapons/bo.glb`,
+  kama: `${M}weapons/kama.glb`,
+  kunai: `${M}weapons/kunai.glb`,
+  shuriken: `${M}weapons/shuriken.glb`,
+  longbow: `${M}weapons/bow.glb`,
+  arrow: `${M}weapons/arrow.glb`
 };
 
 /** A loaded mocap character: its skinned scene (cloned per instance) and clips by name. */
