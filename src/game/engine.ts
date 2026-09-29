@@ -101,6 +101,12 @@ const GHOST_DASH = new THREE.Color(0x2a2464);
 const GHOST_PERFECT = new THREE.Color(0x6a4a18);
 const DUST_BASE = new THREE.Color(0.55, 0.5, 0.44); // seconds after pressing guard that an incoming strike is deflected
 const PLAYER_MAX_POSTURE = 100;
+// Swings cost stamina on the mocap rig, so a dodge has to stay affordable after a combo
+const DASH_COST = 22;
+const STAMINA_REGEN = 30; // per second
+// Incoming hits at or below this (arrows, an archer's kick) only jolt the Rōnin - he keeps
+// moving and swinging; anything heavier knocks him out of what he was doing
+const LIGHT_HIT = 10;
 
 // Canvas sprites shared by every enemy: the perilous-attack kanji and the deathblow mark
 let dangerTex: THREE.CanvasTexture | null = null;
@@ -1478,9 +1484,9 @@ export class GameEngine {
   }
 
   public dash() {
-    if (this.state !== 'play' || this.player.dash > 0 || this.player.st < 28) return;
+    if (this.state !== 'play' || this.player.dash > 0 || this.player.st < DASH_COST) return;
     if (this.player.staggerT > 0 || this.cine || !this.freeToCancel()) return;
-    this.player.st -= 28;
+    this.player.st -= DASH_COST;
     this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
     this.cancelAct(0.08);
     this.player.dash = 0.2;
@@ -2515,6 +2521,7 @@ export class GameEngine {
 
   public damagePlayer(dmg: number, nx: number, nz: number) {
     if (this.player.inv > 0 || this.state !== 'play') return;
+    const dmgIn = dmg;
     const rolled = this.rollDamage(dmg, false); // incoming damage: variance + label only, no crit bonus
     dmg = rolled.dmg;
     this.player.hp = Math.max(0, this.player.hp - dmg);
@@ -2526,9 +2533,15 @@ export class GameEngine {
       this.player.anim = null;
     }
     if (this.player.rig.clip && this.player.hp > 0 && this.act?.kind !== 'stagger') {
-      // no hyper armour: a hit knocks you out of whatever you were doing
-      this.actQueued = false;
-      this.startAct('hurt', Math.random() < 0.5 ? 'hit3' : 'hit2', { speed: 1.35, to: 1.1, cancel: 0.5, end: 1.0, fadeIn: 0.06 });
+      if (dmgIn <= LIGHT_HIT) {
+        // a jolt layered over whatever he's doing (a sip still spills, though)
+        if (this.act?.kind === 'heal') this.cancelAct(0.15);
+        this.player.rig.clip.play('hit3', { from: 0.12, to: 0.6, speed: 1.5, weight: 0.45, fadeIn: 0.04, fadeOut: 0.15 });
+      } else {
+        // a real blow knocks him out of whatever he was doing
+        this.actQueued = false;
+        this.startAct('hurt', Math.random() < 0.5 ? 'hit3' : 'hit2', { speed: 1.35, to: 1.1, cancel: 0.5, end: 1.0, fadeIn: 0.06 });
+      }
     }
     this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.3, this.player.pos.z), IMPACT_HURT, 1.4, 0.18);
     this.player.dashInv = false;
@@ -3054,6 +3067,13 @@ export class GameEngine {
       }
     }
 
+    // mocap rig: steering out of a move's recovery (past its cancel point, nothing left to
+    // land) ends it, so a combo you stop pressing doesn't pin the feet to the ground
+    const a = this.act;
+    if (a && amt > 0.2 && a.shot.t >= a.cancelAt && a.events.length === 0 && !a.onChain) {
+      if (a.kind === 'attack' || a.kind === 'special' || a.kind === 'hurt' || a.kind === 'block' || a.kind === 'deflect') this.cancelAct(0.2);
+    }
+
     if (this.player.dash > 0) {
       this.player.dash -= dt;
       this.player.pos.addScaledVector(this.player.dashDir, TUNE.dashSpeed * dt);
@@ -3163,7 +3183,7 @@ export class GameEngine {
     }
     this.updateCinematic(dt);
 
-    this.player.st = Math.min(this.player.maxSt, this.player.st + 22 * dt);
+    this.player.st = Math.min(this.player.maxSt, this.player.st + STAMINA_REGEN * dt);
     this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
 
     // Bō special: spinning AoE tick for its duration, then releases the attack button
