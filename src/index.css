@@ -81,3 +81,25 @@ html, body, #root {
   text-shadow: 0 0 2px #2a0000, 4px 6px 0 rgba(10, 0, 0, 0.85), 0 0 40px rgba(255, 30, 10, 0.65);
   animation: deathblowIn 0.95s ease-out forwards;
 }
+
+@keyframes cardIn {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.card-in {
+  animation: cardIn 0.32s ease-out both;
+}
+
+/* short landscape phones: drop decorative blocks so the actions stay on screen */
+@media (max-height: 520px) {
+  .short-hide {
+    display: none;
+  }
+}

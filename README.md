@@ -28,6 +28,12 @@ O repositório já traz `netlify.toml` (comando de build, pasta publicada, vers�
 
 O workflow `.github/workflows/pages.yml` gera o build e publica em `https://johnnybahia.github.io/ninja/` a cada push na `main`. Uma vez só: em *Settings → Pages → Build and deployment → Source*, escolha **GitHub Actions** (não "Deploy from a branch" — a raiz e `/docs` não servem, o jogo precisa ser compilado). O caminho base `/ninja/` é passado ao build pela variável `VITE_BASE`; sem ela (Netlify, `npm run dev`) o base é `/`.
 
+## Progressão
+
+- **Cartas de nível** (`src/game/cards.ts`): cada nível oferece 3 cartas, uma é mantida na partida. Todas têm nível máximo; o jogo pausa durante a escolha (teclas 1–3 no PC).
+- **Honra 誉** (`src/game/meta.ts`): ganha por abate, finalização, onda limpa, nota da onda (D→S) e chefe. Vale mesmo ao morrer ou sair da partida e é gasta no **Templo da Honra** (menu e tela final) em 6 melhorias permanentes com teto (~+25% no total). Salva em `localStorage` (`kage_meta_v1`, versionado); se o navegador bloquear, o progresso fica só na sessão.
+- **Nota da onda**: sem levar dano (2) + rapidez (1) + finalizações (1) + aparos (1) → S/A/B/C/D, com bônus de Honra.
+
 ## Estrutura
 
 - `src/game/` — motor do jogo (Three.js puro): cenário (`world.ts`, `garden.ts`), personagens procedurais (`characters.ts`, `animation.ts`, `rigs.ts`), personagem com mocap (`clipRig.ts`), tabela de golpes com frames de impacto e janelas de combo (`moves.ts`), carregamento dos modelos (`models.ts`), combate e loop principal (`engine.ts`), pós-processamento (`postfx.ts`), texturas com relevo (`surfaces.ts`).

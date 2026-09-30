@@ -35,6 +35,8 @@ import { BladeSeg, makeSeg, sweepVsCapsule, BLADE_SEG, MAGNET_REACH, HURT_BOTTOM
 import { DebugDraw } from './debugdraw';
 import { animateCharacter, animateDeath } from './animation';
 import { TUNE } from './tunables';
+import { cardById, describeOffer, drawCards, CardOffer } from './cards';
+import { HONOR, NO_BONUS, MetaBonus, RunSummary } from './meta';
 
 // Enemy samurai reuse the Rōnin's mesh, armour darkened toward blued steel
 const ENEMY_TINT = new THREE.Color(0.42, 0.46, 0.62);
@@ -162,12 +164,15 @@ export interface GameEngineCallbacks {
   onWaveChange: (wave: number, text: string, sub: string) => void;
   onWeaponChange: (weaponIdx: number, weapon: WeaponDef) => void;
   onSpecialsUpdate: (specials: Record<number, number>) => void;
-  onGameOver: (score: number, wave: number, level: number, kills: number, bestCombo: number) => void;
+  onGameOver: (score: number, wave: number, level: number, kills: number, bestCombo: number, summary: RunSummary) => void;
   onQualityChange?: (setting: QualitySetting, effective: Quality) => void;
   onPostureChange?: (posture: number, max: number) => void;
   onCinematic?: (active: boolean, kind?: 'full' | 'short') => void;
   onDeathblowReady?: (ready: boolean) => void;
   onHealsChange?: (heals: number) => void;
+  onCardOffer?: (offer: CardOffer[] | null) => void;
+  onHonorChange?: (honor: number) => void;
+  onBossChange?: (boss: { hp: number; max: number } | null) => void;
 }
 
 // A committed move or reaction on the mocap rig. Times are clip seconds (see moves.ts).
@@ -375,6 +380,20 @@ export class GameEngine {
   public wave = 0;
   private waveTimer = 0;
   private clearedShown = false;
+
+  // Run progression: level-up cards, Honra (meta currency) and the per-wave grade
+  public metaBonus: MetaBonus = NO_BONUS;
+  private cardLv: Record<string, number> = {};
+  private cardOffer: string[] | null = null;
+  private picksPending = 0;
+  private pickDelay = 0;
+  private heritageT = 0;
+  private runOpen = false;
+  private finishers = 0;
+  private honor = { kill: 0, finish: 0, wave: 0, boss: 0, rank: 0 };
+  private ranks: string[] = [];
+  private waveStat = { t0: 0, enemies: 0, finishers: 0, deflects: 0 };
+  private lastBossKey = -1;
   private time = 0;
   private clock = new THREE.Clock();
   private reqId: number | null = null;
@@ -725,6 +744,8 @@ export class GameEngine {
     if (first !== this.world.atmIndex) this.world.setAtmosphere(first, true);
     this.paused = false;
     this.state = 'play';
+    this.runOpen = true;
+    this.heritageT = this.metaBonus.startSpecial > 0 ? 6 : 0;
     this.nextWave();
     if (!this.isRunning) {
       this.isRunning = true;
@@ -757,15 +778,28 @@ export class GameEngine {
     this.dust.clear();
     this.ghosts.clear();
 
-    this.player.hp = 60;
-    this.player.maxHp = 60;
-    this.player.st = 100;
-    this.player.maxSt = 100;
+    this.cardLv = {};
+    this.cardOffer = null;
+    this.picksPending = 0;
+    this.pickDelay = 0;
+    this.heritageT = 0;
+    this.finishers = 0;
+    this.honor = { kill: 0, finish: 0, wave: 0, boss: 0, rank: 0 };
+    this.ranks = [];
+    this.lastBossKey = -1;
+    this.callbacks.onCardOffer?.(null);
+    this.callbacks.onHonorChange?.(0);
+    this.callbacks.onBossChange?.(null);
+    const mb = this.metaBonus;
+    this.player.maxHp = 60 + mb.hp;
+    this.player.hp = this.player.maxHp;
+    this.player.maxSt = 100 + mb.st;
+    this.player.st = this.player.maxSt;
     this.player.score = 0;
     this.player.level = 1;
     this.player.xp = 0;
     this.player.xpNext = 800;
-    this.player.dmgMult = 1;
+    this.player.dmgMult = 1 + mb.dmg;
     this.player.killCombo = 0;
     this.player.killComboT = 0;
     this.player.hitCombo = 0;
@@ -782,10 +816,10 @@ export class GameEngine {
     this.player.staggerT = 0;
     this.player.guardPressT = -99;
     this.player.lastPostureSent = -1;
-    this.player.heals = 3;
+    this.player.heals = this.healsPerWave();
     this.player.healT = 0;
     this.player.dbReady = false;
-    this.callbacks.onHealsChange?.(3);
+    this.callbacks.onHealsChange?.(this.player.heals);
     this.callbacks.onDeathblowReady?.(false);
     this.cine = null;
     this.cineW = 0;
@@ -823,8 +857,8 @@ export class GameEngine {
 
   public nextWave() {
     this.wave++;
-    this.player.heals = 3;
-    this.callbacks.onHealsChange?.(3);
+    this.player.heals = this.healsPerWave();
+    this.callbacks.onHealsChange?.(this.player.heals);
     this.clearedShown = false;
     this.player.tookDamage = false;
 
@@ -850,6 +884,7 @@ export class GameEngine {
       }
     });
 
+    this.waveStat = { t0: this.time, enemies: list.length, finishers: 0, deflects: 0 };
     let sub = boss ? 'O oni despertou' : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
     const atmIdx = atmosphereForWave(this.wave, this.atmosMode, this.world.atmIndex);
     if (atmIdx !== this.world.atmIndex) {
@@ -1535,7 +1570,7 @@ export class GameEngine {
     const roll = rand(0.82, 1.18);
     let mult = roll;
     let tier: 'weak' | 'normal' | 'crit' = 'normal';
-    if (roll >= 1.1) {
+    if (roll >= 1.1 - 0.02 * (this.cardLv.gume ?? 0)) {
       tier = 'crit';
       if (allowCrit) mult *= 1.35;
     } else if (roll <= 0.9) {
@@ -1561,13 +1596,13 @@ export class GameEngine {
   }
 
   public dash() {
-    if (this.state !== 'play' || this.player.dash > 0 || this.player.st < DASH_COST) return;
+    if (this.state !== 'play' || this.player.dash > 0 || this.player.st < this.dashCost()) return;
     if (this.player.staggerT > 0 || this.cine || !this.freeToCancel()) return;
-    this.player.st -= DASH_COST;
+    this.player.st -= this.dashCost();
     this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
     this.cancelAct(0.08);
     this.player.dash = 0.2;
-    this.player.inv = Math.max(this.player.inv, 0.3);
+    this.player.inv = Math.max(this.player.inv, 0.3 + 0.04 * (this.cardLv.sombra ?? 0));
     this.player.dashInv = true;
     this.player.comboT = 0;
     this.player.tornado = 0;
@@ -2706,6 +2741,8 @@ export class GameEngine {
     this.cancelStrike(e);
 
     this.player.kills++;
+    if (e.type === 'boss') this.addHonor('boss', HONOR.boss);
+    else this.addHonor('kill', HONOR.kill[e.type] ?? 1);
     const pts = e.type === 'boss' ? 1200 : e.type === 'archer' ? 120 : 80;
     this.player.score += pts;
     this.callbacks.onScoreChange(this.player.score);
@@ -2732,17 +2769,147 @@ export class GameEngine {
 
   private addXp(pts: number) {
     this.player.xp += pts;
-    if (this.player.xp >= this.player.xpNext) {
+    while (this.player.xp >= this.player.xpNext) {
       this.player.xp -= this.player.xpNext;
       this.player.level++;
-      this.player.maxHp = Math.min(140, this.player.maxHp + 8);
       this.player.hp = Math.min(this.player.maxHp, this.player.hp + 20);
-      this.player.dmgMult += 0.03;
       this.player.xpNext = Math.round(this.player.xpNext * 1.35);
       sfx.levelup();
+      // the reward is a choice: three cards, one kept (opened once the moment has passed)
+      this.picksPending++;
+      this.pickDelay = Math.max(this.pickDelay, 0.7);
       this.callbacks.onHpChange(this.player.hp, this.player.maxHp);
     }
     this.callbacks.onXpChange(this.player.xp, this.player.xpNext, this.player.level);
+  }
+
+  private healsPerWave() {
+    return 3 + this.metaBonus.heals + (this.cardLv.cabaca ?? 0);
+  }
+
+  private dashCost() {
+    return Math.max(8, DASH_COST - 3 * (this.cardLv.passo ?? 0));
+  }
+
+  private specialDuration() {
+    return SPECIAL_DURATION + 5 * (this.cardLv.pergaminho ?? 0);
+  }
+
+  /** Adds Honra to the run (Espólio scales it); returns what was actually added. */
+  private addHonor(kind: keyof typeof this.honor, base: number): number {
+    const v = base * (1 + 0.15 * (this.cardLv.espolio ?? 0));
+    this.honor[kind] += v;
+    this.callbacks.onHonorChange?.(this.honorTotal());
+    return v;
+  }
+
+  private honorTotal() {
+    const h = this.honor;
+    return Math.round(h.kill + h.finish + h.wave + h.boss + h.rank);
+  }
+
+  private makeSummary(): RunSummary {
+    const h = this.honor;
+    return {
+      score: Math.round(this.player.score),
+      wave: this.wave,
+      level: this.player.level,
+      kills: this.player.kills,
+      bestCombo: this.player.bestCombo,
+      finishers: this.finishers,
+      honor: { kill: Math.round(h.kill), finish: Math.round(h.finish), wave: Math.round(h.wave), boss: Math.round(h.boss), rank: Math.round(h.rank), total: this.honorTotal() },
+      cards: { ...this.cardLv },
+      ranks: [...this.ranks]
+    };
+  }
+
+  /** The finished (or abandoned) run's results, once; null if it was already collected. */
+  public takeRunSummary(): RunSummary | null {
+    if (!this.runOpen) return null;
+    this.runOpen = false;
+    return this.makeSummary();
+  }
+
+  // Grade of the wave just cleared: staying unhit matters most, then speed, finishers, parries
+  private waveRank(): 'S' | 'A' | 'B' | 'C' | 'D' {
+    const w = this.waveStat;
+    let pts = 0;
+    if (!this.player.tookDamage) pts += 2;
+    if (this.time - w.t0 <= 10 + 7 * w.enemies) pts += 1;
+    if (w.finishers >= Math.ceil(w.enemies * 0.4)) pts += 1;
+    if (w.deflects >= 3) pts += 1;
+    return pts >= 5 ? 'S' : pts === 4 ? 'A' : pts === 3 ? 'B' : pts === 2 ? 'C' : 'D';
+  }
+
+  private openCardOffer() {
+    const ids = drawCards(this.cardLv);
+    if (!ids.length) {
+      // every card maxed: the level still pays out
+      this.picksPending = 0;
+      this.player.hp = Math.min(this.player.maxHp, this.player.hp + 25);
+      this.callbacks.onHpChange(this.player.hp, this.player.maxHp);
+      return;
+    }
+    this.cardOffer = ids;
+    // nothing may stay held down under the overlay
+    this.input.attackHeld = false;
+    this.input.guardHeld = false;
+    this.callbacks.onCardOffer?.(describeOffer(ids, this.cardLv));
+  }
+
+  public pickCard(id: string) {
+    if (!this.cardOffer || !this.cardOffer.includes(id)) return;
+    const def = cardById(id);
+    if (!def) return;
+    const lvl = (this.cardLv[id] ?? 0) + 1;
+    if (lvl > def.max) return;
+    this.cardLv[id] = lvl;
+    const P = this.player;
+    if (id === 'lamina') P.dmgMult += 0.07;
+    else if (id === 'vigor') {
+      P.maxHp += 10;
+      P.hp = Math.min(P.maxHp, P.hp + 10);
+      this.callbacks.onHpChange(P.hp, P.maxHp);
+    } else if (id === 'folego') {
+      P.maxSt += 12;
+      P.st = Math.min(P.maxSt, P.st + 12);
+      this.callbacks.onStaminaChange(P.st, P.maxSt);
+    } else if (id === 'cabaca') {
+      P.heals++;
+      this.callbacks.onHealsChange?.(P.heals);
+    }
+    this.cardOffer = null;
+    this.picksPending = Math.max(0, this.picksPending - 1);
+    this.pickDelay = 0.35;
+    this.callbacks.onCardOffer?.(null);
+    sfx.special();
+  }
+
+  // Per-frame bookkeeping for the run: the Herança scroll, queued level-up cards and the
+  // boss's life bar
+  private stepProgress(dt: number) {
+    if (this.heritageT > 0) {
+      this.heritageT -= dt;
+      if (this.heritageT <= 0) {
+        const i = this.loadoutPool()[0];
+        const w = this.weapons[i];
+        if (w && SPECIALS[w.id]) {
+          this.player.special[i] = this.metaBonus.startSpecial;
+          this.callbacks.onSpecialsUpdate({ ...this.player.special });
+          this.callbacks.onWaveChange(this.wave, 'Herança', `${w.name}: especial por ${this.metaBonus.startSpecial}s`);
+        }
+      }
+    }
+    if (this.picksPending > 0 && !this.cardOffer && !this.cine && this.deadT < 0 && this.player.hp > 0) {
+      this.pickDelay -= dt;
+      if (this.pickDelay <= 0) this.openCardOffer();
+    }
+    const boss = this.enemies.find((e) => e.type === 'boss' && !e.dead);
+    const key = boss ? Math.round((Math.max(0, boss.hp) / boss.maxHp) * 200) : -1;
+    if (key !== this.lastBossKey) {
+      this.lastBossKey = key;
+      this.callbacks.onBossChange?.(boss ? { hp: Math.max(0, boss.hp), max: boss.maxHp } : null);
+    }
   }
 
   private loadoutPool(): number[] {
@@ -2912,7 +3079,13 @@ export class GameEngine {
 
   private gameOver() {
     this.state = 'over';
-    this.callbacks.onGameOver(Math.round(this.player.score), this.wave, this.player.level, this.player.kills, this.player.bestCombo);
+    const summary = this.makeSummary();
+    this.runOpen = false;
+    this.cardOffer = null;
+    this.picksPending = 0;
+    this.callbacks.onCardOffer?.(null);
+    this.callbacks.onBossChange?.(null);
+    this.callbacks.onGameOver(Math.round(this.player.score), this.wave, this.player.level, this.player.kills, this.player.bestCombo, summary);
   }
 
   // ---------------------------------------------------------------------------
@@ -3137,6 +3310,7 @@ export class GameEngine {
     const canAct = this.player.staggerT <= 0;
     const deflect = canAct && st.kind !== 'sweep' && this.time - this.player.guardPressT <= DEFLECT_WINDOW;
     if (deflect) {
+      this.waveStat.deflects++;
       this.faceEnemy(e);
       const mid = contact ? this.tmpV.copy(contact) : this.tmpV.set(this.player.pos.x - nx * 0.75, this.player.pos.y + 1.35, this.player.pos.z - nz * 0.75);
       this.impacts.spawn(mid, IMPACT_DEFLECT, st.kind === 'thrust' ? 2.4 : 1.9, 0.16);
@@ -3351,6 +3525,15 @@ export class GameEngine {
         else this.triggerSlowmo(c.full ? 0.5 : 0.25, c.full ? 0.28 : 0.45);
       }
       sfx.deathblow();
+      this.finishers++;
+      this.waveStat.finishers++;
+      this.addHonor('finish', HONOR.finisher);
+      const sede = 6 * (this.cardLv.sede ?? 0);
+      if (sede > 0) {
+        this.player.hp = Math.min(this.player.maxHp, this.player.hp + sede);
+        this.callbacks.onHpChange(this.player.hp, this.player.maxHp);
+        this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.4, this.player.pos.z, `+${sede}`, '#7affb0', 1.1);
+      }
       if (e.type === 'boss' && (e.dbCount || 0) === 0 && e.hp > e.maxHp * 0.5) {
         // the Oni survives the first deathblow with half its life taken
         e.dbCount = 1;
@@ -3609,7 +3792,7 @@ export class GameEngine {
     // posture: recovers after a short pause, faster while guarding; stagger ticks down
     this.player.postureT += dt;
     if (this.player.postureT > 1 && this.player.posture > 0) {
-      this.player.posture = Math.max(0, this.player.posture - (this.input.guardHeld ? 28 : 18) * dt);
+      this.player.posture = Math.max(0, this.player.posture - (this.input.guardHeld ? 28 : 18) * dt * (1 + this.metaBonus.postureRecov + 0.2 * (this.cardLv.ferro ?? 0)));
     }
     if (this.player.staggerT > 0) this.player.staggerT -= dt;
     if (this.gourd) this.gourd.visible = this.player.healT > 0;
@@ -3637,7 +3820,7 @@ export class GameEngine {
     }
     this.updateCinematic(dt);
 
-    this.player.st = Math.min(this.player.maxSt, this.player.st + STAMINA_REGEN * dt);
+    this.player.st = Math.min(this.player.maxSt, this.player.st + (STAMINA_REGEN + 4 * (this.cardLv.folego ?? 0)) * dt);
     this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
 
     // Bō special: spinning AoE tick for its duration, then releases the attack button
@@ -4270,10 +4453,10 @@ export class GameEngine {
       s.glyph.visible = s.t < 11 || Math.floor(s.t * 6) % 2 === 0;
       const got = Math.hypot(s.x - this.player.pos.x, s.z - this.player.pos.z) < 1.4;
       if (got) {
-        this.player.special[s.w] = SPECIAL_DURATION;
+        this.player.special[s.w] = this.specialDuration();
         this.callbacks.onSpecialsUpdate({ ...this.player.special });
         const w = this.weapons[s.w];
-        this.callbacks.onWaveChange(this.wave, SPECIALS[w.id]?.name ?? 'Especial', `${w.name}: especial por ${SPECIAL_DURATION}s`);
+        this.callbacks.onWaveChange(this.wave, SPECIALS[w.id]?.name ?? 'Especial', `${w.name}: especial por ${this.specialDuration()}s`);
         sfx.special();
       }
       if (got || s.t > 15) {
@@ -4347,7 +4530,7 @@ export class GameEngine {
   public loop = () => {
     this.reqId = requestAnimationFrame(this.loop);
     const real = Math.min(this.clock.getDelta(), 0.05);
-    if (this.paused && this.state === 'play') {
+    if ((this.paused || this.cardOffer) && this.state === 'play') {
       this.render();
       return;
     }
@@ -4362,6 +4545,7 @@ export class GameEngine {
     this.time += dt;
 
     if (this.state === 'play') {
+      this.stepProgress(dt);
       this.updatePlayerMovementAndCamera(dt);
       this.updateEnemies(dt);
       this.updateProjectiles(dt);
@@ -4373,7 +4557,12 @@ export class GameEngine {
       if (!alive && this.wave > 0) {
         if (!this.clearedShown) {
           this.clearedShown = true;
-          this.callbacks.onWaveChange(this.wave, 'Onda Limpa', `+${100 * this.wave} pontos`);
+          const rank = this.waveRank();
+          this.ranks.push(rank);
+          const gain = Math.round(this.addHonor('wave', HONOR.waveBase + HONOR.wavePer * this.wave) + this.addHonor('rank', HONOR.rank[rank]));
+          this.player.score += 100 * this.wave;
+          this.callbacks.onScoreChange(this.player.score);
+          this.callbacks.onWaveChange(this.wave, `Onda limpa · Nota ${rank}`, `+${100 * this.wave} pontos · +${gain} 誉`);
           this.player.hp = Math.min(this.player.maxHp, this.player.hp + 20);
           this.callbacks.onHpChange(this.player.hp, this.player.maxHp);
         }
