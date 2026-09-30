@@ -406,6 +406,8 @@ export class GameEngine {
   private shocks: { x: number; z: number; r: number; mesh: THREE.Mesh; hit: boolean }[] = [];
   private waveStat = { t0: 0, enemies: 0, finishers: 0, deflects: 0 };
   private lastBossKey = -1;
+  private lastHardDef = -99;
+  private timers: { at: number; fn: () => void }[] = [];
   private time = 0;
   private clock = new THREE.Clock();
   private reqId: number | null = null;
@@ -799,6 +801,7 @@ export class GameEngine {
     this.honor = { kill: 0, finish: 0, wave: 0, boss: 0, rank: 0, mod: 0 };
     this.ranks = [];
     this.lastBossKey = -1;
+    this.timers = [];
     this.waveMod = null;
     this.prevMod = null;
     this.enemyTime = 1;
@@ -959,7 +962,8 @@ export class GameEngine {
   }
 
   private spawnEnemy(type: 'samurai' | 'archer' | 'boss', x: number, z: number) {
-    const hpMul = 1 + (this.wave - 1) * 0.15;
+    // tougher fights: every enemy scales with the wave, all live-tunable (the Oni softer)
+    const hpMul = (1 + (this.wave - 1) * TUNE.enemyHpScale) * (type === 'boss' ? 1 + (TUNE.enemyHp - 1) * 0.3 : TUNE.enemyHp);
     let rig: RigInstance;
     let bowObj: THREE.Object3D | null = null;
     let weaponObj: THREE.Object3D | null = null;
@@ -1074,7 +1078,7 @@ export class GameEngine {
       bar,
       barFg: fg,
       posture: 0,
-      maxPosture: type === 'boss' ? 320 : type === 'archer' ? 60 : 100,
+      maxPosture: (type === 'boss' ? 320 : type === 'archer' ? 60 : 100) * (type === 'boss' ? 1 : TUNE.enemyPosture),
       postureT: 0,
       brokenT: 0,
       mode: 'approach',
@@ -1489,7 +1493,13 @@ export class GameEngine {
     canvas.height = 72;
     const ctx = canvas.getContext('2d');
     if (ctx) {
-      ctx.font = 'bold 42px "Zen Kaku Gothic New", sans-serif';
+      // long words shrink to fit the label instead of being cut at its edges
+      let size = 42;
+      ctx.font = `bold ${size}px "Zen Kaku Gothic New", sans-serif`;
+      while (size > 18 && ctx.measureText(text).width > 176) {
+        size -= 2;
+        ctx.font = `bold ${size}px "Zen Kaku Gothic New", sans-serif`;
+      }
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.lineJoin = 'round';
@@ -2520,6 +2530,51 @@ export class GameEngine {
   }
 
   // draw (clip) -> hold at full draw -> loose, the arrow leaving from the bow itself
+  // The archer looses its shot. Some shots lead the player's movement (a runner used to
+  // dodge every arrow just by moving), damage grows with the wave, and from wave 4 a shot
+  // is a short volley: a second (third from wave 8) arrow follows a beat later, fanned off
+  // the line. Arrows are still a jolt, not a stagger (see damagePlayer's `light`).
+  private fireArrows(e: EnemyInstance, ox: number, oy: number, oz: number) {
+    const n = this.wave >= 8 ? 3 : this.wave >= 4 ? 2 : 1;
+    const dmg = Math.round((TUNE.arrowDmg + Math.min(4, (this.wave - 1) * 0.5)) * (n > 1 ? 0.8 : 1));
+    const speed = 22;
+    const loose = (ox: number, oy: number, oz: number, fan: number) => {
+      const P = this.player;
+      let ax = P.pos.x - ox;
+      let az = P.pos.z - oz;
+      if (Math.random() < TUNE.arrowLead) {
+        const t = (Math.hypot(ax, az) || 1) / speed;
+        ax += P.vel.x * t * 0.85;
+        az += P.vel.z * t * 0.85;
+      }
+      const len = Math.hypot(ax, az) || 1;
+      ax /= len;
+      az /= len;
+      const c = Math.cos(fan);
+      const sn = Math.sin(fan);
+      this.spawnProj({
+        type: 'arrow',
+        friendly: false,
+        pos: new THREE.Vector3(ox, oy, oz),
+        vel: new THREE.Vector3((ax * c - az * sn) * speed, 0, (ax * sn + az * c) * speed),
+        dmg,
+        life: 2
+      });
+      sfx.arrow();
+    };
+    loose(ox, oy, oz, 0);
+    const fans = n === 2 ? [(Math.random() < 0.5 ? -1 : 1) * 0.12] : n === 3 ? [-0.12, 0.12] : [];
+    fans.forEach((fan, i) => {
+      this.timers.push({
+        at: this.time + 0.2 * (i + 1),
+        fn: () => {
+          if (e.dead || e.brokenT > 0 || this.cine) return;
+          loose(e.pos.x + Math.sin(e.yaw) * 0.6, oy, e.pos.z + Math.cos(e.yaw) * 0.6, fan);
+        }
+      });
+    });
+  }
+
   private stepArcherShot(e: EnemyInstance, nx: number, nz: number, dt: number) {
     const b = e.bow!;
     const ctl = e.rig.clip!;
@@ -2536,15 +2591,7 @@ export class GameEngine {
         b.t = 0;
         e.rig.root.updateMatrixWorld(true);
         e.rig.handL.getWorldPosition(this.tmpH);
-        this.spawnProj({
-          type: 'arrow',
-          friendly: false,
-          pos: new THREE.Vector3(this.tmpH.x + nx * 0.3, this.tmpH.y, this.tmpH.z + nz * 0.3),
-          vel: new THREE.Vector3(nx * 22, 0, nz * 22),
-          dmg: 8,
-          life: 2
-        });
-        sfx.arrow();
+        this.fireArrows(e, this.tmpH.x + nx * 0.3, this.tmpH.y, this.tmpH.z + nz * 0.3);
         this.enemyClip(e, 'release', { from: 0.12, fadeIn: 0.04 });
       }
     } else if (b.t >= 0.45) {
@@ -2671,28 +2718,131 @@ export class GameEngine {
     return any;
   }
 
-  public hitEnemy(e: EnemyInstance, dmg: number, nx: number, nz: number, kb: number, heavy: boolean, hit?: HitInfo) {
-    if (e.dead) return;
-    // Samurai may raise their guard against hits from the front; blocked hits only
-    // build posture (keep pressing to break it). Specials cut through the guard.
+  // What an enemy does about a blow that just connected. Blocks (guard up, only builds its
+  // posture) were always there; parries (the blade is turned aside, the swing bounces and
+  // the enemy answers) and sidesteps (the blow cuts air, then it comes back) are new.
+  // Fairness: a committed enemy (winding up / striking), a staggered or broken one never
+  // defends; one enemy rests 2.5 s after a parry/sidestep and no two happen within half a
+  // second of each other; after 3 blows in a row with no defence the odds climb, so it
+  // reads as luck without long droughts or unfair streaks. Specials cut through all of it.
+  private rollEnemyDefense(e: EnemyInstance, nx: number, nz: number): 'none' | 'block' | 'parry' | 'dodge' {
+    if (this.spHit || e.dead) return 'none';
+    const boss = e.type === 'boss';
+    if (e.type !== 'samurai' && !boss) return 'none';
+    if ((e.dodgeT ?? 0) > 0) return 'dodge'; // still out of reach
+    if (e.brokenT > 0 || e.staggerT > 0 || e.strike) return 'none';
     const facing = Math.abs(wrap(Math.atan2(-nx, -nz) - e.yaw)) < 1.15;
-    const guardChance = 0.22 + Math.min(0.3, this.wave * 0.03);
-    const canGuard = e.type === 'samurai' && !this.spHit && e.brokenT <= 0 && !e.strike && e.staggerT <= 0 && facing;
-    if (canGuard && (e.guardT > 0 || Math.random() < guardChance)) {
+    if (!facing) return 'none';
+    if (e.guardT > 0) return 'block';
+    const k = 1 + Math.min(0.6, (this.wave - 1) * 0.06);
+    const elite = !!e.elite;
+    let block = (0.22 + Math.min(0.3, this.wave * 0.03)) * TUNE.enemyBlock;
+    let parry = TUNE.enemyParry * k * (elite ? 1.4 : 1);
+    let dodge = TUNE.enemyDodge * k * (elite ? 0.8 : 1);
+    if (boss) {
+      block = 0.1 * TUNE.enemyBlock * (e.fury ? 0.6 : 1);
+      parry = 0;
+      dodge = 0;
+    }
+    if ((e.defCd ?? 0) > 0 || this.time - this.lastHardDef < 0.5) {
+      parry = 0;
+      dodge = 0;
+    } else {
+      const pity = Math.min(0.3, 0.07 * Math.max(0, (e.dry ?? 0) - 2));
+      parry += pity * 0.5;
+      dodge += pity * 0.5;
+    }
+    const r = Math.random();
+    if (r < parry) return 'parry';
+    if (r < parry + dodge) return 'dodge';
+    if (r < parry + dodge + block) return 'block';
+    return 'none';
+  }
+
+  private enemyDefend(e: EnemyInstance, kind: 'block' | 'parry' | 'dodge', dmg: number, nx: number, nz: number, heavy: boolean, hit?: HitInfo) {
+    const nl = Math.hypot(nx, nz) || 1;
+    const sc = this.sizeOf(e);
+    const p = hit ? this.tmpV.copy(hit.point) : this.tmpV.set(e.pos.x - (nx / nl) * 0.6, e.pos.y + 1.35 * sc, e.pos.z - (nz / nl) * 0.6);
+    const labelY = e.pos.y + (e.type === 'boss' ? 5.6 : 2.9);
+    e.dry = 0;
+    if (kind === 'block') {
       e.mode = 'guard';
       e.guardT = 0.9;
       e.modeT = 0;
       e.flash = 0.05;
-      const nl = Math.hypot(nx, nz) || 1;
-      const p = hit ? this.tmpV.copy(hit.point) : this.tmpV.set(e.pos.x - (nx / nl) * 0.6, e.pos.y + 1.35, e.pos.z - (nz / nl) * 0.6);
       this.impacts.spawn(p, IMPACT_BLOCK, 1.2, 0.12);
       this.emitParticles(p.x, p.y, p.z, 12, 0xffc27a, 6, 1.5, 16, 0.25);
       sfx.block();
+      this.spawnLabel(e.pos.x, labelY, e.pos.z, 'BLOQUEOU', '#a9bcd8', 0.9);
       this.player.atkCd += 0.1;
       this.enemyClip(e, 'hit1', { speed: 1.5, to: 0.8, fadeIn: 0.05 });
-      this.addEnemyPosture(e, dmg * 1.35 * (heavy ? 1.4 : 1));
+      this.addEnemyPosture(e, dmg * 1.35 * TUNE.blockPosture * (heavy ? 1.4 : 1));
       return;
     }
+    if (kind === 'parry') {
+      e.defCd = 2.5;
+      this.lastHardDef = this.time;
+      e.guardT = 0;
+      this.impacts.spawn(p, IMPACT_DEFLECT, 2.3, 0.2);
+      this.emitParticles(p.x, p.y, p.z, 26, 0xffb347, 9, 2.2, 18, 0.32);
+      sfx.clang();
+      this.spawnLabel(e.pos.x, labelY, e.pos.z, 'APAROU!', '#ffb347', 1.15);
+      this.shake = Math.max(this.shake, 0.2);
+      this.fovKick = Math.min(this.fovKick, -3);
+      // both bodies freeze for a beat; the swing is spent and the combo broken
+      e.rig.clip?.pause(0.12);
+      this.parryRecoil();
+      this.addEnemyPosture(e, dmg * 0.4);
+      // ... and the enemy answers with a quick strike (its wind-up is the warning)
+      if (e.brokenT <= 0 && !this.cine) {
+        e.mode = 'attack';
+        e.modeT = 0;
+        e.comboLeft = 1;
+        e.t = 1;
+        e.cd2 = 0.3;
+        e.token = true;
+      }
+      return;
+    }
+    // sidestep: away from the attacker or across, then back in with a counter
+    e.defCd = 2.5;
+    this.lastHardDef = this.time;
+    e.dodgeT = 0.3;
+    const back = Math.random() < 0.5;
+    const side = Math.random() < 0.5 ? 1 : -1;
+    e.dodgeX = back ? nx / nl : (-nz / nl) * side;
+    e.dodgeZ = back ? nz / nl : (nx / nl) * side;
+    this.cancelStrike(e);
+    this.spawnLabel(e.pos.x, labelY, e.pos.z, 'ESQUIVOU', '#8fe0c8', 1);
+    this.puff(e.pos.x, e.pos.z, 6, 2.2, e.dodgeX, e.dodgeZ);
+    sfx.dash();
+  }
+
+  // A parried swing bounces: the rest of the move's hits are gone, the combo is broken,
+  // and the Rōnin freezes for a beat in the recoil
+  private parryRecoil() {
+    const a = this.act;
+    if (a && a.kind === 'attack') {
+      a.windows = a.windows.filter((w) => w.began);
+      a.chainAt = 99;
+      a.onChain = undefined;
+      this.actQueued = false;
+    }
+    this.player.rig.clip?.pause(0.16);
+    this.player.rig.clip?.play('hit3', { from: 0.12, to: 0.5, speed: 1.6, weight: 0.4, fadeIn: 0.04, fadeOut: 0.15 });
+    this.player.atkCd += 0.2;
+  }
+
+  public hitEnemy(e: EnemyInstance, dmg: number, nx: number, nz: number, kb: number, heavy: boolean, hit?: HitInfo) {
+    if (e.dead) return;
+    // Samurai (and, rarely, the Oni) fight back: a blow that connects may be blocked,
+    // parried or sidestepped instead of landing - see rollEnemyDefense
+    const defense = this.rollEnemyDefense(e, nx, nz);
+    if (defense !== 'none') {
+      this.enemyDefend(e, defense, dmg, nx, nz, heavy, hit);
+      return;
+    }
+    e.dry = (e.dry ?? 0) + 1;
     const rolled = this.rollDamage(dmg * this.player.dmgMult, true);
     dmg = rolled.dmg;
     e.hp -= dmg;
@@ -2911,7 +3061,7 @@ export class GameEngine {
     const w = this.waveStat;
     let pts = 0;
     if (!this.player.tookDamage) pts += 2;
-    if (this.time - w.t0 <= 10 + 7 * w.enemies) pts += 1;
+    if (this.time - w.t0 <= 12 + 10 * w.enemies) pts += 1;
     if (w.finishers >= Math.ceil(w.enemies * 0.4)) pts += 1;
     if (w.deflects >= 3) pts += 1;
     return pts >= 5 ? 'S' : pts === 4 ? 'A' : pts === 3 ? 'B' : pts === 2 ? 'C' : 'D';
@@ -2964,6 +3114,9 @@ export class GameEngine {
   // Per-frame bookkeeping for the run: the Herança scroll, queued level-up cards and the
   // boss's life bar
   private stepProgress(dt: number) {
+    for (let i = this.timers.length - 1; i >= 0; i--) {
+      if (this.time >= this.timers[i].at) this.timers.splice(i, 1)[0].fn();
+    }
     if (this.heritageT > 0) {
       this.heritageT -= dt;
       if (this.heritageT <= 0) {
@@ -3091,7 +3244,7 @@ export class GameEngine {
     this.pickups.push({ m, x, z, t: 0 });
   }
 
-  public damagePlayer(dmg: number, nx: number, nz: number) {
+  public damagePlayer(dmg: number, nx: number, nz: number, light?: boolean) {
     if (this.player.inv > 0 || this.state !== 'play') return;
     const dmgIn = dmg;
     const rolled = this.rollDamage(dmg, false); // incoming damage: variance + label only, no crit bonus
@@ -3105,7 +3258,7 @@ export class GameEngine {
       this.player.anim = null;
     }
     if (this.player.rig.clip && this.player.hp > 0 && this.act?.kind !== 'stagger') {
-      if (dmgIn <= LIGHT_HIT) {
+      if (light ?? dmgIn <= LIGHT_HIT) {
         // a jolt layered over whatever he's doing (a sip still spills, though)
         if (this.act?.kind === 'heal') this.cancelAct(0.15);
         this.player.rig.clip.play('hit3', { from: 0.12, to: 0.6, speed: 1.5, weight: 0.45, fadeIn: 0.04, fadeOut: 0.15 });
@@ -4109,6 +4262,7 @@ export class GameEngine {
       e.trail?.update(this.time);
       e.cd -= dt;
       e.cd2 -= dt;
+      if (e.defCd) e.defCd -= dt;
       e.flash -= dt;
       e.modeT += dt;
       e.postureT += dt;
@@ -4138,6 +4292,22 @@ export class GameEngine {
       } else if (e.staggerT > 0) {
         e.staggerT -= dt;
         e.yaw = turnTo(e.yaw, toP, dt * 4);
+      } else if ((e.dodgeT ?? 0) > 0) {
+        // sidestepping a blow: quick hop away, then straight back in with a counter
+        e.dodgeT = (e.dodgeT ?? 0) - dt;
+        e.yaw = turnTo(e.yaw, toP, dt * 6);
+        mvx = e.dodgeX ?? 0;
+        mvz = e.dodgeZ ?? 0;
+        spd = e.speed * 2.6;
+        if (e.dodgeT <= 0) {
+          e.dodgeT = 0;
+          e.mode = 'attack';
+          e.modeT = 0;
+          e.comboLeft = 1;
+          e.t = 1;
+          e.cd2 = 0.15;
+          e.token = true;
+        }
       } else if (e.type === 'archer' && e.rig.clip) {
         // ---- mocap archer: keep range and shoot (draw -> hold -> loose), kick anyone
         // who closes in, and (from wave 4) sidestep a swing it sees coming
@@ -4218,15 +4388,7 @@ export class GameEngine {
         }
         if (e.shotPending && e.anim && e.anim.t >= 0.45) {
           e.shotPending = false;
-          this.spawnProj({
-            type: 'arrow',
-            friendly: false,
-            pos: new THREE.Vector3(e.pos.x + nx * 0.6, 1.5, e.pos.z + nz * 0.6),
-            vel: new THREE.Vector3(nx * 22, 0, nz * 22),
-            dmg: 8,
-            life: 2
-          });
-          sfx.arrow();
+          this.fireArrows(e, e.pos.x + nx * 0.6, 1.5, e.pos.z + nz * 0.6);
         }
       } else if (e.strike) {
         // ---- winding up / striking ----
@@ -4575,7 +4737,7 @@ export class GameEngine {
             sfx.block();
           } else {
             const vl = Math.hypot(p.vel.x, p.vel.z) || 1;
-            this.damagePlayer(p.dmg, p.vel.x / vl, p.vel.z / vl);
+            this.damagePlayer(p.dmg, p.vel.x / vl, p.vel.z / vl, true);
           }
         }
       }

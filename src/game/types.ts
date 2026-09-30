@@ -177,6 +177,13 @@ export interface EnemyInstance {
   elite?: boolean;
   fury?: boolean; // the Oni's second phase
   aura?: THREE.Mesh;
+  // fighting back: rest before the next parry/sidestep, blows taken since the last defence
+  // (raises the odds of one), and a sidestep in progress
+  defCd?: number;
+  dry?: number;
+  dodgeT?: number;
+  dodgeX?: number;
+  dodgeZ?: number;
   postureBar?: THREE.Mesh;
   danger?: THREE.Sprite;
   dbMark?: THREE.Sprite;
