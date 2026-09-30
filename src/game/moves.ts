@@ -42,9 +42,9 @@ export interface ClipMove {
 export const COMBOS: Record<string, ClipMove[]> = {
   // quick horizontal cut -> the big diagonal from behind-right -> a wide head-high sweep
   katana: [
-    { clip: 'eSwordSlash', hit: [0.72], win: [[0.66, 0.84]], reach: 1.3, chain: 0.95, cancel: 0.9, end: 1.25, from: 0.42, speed: 1.9, dmg: 23, range: 2.9, arc: 2.1, kb: 4, stamina: 12 },
-    { clip: 'slash1', hit: [0.68], win: [[0.58, 0.84]], reach: 1.3, chain: 0.92, cancel: 0.86, end: 1.2, from: 0.4, speed: 2.0, dmg: 26, range: 2.9, arc: 2.1, kb: 5, stamina: 14 },
-    { clip: 'slash2', hit: [0.95], win: [[0.84, 1.06]], reach: 1.35, chain: 99, cancel: 1.25, end: 1.6, from: 0.5, speed: 2.0, dmg: 47, range: 3.2, arc: 2.3, kb: 11, heavy: true, stamina: 20 }
+    { clip: 'eSwordSlash', hit: [0.72], win: [[0.66, 0.84]], reach: 1.3, chain: 0.95, cancel: 0.9, end: 1.25, from: 0.42, speed: 2.4, dmg: 23, range: 2.9, arc: 2.1, kb: 4, stamina: 12 },
+    { clip: 'slash1', hit: [0.68], win: [[0.58, 0.84]], reach: 1.3, chain: 0.92, cancel: 0.86, end: 1.2, from: 0.4, speed: 2.5, dmg: 26, range: 2.9, arc: 2.1, kb: 5, stamina: 14 },
+    { clip: 'slash2', hit: [0.95], win: [[0.84, 1.06]], reach: 1.35, chain: 99, cancel: 1.25, end: 1.6, from: 0.5, speed: 2.5, dmg: 47, range: 3.2, arc: 2.3, kb: 11, heavy: true, stamina: 20 }
   ],
   bo: [{ clip: 'spin', hit: [0.43, 1.2], win: [[0.3, 0.52], [1.08, 1.36]], reach: 1.5, chain: 99, cancel: 1.3, end: 1.7, speed: 1.5, root: 0.45, dmg: 20, range: 3.5, arc: Math.PI * 2, kb: 10, heavy: true, stamina: 22 }],
   kama: [{ clip: 'eSwordAttack', hit: [0.62], chain: 99, cancel: 0.85, end: 1.1, from: 0.35, speed: 1.6, dmg: 29, range: 6.5, arc: 1.15, kb: -7, heavy: true, stamina: 14 }],
@@ -62,7 +62,7 @@ export const COMBOS: Record<string, ClipMove[]> = {
 
 // Special attacks (scroll pick-ups), one move each
 export const SPECIAL_MOVES: Record<string, ClipMove> = {
-  katana: { clip: 'slash2', hit: [0.95], chain: 99, cancel: 1.25, end: 1.6, from: 0.5, speed: 1.5, dmg: 39, range: 2.9, arc: 2.1, kb: 6, heavy: true, stamina: 0 },
+  katana: { clip: 'slash2', hit: [0.95], chain: 99, cancel: 1.25, end: 1.6, from: 0.5, speed: 1.9, dmg: 39, range: 2.9, arc: 2.1, kb: 6, heavy: true, stamina: 0 },
   bo: { clip: 'spin', hit: [], chain: 99, cancel: 1.6, end: 1.85, speed: 1.5, root: 0.45, dmg: 12, range: 3.4, arc: Math.PI * 2, kb: 5, stamina: 0 },
   kama: { clip: 'spin', hit: [0.47], chain: 99, cancel: 1.2, end: 1.6, speed: 1.5, dmg: 39, range: 7, arc: Math.PI * 2, kb: 6, heavy: true, stamina: 0 },
   shuriken: { clip: 'cast', hit: [], release: 0.35, chain: 99, cancel: 0.6, end: 0.95, speed: 1.6, dmg: 10, range: 0, arc: 0, kb: 3, stamina: 0 },

@@ -4268,6 +4268,7 @@ export class GameEngine {
 
     this.world.update(dt, this.time, this.player.pos, this.camera.position);
     this.renderer.toneMappingExposure = this.world.atm.exposure;
+    this.applyRimBoost(this.world.atm.rimBoost);
     if (this.fx) {
       this.fx.setLook(this.world.atm.look);
       // sun position on screen for the light shafts (fade out when it leaves the view)
@@ -4346,6 +4347,15 @@ export class GameEngine {
       this.trailPrevOk = false;
     }
     this.trail.update(this.time);
+  }
+
+  // Dark scenes lean on the characters' rim light to read their silhouettes
+  private applyRimBoost(k: number) {
+    const boost = (r: RigInstance) => {
+      if (r.rim && r.rimBase) r.rim.copy(r.rimBase).multiplyScalar(k);
+    };
+    boost(this.player.rig);
+    for (const e of this.enemies) boost(e.rig);
   }
 
   // Dev overlay (TUNE.hitDebug): hurtboxes, blade segments and contact points

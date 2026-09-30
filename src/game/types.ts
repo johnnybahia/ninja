@@ -86,6 +86,10 @@ export interface RigInstance {
   footR?: THREE.Object3D;
   plates?: THREE.Object3D[];
   flash?: { value: number };
+  // rim-light colour (a shader uniform shared by the rig's materials) and its base value,
+  // so the engine can scale it with the atmosphere (see rimBoost)
+  rim?: THREE.Color;
+  rimBase?: THREE.Color;
   cloth?: Ribbon[];
   kind?: 'ninja' | 'samurai' | 'archer' | 'oni';
   dispose?: () => void;

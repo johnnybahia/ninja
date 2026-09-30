@@ -9,6 +9,7 @@ import type { AtmosMode } from './game/atmosphere';
 import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft, ArrowUp, SlidersHorizontal } from 'lucide-react';
 import { TunePanel } from './TunePanel';
 import { loadTune } from './game/tunables';
+import { getLoadProgress, onLoadProgress } from './game/models';
 
 const SLOT_COUNT = 2;
 const SLOT_LABELS = ['Principal', 'Secundária'];
@@ -91,6 +92,11 @@ export default function App() {
     samurai: loadSlots('samurai')
   }));
   const [startingGame, setStartingGame] = useState(false);
+  // model download progress (0-100) for the start button's bar, and the black fade the
+  // screen dips through when a run starts
+  const [loadPct, setLoadPct] = useState(() => Math.round(getLoadProgress() * 100));
+  const [fadeIn, setFadeIn] = useState(false);
+  useEffect(() => onLoadProgress((f) => setLoadPct(Math.round(f * 100))), []);
   const slots = loadouts[charId];
   const slotsRef = useRef(slots);
   const heldSlotRef = useRef<number | null>(null);
@@ -291,6 +297,7 @@ export default function App() {
       // await only matters if they raced through on a slow connection, so the game never
       // starts with a not-yet-ready rig.
       setStartingGame(true);
+      setFadeIn(true);
       await eng.setCharacter(charId);
       setStartingGame(false);
       if (charId === 'samurai' && eng.charId !== 'samurai') {
@@ -298,6 +305,8 @@ export default function App() {
       }
       eng.loadout = slots;
       eng.start();
+      // let the first frame of the run render behind the black, then fade it away
+      requestAnimationFrame(() => requestAnimationFrame(() => setFadeIn(false)));
     }
     setGameState('play');
   };
@@ -947,14 +956,17 @@ export default function App() {
             <button
               onClick={handleStartGame}
               disabled={startingGame}
-              className="go-btn w-full font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] py-3.5 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+              className="go-btn relative overflow-hidden w-full font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] py-3.5 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer disabled:opacity-60 disabled:cursor-wait"
             >
-              {startingGame ? 'Carregando…' : 'Entrar em combate'}
+              {startingGame && <span className="absolute inset-y-0 left-0 bg-white/20 transition-[width] duration-200" style={{ width: `${loadPct}%` }} />}
+              <span className="relative">{startingGame ? `Carregando… ${loadPct}%` : 'Entrar em combate'}</span>
             </button>
           </div>
         </div>
       )}
 
+      {/* black dip when a run starts */}
+      <div className={`fixed inset-0 z-[60] bg-black pointer-events-none transition-opacity duration-700 ${fadeIn ? 'opacity-100' : 'opacity-0'}`} />
       {/* Game Over Screen */}
       {gameState === 'over' && (
         <div className="fixed inset-0 flex items-center justify-center bg-[rgba(22,18,31,0.85)] backdrop-blur-md p-6 z-30">
@@ -969,9 +981,10 @@ export default function App() {
             <button
               onClick={handleStartGame}
               disabled={startingGame}
-              className="font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] px-10 py-3.5 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+              className="relative overflow-hidden font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] px-10 py-3.5 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer disabled:opacity-60 disabled:cursor-wait"
             >
-              {startingGame ? 'Carregando…' : 'Recomeçar'}
+              {startingGame && <span className="absolute inset-y-0 left-0 bg-white/20 transition-[width] duration-200" style={{ width: `${loadPct}%` }} />}
+              <span className="relative">{startingGame ? `Carregando… ${loadPct}%` : 'Recomeçar'}</span>
             </button>
             <button
               onClick={() => openArsenal(charId)}

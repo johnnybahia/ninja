@@ -34,6 +34,52 @@ const WEAPON_FILES: Record<string, string> = {
   arrow: `${M}weapons/arrow.glb`
 };
 
+// Approximate download sizes (KB), the weights of the loading progress bar: the total
+// fraction is the size-weighted mean of each file's own progress
+const WEIGHT_KB: Record<string, number> = {
+  ronin: 2023,
+  archer: 892,
+  samurai2: 979,
+  giant: 996,
+  katana: 38,
+  ekatana: 102,
+  greatsword: 485,
+  bo: 31,
+  kama: 95,
+  kunai: 116,
+  shuriken: 22,
+  longbow: 17,
+  arrow: 7
+};
+const fileProgress = new Map<string, number>(); // 0..1 per file; a failed file counts as done
+const progressListeners = new Set<(fraction: number) => void>();
+
+/** Overall load progress 0..1 across every model the game preloads. */
+export function getLoadProgress(): number {
+  let done = 0;
+  let total = 0;
+  for (const [k, w] of Object.entries(WEIGHT_KB)) {
+    total += w;
+    done += w * (fileProgress.get(k) ?? 0);
+  }
+  return total ? done / total : 1;
+}
+
+export function onLoadProgress(cb: (fraction: number) => void): () => void {
+  progressListeners.add(cb);
+  return () => progressListeners.delete(cb);
+}
+
+function setFileProgress(key: string, f: number) {
+  fileProgress.set(key, Math.max(fileProgress.get(key) ?? 0, Math.min(1, f)));
+  const g = getLoadProgress();
+  progressListeners.forEach((cb) => cb(g));
+}
+
+const trackProgress = (key: string) => (e: ProgressEvent) => {
+  if (e.lengthComputable && e.total > 0) setFileProgress(key, (e.loaded / e.total) * 0.98);
+};
+
 /** A loaded mocap character: its skinned scene (cloned per instance) and clips by name. */
 export interface CharacterTemplate {
   scene: THREE.Group;
@@ -56,14 +102,19 @@ export function loadCharacter(id: CharacterModel): Promise<CharacterTemplate> {
   let p = charPromise.get(id);
   if (!p) {
     p = gltfLoader()
-      .loadAsync(CHARACTER_FILES[id])
+      .loadAsync(CHARACTER_FILES[id], trackProgress(id))
       .then((gltf) => {
         const tpl = { scene: gltf.scene, clips: new Map(gltf.animations.map((c) => [c.name, c] as const)) };
         charReady.set(id, tpl);
+        setFileProgress(id, 1);
         return tpl;
       });
-    // a failed fetch shouldn't poison the cache forever - the next caller retries
-    p.catch(() => charPromise.delete(id));
+    // a failed fetch shouldn't poison the cache forever - the next caller retries (and a
+    // failure counts as finished so the loading bar can never hang on it)
+    p.catch(() => {
+      charPromise.delete(id);
+      setFileProgress(id, 1);
+    });
     charPromise.set(id, p);
   }
   return p;
@@ -82,7 +133,7 @@ export function loadWeapons(): Promise<void> {
     weaponsPromise = Promise.all(
       Object.entries(WEAPON_FILES).map(([id, url]) =>
         gltfLoader()
-          .loadAsync(url)
+          .loadAsync(url, trackProgress(id))
           .then((gltf) => {
             gltf.scene.traverse((o) => {
               const m = o as THREE.Mesh;
@@ -93,6 +144,7 @@ export function loadWeapons(): Promise<void> {
             weaponReady.set(id, gltf.scene);
           })
           .catch((e) => console.warn('weapon model failed, using procedural', id, e))
+          .finally(() => setFileProgress(id, 1))
       )
     ).then(() => undefined);
   }

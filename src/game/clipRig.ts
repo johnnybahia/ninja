@@ -500,6 +500,9 @@ export function createClipRig(tpl: CharacterTemplate, opts: ClipRigOptions = {})
     }
     // own material per instance: the hit-flash uniform (patchCharacter) is per character
     const mat = (m.material as THREE.MeshStandardMaterial).clone();
+    // full-metal armour with no strong environment to reflect renders near-black; half
+    // the metalness keeps the sheen and lets the lights show the plates
+    mat.metalness = Math.min(mat.metalness, 0.5);
     if (opts.tint) mat.color.multiply(opts.tint);
     patchCharacter(mat, flash, rim);
     m.material = mat;
@@ -562,6 +565,8 @@ export function createClipRig(tpl: CharacterTemplate, opts: ClipRigOptions = {})
     scarf: stub(),
     mats,
     flash,
+    rim,
+    rimBase: rim.clone(),
     kind: opts.kind ?? 'samurai',
     clip: ctl,
     model,

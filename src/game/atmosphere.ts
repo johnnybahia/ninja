@@ -31,6 +31,7 @@ export interface Atmos {
   fireflies: number;
   petals: number;
   exposure: number;
+  rimBoost: number; // character rim-light multiplier (dark scenes lean on it to read silhouettes)
   mist: number; // low ground mist density 0..1
   rays: number; // light shaft strength
   look: GradeLook;
@@ -65,38 +66,40 @@ export const ATMOSPHERES: Atmos[] = [
     fireflies: 1,
     petals: 1,
     exposure: 1.05,
+    rimBoost: 1,
     mist: 0.35,
     rays: 0.9,
     look: { shadowTint: [0.88, 0.93, 1.12], highTint: [1.07, 1.0, 0.88], sat: 1.1, contrast: 1.07, vignette: 0.5, bloom: 0.55 }
   },
   {
     name: 'Noite de lua',
-    zenith: C(0.006, 0.01, 0.035),
-    horizon: C(0.05, 0.075, 0.15),
-    sunGlow: C(0.75, 0.88, 1.25),
+    zenith: C(0.008, 0.014, 0.05),
+    horizon: C(0.07, 0.1, 0.2),
+    sunGlow: C(0.85, 0.95, 1.3),
     sunDir: new THREE.Vector3(0.35, 0.42, -0.84).normalize(),
     stars: 1,
-    fog: H(0x1a2034),
-    fogNear: 18,
-    fogFar: 100,
-    sunLight: H(0x9fb4ff),
-    sunI: 1.25,
-    skyFill: H(0x3a4a80),
-    groundFill: H(0x141422),
-    hemiI: 1.0,
-    front: H(0x6a78c0),
-    frontI: 0.55,
-    ridgeFar: C(0.03, 0.04, 0.08),
-    ridgeNear: C(0.015, 0.02, 0.04),
-    glow: 3.8,
+    fog: H(0x263048),
+    fogNear: 24,
+    fogFar: 125,
+    sunLight: H(0xa9bcff),
+    sunI: 2.1,
+    skyFill: H(0x4a5c9a),
+    groundFill: H(0x222438),
+    hemiI: 1.6,
+    front: H(0x8492d0),
+    frontI: 0.95,
+    ridgeFar: C(0.045, 0.06, 0.11),
+    ridgeNear: C(0.022, 0.03, 0.055),
+    glow: 3.4,
     lantern: 9,
     shoji: 1.35,
     fireflies: 1.8,
     petals: 0.6,
-    exposure: 1.1,
-    mist: 0.45,
+    exposure: 1.3,
+    rimBoost: 2.2,
+    mist: 0.4,
     rays: 0.4,
-    look: { shadowTint: [0.82, 0.92, 1.22], highTint: [1.12, 1.0, 0.84], sat: 0.95, contrast: 1.1, vignette: 0.62, bloom: 0.8 }
+    look: { shadowTint: [0.86, 0.94, 1.18], highTint: [1.1, 1.0, 0.86], sat: 1.0, contrast: 1.04, vignette: 0.45, bloom: 0.8 }
   },
   {
     name: 'Amanhecer com névoa',
@@ -123,6 +126,7 @@ export const ATMOSPHERES: Atmos[] = [
     fireflies: 0,
     petals: 1.3,
     exposure: 1.0,
+    rimBoost: 0.9,
     mist: 1,
     rays: 1.2,
     look: { shadowTint: [0.95, 0.97, 1.06], highTint: [1.05, 1.0, 0.93], sat: 0.92, contrast: 0.98, vignette: 0.4, bloom: 0.5 }
@@ -175,7 +179,7 @@ export function blendAtmos(cur: Atmos, to: Atmos, k: number): boolean {
   cur.front.lerp(to.front, k);
   cur.ridgeFar.lerp(to.ridgeFar, k);
   cur.ridgeNear.lerp(to.ridgeNear, k);
-  const nums: (keyof Atmos)[] = ['stars', 'fogNear', 'fogFar', 'sunI', 'hemiI', 'frontI', 'glow', 'lantern', 'shoji', 'fireflies', 'petals', 'exposure', 'mist', 'rays'];
+  const nums: (keyof Atmos)[] = ['stars', 'fogNear', 'fogFar', 'sunI', 'hemiI', 'frontI', 'glow', 'lantern', 'shoji', 'fireflies', 'petals', 'exposure', 'rimBoost', 'mist', 'rays'];
   let diff = 0;
   for (const key of nums) {
     const a = cur[key] as number;
