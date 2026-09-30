@@ -88,6 +88,9 @@ const TRAIL_SPEC: Record<string, { base: number; tip: number; tint: THREE.Color 
   bo: { base: -0.95, tip: 1.55, tint: new THREE.Color(1.7, 1.25, 0.6) },
   kama: { base: 0.3, tip: 0.62, tint: new THREE.Color(1.3, 1.55, 1.35) }
 };
+const LIMB_TRAIL = { base: 0, tip: 0, tint: new THREE.Color(1.45, 1.4, 1.25) };
+const ENEMY_TRAIL = new THREE.Color(2.3, 0.95, 0.6);
+const ENEMY_TRAIL_BOSS = new THREE.Color(2.6, 0.6, 0.4);
 const TRAIL_SPECIAL = new THREE.Color(2.2, 1.6, 0.5);
 const IMPACT_NORMAL = new THREE.Color(2.2, 1.9, 1.5);
 const IMPACT_HEAVY = new THREE.Color(2.6, 1.7, 0.9);
@@ -162,7 +165,7 @@ export interface GameEngineCallbacks {
   onGameOver: (score: number, wave: number, level: number, kills: number, bestCombo: number) => void;
   onQualityChange?: (setting: QualitySetting, effective: Quality) => void;
   onPostureChange?: (posture: number, max: number) => void;
-  onCinematic?: (active: boolean) => void;
+  onCinematic?: (active: boolean, kind?: 'full' | 'short') => void;
   onDeathblowReady?: (ready: boolean) => void;
   onHealsChange?: (heals: number) => void;
 }
@@ -212,7 +215,8 @@ export class GameEngine {
   public settings: GameSettings = {
     cameraSensitivity: 1.0,
     autoCamera: true,
-    autoTurnWithStick: true
+    autoTurnWithStick: true,
+    cinematicCamera: true
   };
 
   private renderer!: THREE.WebGLRenderer;
@@ -410,8 +414,29 @@ export class GameEngine {
   private baseFov = 60;
   private prevYaw = Math.PI;
   private desatFx = 0;
-  // deathblow cinematic in progress
-  private cine: { t: number; e: EnemyInstance; struck: boolean } | null = null;
+  // deathblow cinematic in progress: `t` runs on game time up to the strike, `after` on
+  // real time since it; `side`/`dist` fix the shot's angle and distance when it starts
+  private cine: {
+    t: number;
+    after: number;
+    e: EnemyInstance;
+    struck: boolean;
+    full: boolean;
+    boss: boolean;
+    side: number;
+    dist: number;
+  } | null = null;
+  private cineSide = Math.random() < 0.5 ? 1 : -1;
+  private lastDeathblowAt = -99;
+  private cineW = 0;
+  private cineFocus = new THREE.Vector3();
+  private cineRange = 3;
+  private flashFx = 0;
+  private spikeFx = 0;
+  private punchT = 1;
+  private punchDur = 0.6;
+  private fxUv = new THREE.Vector2();
+  private fxFwd = new THREE.Vector3();
   // Mocap rig only: the move/reaction currently playing (see startAct), a buffered
   // attack press waiting for its combo window, and the death animation's countdown to
   // the game-over screen
@@ -763,6 +788,10 @@ export class GameEngine {
     this.callbacks.onHealsChange?.(3);
     this.callbacks.onDeathblowReady?.(false);
     this.cine = null;
+    this.cineW = 0;
+    this.flashFx = 0;
+    this.spikeFx = 0;
+    this.punchT = 1;
     this.callbacks.onCinematic?.(false);
     this.act = null;
     this.actQueued = false;
@@ -1071,6 +1100,7 @@ export class GameEngine {
       e.bowFx.string.geometry.dispose();
       (e.bowFx.string.material as THREE.Material).dispose();
     }
+    e.trail?.dispose();
     this.scene.remove(e.rig.root);
     this.scene.remove(e.bar);
     if (e.tele) this.scene.remove(e.tele);
@@ -2174,6 +2204,10 @@ export class GameEngine {
     if (!m) return;
     this.actQueued = false;
     this.fovKick = Math.min(this.fovKick, -4);
+    if (this.settings.cinematicCamera && w.id !== 'bo' && w.id !== 'shuriken' && w.id !== 'bomb') {
+      this.punchT = 0;
+      this.punchDur = 0.6;
+    }
     const speed = (m.speed ?? 1) * TUNE.attackSpeed;
     const opts = { speed, from: m.from, rootMotion: !!m.root, chain: m.chain, cancel: m.cancel, end: m.end, turnUntil: m.hit[0] ?? m.release ?? 0 };
     if (w.id === 'karate') {
@@ -2461,6 +2495,7 @@ export class GameEngine {
       return;
     }
     if (TUNE.hitDebug > 0.5) this.enemyBlades.push({ a: cur.a.clone(), b: cur.b.clone() });
+    this.enemyTrail(e, cur, b.limb === 'foot', b.prevOk ? b.prev.b : null, dt);
     const P = this.player;
     if (!b.hit && this.state === 'play' && !this.cine) {
       const radius = 0.45 + 0.15 + (b.limb === 'foot' ? 0.2 : 0.06);
@@ -3193,11 +3228,101 @@ export class GameEngine {
       this.player.anim = { kind: 'deathblow', t: 0, dur: 0.8, side: 0 };
     }
     e.brokenT = Math.max(e.brokenT, 3);
-    this.cine = { t: 0, e, struck: false };
-    this.triggerSlowmo(0.75, 0.38);
+    // Shot variants: the boss's first deathblow (it survives) and back-to-back finishers
+    // get a shorter version so the cinematic never wears out; the killing blow on the
+    // Oni gets the longest
+    const boss = e.type === 'boss';
+    const boss1 = boss && (e.dbCount || 0) === 0 && e.hp > e.maxHp * 0.5;
+    const cinema = this.settings.cinematicCamera;
+    const full = !cinema || (!boss1 && (boss || this.time - this.lastDeathblowAt > 4));
+    this.lastDeathblowAt = this.time;
+    this.cineSide = -this.cineSide;
+    const sc = this.sizeOf(e);
+    const shot = cinema ? this.pickCineShot(e, sc) : { side: 1, dist: 4 };
+    this.cine = { t: 0, after: 0, e, struck: false, full, boss: boss && !boss1, side: shot.side, dist: shot.dist };
+    this.triggerSlowmo(full ? 0.75 : 0.4, full ? 0.38 : 0.5);
     this.fovKick = -9;
-    this.callbacks.onCinematic?.(true);
+    this.callbacks.onCinematic?.(true, full ? 'full' : 'short');
     sfx.heavy();
+  }
+
+  // Side and distance for the finisher's camera: alternate sides between finishers, and
+  // take the other one (or come closer) when a trunk or pillar would be in the way
+  private pickCineShot(e: EnemyInstance, sc: number) {
+    const P = this.player.pos;
+    let ax = e.pos.x - P.x;
+    let az = e.pos.z - P.z;
+    const ad = Math.hypot(ax, az) || 1;
+    ax /= ad;
+    az /= ad;
+    const mx = (P.x + e.pos.x) / 2;
+    const mz = (P.z + e.pos.z) / 2;
+    const portrait = this.camera.aspect < 1;
+    const full = 4.3 * Math.sqrt(sc) * (portrait ? 1.3 : 1);
+    const clear = (side: number, d: number) => {
+      for (const k of [0.4, 0.7, 1]) {
+        const x = mx + (-az * side * 0.92 - ax * 0.4) * d * k;
+        const z = mz + (ax * side * 0.92 - az * 0.4) * d * k;
+        for (const so of this.solids) {
+          if (so.h < 2.5 || so.r > 3) continue;
+          const rr = so.r * 0.7 + 0.5;
+          if ((x - so.x) ** 2 + (z - so.z) ** 2 < rr * rr) return false;
+        }
+      }
+      return true;
+    };
+    for (const f of [1, 0.75, 0.55]) {
+      if (clear(this.cineSide, full * f)) return { side: this.cineSide, dist: full * f };
+      if (clear(-this.cineSide, full * f)) return { side: -this.cineSide, dist: full * f };
+    }
+    return { side: this.cineSide, dist: full * 0.55 };
+  }
+
+  // Finisher camera: dollies from the normal chase view to a low three-quarter side shot
+  // (a slight dutch tilt), pushes in on the strike, then eases back out. Blended over the
+  // normal camera by `cineW`, so it leaves and returns without a cut.
+  private applyCineCamera(dt: number, look: THREE.Vector3) {
+    const c = this.cine;
+    if (!c || !this.settings.cinematicCamera) {
+      this.cineW = 0;
+      return;
+    }
+    if (c.struck) c.after += dt;
+    const ss = (a: number, b: number, x: number) => {
+      const k = Math.min(1, Math.max(0, (x - a) / (b - a)));
+      return k * k * (3 - 2 * k);
+    };
+    const w = (c.struck ? 1 - ss(0.25, 0.85, c.after) : ss(0, 0.3, c.t)) * (c.full ? 1 : 0.6);
+    this.cineW = w;
+    if (w < 0.001) return;
+    const P = this.player.pos;
+    const e = c.e;
+    const sc = this.sizeOf(e);
+    let ax = e.pos.x - P.x;
+    let az = e.pos.z - P.z;
+    const ad = Math.hypot(ax, az) || 1;
+    ax /= ad;
+    az /= ad;
+    const bias = c.boss || sc > 1.5 ? 0.62 : 0.5;
+    const fy = P.y + 1.3 * (1 + (sc - 1) * 0.5);
+    this.cineFocus.set(P.x + (e.pos.x - P.x) * bias, fy, P.z + (e.pos.z - P.z) * bias);
+    const push = c.struck ? 1 : ss(0, 0.3, c.t);
+    const d = c.dist * (1 - 0.18 * push);
+    const px = -az * c.side;
+    const pz = ax * c.side;
+    const camX = this.cineFocus.x + (px * 0.92 - ax * 0.4) * d;
+    const camZ = this.cineFocus.z + (pz * 0.92 - az * 0.4) * d;
+    const camY = Math.max(0.7, P.y + 0.75 + 0.3 * sc);
+    this.camera.position.x += (camX - this.camera.position.x) * w;
+    this.camera.position.y += (camY - this.camera.position.y) * w;
+    this.camera.position.z += (camZ - this.camera.position.z) * w;
+    look.lerp(this.cineFocus, w);
+    const portrait = this.camera.aspect < 1;
+    const cf = (portrait ? 54 : c.boss ? 46 : 42) - 5 * push;
+    this.camera.fov += (cf - this.camera.fov) * w;
+    this.camera.updateProjectionMatrix();
+    this.camera.lookAt(look);
+    this.camera.rotateZ(0.05 * c.side * w);
   }
 
   private updateCinematic(dt: number) {
@@ -3205,17 +3330,26 @@ export class GameEngine {
     if (!c) return;
     c.t += dt;
     const e = c.e;
+    const cinema = this.settings.cinematicCamera;
     if (!c.struck && c.t >= 0.3) {
       c.struck = true;
       const sc = this.sizeOf(e);
       const p = this.tmpV.set(e.pos.x, e.pos.y + 1.3 * sc, e.pos.z);
-      this.impacts.spawn(p, IMPACT_CRIT, 3.2 * (sc > 1 ? 1.4 : 1), 0.35);
+      this.impacts.spawn(p, IMPACT_CRIT, (cinema ? 2 : 3.2) * (sc > 1 ? 1.4 : 1), 0.35);
       this.emitBlood(e.pos.x, e.pos.y + 1.2 * sc, e.pos.z, Math.sin(this.player.yaw), Math.cos(this.player.yaw), 70, true, true);
       this.decals.spawn(e.pos.x + Math.sin(this.player.yaw) * 1.2, e.pos.z + Math.cos(this.player.yaw) * 1.2, Math.sin(this.player.yaw), Math.cos(this.player.yaw), 2.4 * sc);
       this.emitParticles(p.x, p.y, p.z, 30, 0xff6a3a, 8, 3, 12, 0.5);
-      this.shake = Math.max(this.shake, 0.55);
+      this.shake = Math.max(this.shake, c.full ? 0.55 : 0.4);
       this.hitstop = 0.14;
       this.lastHS = performance.now();
+      if (cinema) {
+        // the impact frame: white flash + colour split, then the aftermath in slow motion
+        this.flashFx = c.full ? 0.6 : 0.22;
+        this.spikeFx = c.full ? 1 : 0.5;
+        this.fovKick = -5;
+        if (c.boss) this.triggerSlowmo(1.0, 0.25);
+        else this.triggerSlowmo(c.full ? 0.5 : 0.25, c.full ? 0.28 : 0.45);
+      }
       sfx.deathblow();
       if (e.type === 'boss' && (e.dbCount || 0) === 0 && e.hp > e.maxHp * 0.5) {
         // the Oni survives the first deathblow with half its life taken
@@ -3236,7 +3370,10 @@ export class GameEngine {
         this.killEnemy(e);
       }
     }
-    if (c.t >= 0.95) {
+    // with the cinematic camera the release is timed in real seconds after the strike
+    // (the slow motion stretches game time); without it, the original game-time span
+    const over = cinema ? c.struck && c.after >= (c.boss ? 1.1 : c.full ? 0.85 : 0.5) : c.t >= 0.95;
+    if (over || c.t >= 2) {
       this.cine = null;
       this.callbacks.onCinematic?.(false);
     }
@@ -3601,7 +3738,7 @@ export class GameEngine {
 
     this.player.rig.root.position.copy(this.player.pos);
     this.player.rig.root.rotation.y = this.player.yaw;
-    this.player.rig.root.visible = !(this.player.inv > 0 && this.player.dash <= 0 && Math.floor(this.time * 20) % 2 === 0);
+    this.player.rig.root.visible = !(this.player.inv > 0 && this.player.dash <= 0 && !this.cine && Math.floor(this.time * 20) % 2 === 0);
   }
 
   private updateCamera(dt: number) {
@@ -3620,7 +3757,13 @@ export class GameEngine {
     this.camLead.lerp(leadTarget, 1 - Math.exp(-4 * dt));
     const lookTarget = camTarget.clone().add(this.camLead);
     this.fovKick *= Math.exp(-5 * dt);
-    const fov = this.baseFov + this.fovKick;
+    // special-move punch-in: a quick push toward the fighter that eases back out
+    let punch = 0;
+    if (this.punchT < this.punchDur) {
+      this.punchT += dt;
+      punch = Math.sin(Math.PI * Math.min(1, this.punchT / this.punchDur)) ** 1.5;
+    }
+    const fov = this.baseFov + this.fovKick - 6 * punch;
     if (Math.abs(this.camera.fov - fov) > 0.01) {
       this.camera.fov = fov;
       this.camera.updateProjectionMatrix();
@@ -3632,7 +3775,7 @@ export class GameEngine {
       Math.cos(this.camYaw) * cp
     );
 
-    const want = this.camDistOverride ?? (this.camera.aspect < 1 ? 10.5 : 7.2);
+    const want = (this.camDistOverride ?? (this.camera.aspect < 1 ? 10.5 : 7.2)) * (1 - 0.3 * punch);
     // pull in when a trunk, pillar or pole stands between the camera and the player
     let limit = want;
     for (const so of this.solids) {
@@ -3657,6 +3800,7 @@ export class GameEngine {
       this.shake *= Math.exp(-9 * dt);
     }
     this.camera.lookAt(lookTarget);
+    this.applyCineCamera(dt, lookTarget);
   }
 
   private updateEnemies(dt: number) {
@@ -3670,6 +3814,7 @@ export class GameEngine {
         if (e.rig.flash) e.rig.flash.value = Math.max(0, 0.6 - e.deathT * 2);
         if (e.dbMark) e.dbMark.visible = false;
         if (e.danger) e.danger.visible = false;
+        e.trail?.update(this.time);
         // the mocap fall takes longer than the procedural collapse before sinking away
         const sinkAt = e.rig.clip ? 2.3 : 0.8;
         if (e.rig.clip) e.rig.clip.update(dt, { speed: 0, runSpeed: 1, dirX: 0, dirZ: 1 });
@@ -3690,6 +3835,7 @@ export class GameEngine {
       const toP = Math.atan2(dx, dz);
       const boss = e.type === 'boss';
 
+      e.trail?.update(this.time);
       e.cd -= dt;
       e.cd2 -= dt;
       e.flash -= dt;
@@ -4322,23 +4468,53 @@ export class GameEngine {
   private trailPrevTip = new THREE.Vector3();
   private trailPrevOk = false;
 
+  // The streak follows exactly the segment that cuts (the same one the hit test uses),
+  // so what the player sees is what connects: the blade for sword and staff, wrist-to-hand
+  // or shin-to-toe for punches and kicks. Kusarigama keeps its own short sickle span.
+  private limbTrail(model: THREE.Object3D | undefined, eff: string, a: THREE.Vector3, b: THREE.Vector3): boolean {
+    if (!model) return false;
+    const side = eff[0] === 'L' ? 'Left' : 'Right';
+    const foot = eff === 'LF' || eff === 'RF';
+    const end = model.getObjectByName(`mixamorig${side}${foot ? 'Foot' : 'Hand'}`);
+    const up = model.getObjectByName(`mixamorig${side}${foot ? 'Leg' : 'ForeArm'}`);
+    if (!end || !up) return false;
+    end.getWorldPosition(b);
+    up.getWorldPosition(a);
+    a.lerp(b, foot ? 0.35 : 0.2);
+    if (foot) {
+      const toe = model.getObjectByName(`mixamorig${side}ToeBase`);
+      if (toe) toe.getWorldPosition(b);
+    }
+    return true;
+  }
+
   private updateBladeTrail(dt: number) {
     const w = this.weapons[this.activeWeaponIdx];
-    const spec = w && TRAIL_SPEC[w.id];
+    const clip = this.player.rig.clip;
+    const eff = this.act?.move?.eff;
+    const limb = !!clip && !!eff && eff !== 'sword';
+    const spec = w && (limb ? LIMB_TRAIL : TRAIL_SPEC[w.id]);
     if (spec && (this.player.anim || this.player.tornado > 0)) {
-      const m = this.player.weaponMeshes[this.activeWeaponIdx];
-      this.player.rig.root.updateMatrixWorld(true);
-      m.localToWorld(this.trailA.set(0, 0, spec.base));
-      m.localToWorld(this.trailB.set(0, 0, spec.tip));
+      let ok = true;
+      if (limb) {
+        this.player.rig.root.updateMatrixWorld(true);
+        ok = this.limbTrail(this.player.rig.model, eff!, this.trailA, this.trailB);
+      } else {
+        const m = this.player.weaponMeshes[this.activeWeaponIdx];
+        this.player.rig.root.updateMatrixWorld(true);
+        const seg = clip ? BLADE_SEG[w.id] : undefined;
+        m.localToWorld(this.trailA.set(0, 0, seg ? seg.base : spec.base));
+        m.localToWorld(this.trailB.set(0, 0, seg ? seg.tip : spec.tip));
+      }
       // mocap: the streak follows the blade only while it is really cutting the air, so
       // it shows the actual path of the swing and not the whole animation
-      let show = true;
-      if (this.player.rig.clip) {
+      let show = ok;
+      if (clip) {
         const speed = dt > 1e-4 ? this.trailB.distanceTo(this.trailPrevTip) / dt : 0;
-        show = this.trailPrevOk && speed > 6.5;
+        show = ok && this.trailPrevOk && speed > (limb ? 5 : 6.5);
       }
       this.trailPrevTip.copy(this.trailB);
-      this.trailPrevOk = true;
+      this.trailPrevOk = ok;
       if (show) {
         this.trail.setTint(this.player.special[this.activeWeaponIdx] > 0 ? TRAIL_SPECIAL : spec.tint);
         this.trail.push(this.trailA, this.trailB, this.time);
@@ -4347,6 +4523,20 @@ export class GameEngine {
       this.trailPrevOk = false;
     }
     this.trail.update(this.time);
+  }
+
+  // Enemy swings leave a streak too: red-orange, on the live blade window only
+  private enemyTrail(e: EnemyInstance, cur: BladeSeg, foot: boolean, prevTip: THREE.Vector3 | null, dt: number) {
+    let tr = e.trail;
+    if (!tr) tr = e.trail = new BladeTrail(this.scene);
+    this.trailA.copy(cur.a);
+    this.trailB.copy(cur.b);
+    if (foot) this.trailA.y += 0.35 * this.sizeOf(e);
+    const speed = prevTip && dt > 1e-4 ? this.trailB.distanceTo(prevTip) / dt : 0;
+    if (speed > 6) {
+      tr.setTint(e.type === 'boss' ? ENEMY_TRAIL_BOSS : ENEMY_TRAIL);
+      tr.push(this.trailA, this.trailB, this.time);
+    }
   }
 
   // Dark scenes lean on the characters' rim light to read their silhouettes
@@ -4400,7 +4590,10 @@ export class GameEngine {
     const low = this.state === 'play' && this.player.hp > 0 && this.player.hp / this.player.maxHp < 0.3 ? 0.35 + Math.sin(this.time * 5) * 0.1 : 0;
     const wantDesat = this.slowmoT > 0 ? 1 : 0;
     this.desatFx += (wantDesat - this.desatFx) * Math.min(1, real * 10);
-    if (this.fx) this.fx.update(this.time, this.desatFx, Math.max(this.hurtFx, low));
+    if (this.fx) {
+      this.fx.update(this.time, this.desatFx, Math.max(this.hurtFx, low));
+      this.updateCinemaFx(real);
+    }
 
     // Auto: first trade resolution (cheap, keeps every effect), then step the preset
     // down if even the lowest scale is too slow; climb back slowly when there is room.
@@ -4431,6 +4624,31 @@ export class GameEngine {
     } else {
       this.slowWindows = 0;
       this.fastWindows = 0;
+    }
+  }
+
+  // Finisher post-processing: flash and colour split at the strike, a radial rush into it,
+  // and depth of field on the fighters (high quality only)
+  private updateCinemaFx(real: number) {
+    this.flashFx = Math.max(0, this.flashFx - real * 6);
+    this.spikeFx = Math.max(0, this.spikeFx - real * 3.2);
+    const c = this.cine;
+    let radial = 0;
+    if (c && this.settings.cinematicCamera) {
+      const ss = (a: number, b: number, x: number) => Math.min(1, Math.max(0, (x - a) / (b - a)));
+      radial = (c.struck ? 1 - ss(0, 0.35, c.after) : ss(0.12, 0.3, c.t) * 0.7) * (c.full ? 1 : 0.5);
+    }
+    const dof = this.profile.dof ? this.cineW : 0;
+    if (dof > 0.01 || radial > 0.01) {
+      this.camera.updateMatrixWorld();
+      this.tmpV.copy(this.cineFocus).project(this.camera);
+      this.fxUv.set(this.tmpV.x * 0.5 + 0.5, this.tmpV.y * 0.5 + 0.5);
+      this.camera.getWorldDirection(this.fxFwd);
+      const dist = this.tmpV.copy(this.cineFocus).sub(this.camera.position).dot(this.fxFwd);
+      this.cineRange = Math.max(1.8, (c?.dist ?? 4) * 0.6);
+      this.fx!.setCinema(this.flashFx, this.spikeFx, radial, this.fxUv, dof, dist, this.cineRange);
+    } else {
+      this.fx!.setCinema(this.flashFx, this.spikeFx, 0, this.fxUv, 0, 5, 3);
     }
   }
 

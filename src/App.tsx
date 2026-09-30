@@ -74,7 +74,7 @@ export default function App() {
   const [posture, setPosture] = useState(0);
   const [heals, setHeals] = useState(3);
   const [dbReady, setDbReady] = useState(false);
-  const [cinematic, setCinematic] = useState(false);
+  const [cinematic, setCinematic] = useState<false | 'full' | 'short'>(false);
   const [bestScore, setBestScore] = useState<number>(() => {
     try {
       return Number(localStorage.getItem('kage_best_score') || 0);
@@ -197,6 +197,13 @@ export default function App() {
   const [sensitivity, setSensitivity] = useState(1.0);
   const [autoCamera, setAutoCamera] = useState(true);
   const [autoTurnStick, setAutoTurnStick] = useState(true);
+  const [cineCam, setCineCam] = useState(() => {
+    try {
+      return localStorage.getItem('kage_cine') !== '0';
+    } catch {
+      return true;
+    }
+  });
 
   // Virtual Joystick visual state
   const [joyActive, setJoyActive] = useState(false);
@@ -240,7 +247,7 @@ export default function App() {
       onPostureChange: (p, max) => setPosture(max > 0 ? p / max : 0),
       onHealsChange: (n) => setHeals(n),
       onDeathblowReady: (r) => setDbReady(r),
-      onCinematic: (on) => setCinematic(on),
+      onCinematic: (on, kind) => setCinematic(on ? kind ?? 'full' : false),
       onQualityChange: (_setting, effective) => setEffectiveQuality(effective),
       onGameOver: (finalScore) => {
         setGameState('over');
@@ -285,8 +292,12 @@ export default function App() {
       engineRef.current.settings.cameraSensitivity = sensitivity;
       engineRef.current.settings.autoCamera = autoCamera;
       engineRef.current.settings.autoTurnWithStick = autoTurnStick;
+      engineRef.current.settings.cinematicCamera = cineCam;
     }
-  }, [sensitivity, autoCamera, autoTurnStick]);
+    try {
+      localStorage.setItem('kage_cine', cineCam ? '1' : '0');
+    } catch {}
+  }, [sensitivity, autoCamera, autoTurnStick, cineCam]);
 
   const handleStartGame = async () => {
     initAudio();
@@ -757,10 +768,10 @@ export default function App() {
       </div>
 
       {/* Deathblow cinematic: letterbox bars and a brushed 忍殺 */}
-      <div className={`fixed inset-0 z-20 pointer-events-none transition-opacity duration-150 ${cinematic ? 'opacity-100' : 'opacity-0'}`}>
-        <div className={`absolute left-0 right-0 top-0 bg-black transition-all duration-200 ${cinematic ? 'h-[11vh]' : 'h-0'}`} />
-        <div className={`absolute left-0 right-0 bottom-0 bg-black transition-all duration-200 ${cinematic ? 'h-[11vh]' : 'h-0'}`} />
-        {cinematic && (
+      <div className={`fixed inset-0 z-20 pointer-events-none transition-opacity duration-150 ${cinematic === 'full' ? 'opacity-100' : 'opacity-0'}`}>
+        <div className={`absolute left-0 right-0 top-0 bg-black transition-all duration-200 ${cinematic === 'full' ? 'h-[11vh]' : 'h-0'}`} />
+        <div className={`absolute left-0 right-0 bottom-0 bg-black transition-all duration-200 ${cinematic === 'full' ? 'h-[11vh]' : 'h-0'}`} />
+        {cinematic === 'full' && (
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="deathblow-kanji font-serif font-black text-[#e8231a] select-none">忍殺</div>
           </div>
@@ -1040,6 +1051,16 @@ export default function App() {
                   type="checkbox"
                   checked={autoCamera}
                   onChange={(e) => setAutoCamera(e.target.checked)}
+                  className="w-4 h-4 accent-[var(--ember)]"
+                />
+              </div>
+
+              <div className="flex items-center justify-between py-1 border-t border-[rgba(239,230,210,0.1)]">
+                <span>Câmera cinematográfica nos golpes finais:</span>
+                <input
+                  type="checkbox"
+                  checked={cineCam}
+                  onChange={(e) => setCineCam(e.target.checked)}
                   className="w-4 h-4 accent-[var(--ember)]"
                 />
               </div>

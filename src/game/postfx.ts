@@ -21,15 +21,16 @@ export interface QualityProfile {
   rays: boolean;
   mistLayers: number;
   reflections: boolean;
+  dof: boolean;
 }
 
 export function qualityProfile(q: Quality): QualityProfile {
   const dpr = window.devicePixelRatio || 1;
   if (q === 'high')
-    return { pixelRatio: Math.min(dpr, 2), composer: true, msaa: 4, shadowMap: 2048, softShadows: true, bloom: true, grassDensity: 1, ambientParticles: 1, ink: true, rays: true, mistLayers: 2, reflections: true };
+    return { pixelRatio: Math.min(dpr, 2), composer: true, msaa: 4, shadowMap: 2048, softShadows: true, bloom: true, grassDensity: 1, ambientParticles: 1, ink: true, rays: true, mistLayers: 2, reflections: true, dof: true };
   if (q === 'medium')
-    return { pixelRatio: Math.min(dpr, 1.5), composer: true, msaa: 2, shadowMap: 1024, softShadows: true, bloom: true, grassDensity: 0.6, ambientParticles: 0.7, ink: true, rays: false, mistLayers: 1, reflections: false };
-  return { pixelRatio: 1, composer: false, msaa: 0, shadowMap: 1024, softShadows: false, bloom: false, grassDensity: 0, ambientParticles: 0.4, ink: false, rays: false, mistLayers: 0, reflections: false };
+    return { pixelRatio: Math.min(dpr, 1.5), composer: true, msaa: 2, shadowMap: 1024, softShadows: true, bloom: true, grassDensity: 0.6, ambientParticles: 0.7, ink: true, rays: false, mistLayers: 1, reflections: false, dof: false };
+  return { pixelRatio: 1, composer: false, msaa: 0, shadowMap: 1024, softShadows: false, bloom: false, grassDensity: 0, ambientParticles: 0.4, ink: false, rays: false, mistLayers: 0, reflections: false, dof: false };
 }
 
 export function detectQuality(): Quality {
@@ -61,7 +62,14 @@ const GradeShader = {
     uInk: { value: 0 },
     uSunUv: { value: new THREE.Vector2(0.5, 0.8) },
     uRays: { value: 0 },
-    uRayColor: { value: new THREE.Color(1.2, 0.7, 0.4) }
+    uRayColor: { value: new THREE.Color(1.2, 0.7, 0.4) },
+    uFlash: { value: 0 },
+    uSpike: { value: 0 },
+    uRadial: { value: 0 },
+    uFocus: { value: new THREE.Vector2(0.5, 0.5) },
+    uDof: { value: 0 },
+    uFocusDist: { value: 5 },
+    uFocusRange: { value: 3 }
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -91,6 +99,13 @@ const GradeShader = {
     uniform float uAberration;
     uniform float uDesat;
     uniform float uHurt;
+    uniform float uFlash;
+    uniform float uSpike;
+    uniform float uRadial;
+    uniform vec2 uFocus;
+    uniform float uDof;
+    uniform float uFocusDist;
+    uniform float uFocusRange;
     varying vec2 vUv;
 
     float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
@@ -103,12 +118,36 @@ const GradeShader = {
     void main() {
       vec2 d = vUv - 0.5;
       float r2 = dot(d, d);
-      vec2 off = d * r2 * uAberration;
+      vec2 off = d * (r2 * uAberration + uSpike * 0.03 * (0.25 + 4.0 * r2));
       vec3 col = vec3(
         texture2D(tDiffuse, vUv + off).r,
         texture2D(tDiffuse, vUv).g,
         texture2D(tDiffuse, vUv - off).b
       );
+
+      // Finisher cinematic: depth of field (blur grows with distance from the focal plane)
+      // and a radial rush toward the strike. Both cost nothing while off.
+      float coc = 0.0;
+      if (uDof > 0.0 || uRadial > 0.0) {
+        if (uDof > 0.0) {
+          float z = 1.0 / invDepth(vUv);
+          coc = clamp(abs(z - uFocusDist) / uFocusRange - 0.35, 0.0, 1.0) * uDof;
+        }
+        vec2 toF = vUv - uFocus;
+        float rad = uRadial * smoothstep(0.08, 0.65, length(toF));
+        float amt = clamp(coc + rad * 3.0, 0.0, 1.0);
+        if (amt > 0.01) {
+          vec3 acc = vec3(0.0);
+          for (int i = 0; i < 10; i++) {
+            float fi = float(i);
+            float a = fi * 2.39996;
+            float rr = sqrt((fi + 0.5) / 10.0);
+            vec2 tap = vUv + vec2(cos(a), sin(a)) * rr * coc * 12.0 * uTexel - toF * rad * 0.09 * (fi / 9.0);
+            acc += texture2D(tDiffuse, tap).rgb;
+          }
+          col = mix(col, acc / 10.0, amt);
+        }
+      }
 
       // Ink outline: the Laplacian of 1/depth is ~0 across flat surfaces and spikes at
       // silhouettes, so only real shape edges get a brush line (thinner in the distance)
@@ -120,7 +159,7 @@ const GradeShader = {
         float dist = 1.0 / ic;
         float edge = (abs(lx) + abs(ly)) * dist;
         float ink = smoothstep(0.14, 0.5, edge) * (1.0 - smoothstep(25.0, 70.0, dist));
-        col = mix(col, col * 0.35, ink * uInk);
+        col = mix(col, col * 0.35, ink * uInk * (1.0 - clamp(coc * 1.6, 0.0, 1.0)));
       }
 
       // Light shafts: march toward the sun and gather bright open sky, so gaps between
@@ -153,6 +192,8 @@ const GradeShader = {
 
       float edge = smoothstep(0.08, 0.5, r2);
       col = mix(col, col * vec3(1.35, 0.4, 0.35) + vec3(0.06, 0.0, 0.0), uHurt * edge);
+
+      col += vec3(uFlash);
 
       float g = hash(vUv * vec2(1731.0, 947.0) + fract(uTime * 7.13)) - 0.5;
       col *= 1.0 + g * uGrain;
@@ -220,6 +261,19 @@ export class PostFX {
     u.uTime.value = time;
     u.uDesat.value = desat;
     u.uHurt.value = hurt;
+  }
+
+  // Finisher cinematic: white flash, chromatic spike, radial rush toward `focusUv`, and
+  // depth of field around view distance `focusDist` (sharp within ~0.35 * range of it)
+  setCinema(flash: number, spike: number, radial: number, focusUv: THREE.Vector2, dof: number, focusDist: number, focusRange: number) {
+    const u = this.grade.uniforms;
+    u.uFlash.value = flash;
+    u.uSpike.value = spike;
+    u.uRadial.value = radial;
+    (u.uFocus.value as THREE.Vector2).copy(focusUv);
+    u.uDof.value = dof;
+    u.uFocusDist.value = focusDist;
+    u.uFocusRange.value = focusRange;
   }
 
   // ink: outline strength (0 = off); rays: shaft strength with the sun's screen uv
