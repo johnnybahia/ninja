@@ -4151,7 +4151,8 @@ export class GameEngine {
 
     this.player.rig.root.position.copy(this.player.pos);
     this.player.rig.root.rotation.y = this.player.yaw;
-    this.player.rig.root.visible = !(this.player.inv > 0 && this.player.dash <= 0 && !this.cine && Math.floor(this.time * 20) % 2 === 0);
+    // (no invulnerability blink: the red screen edge, blood and damage number already say "hit")
+    this.player.rig.root.visible = true;
   }
 
   private updateCamera(dt: number) {
