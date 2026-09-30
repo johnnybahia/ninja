@@ -54,6 +54,8 @@ function glsl(n: number) {
 
 // Bends vertices by height with a travelling wind wave. `instanced` uses the instance
 // origin for the wave phase so neighbouring blades move a little out of step.
+const FILL_DIR = new THREE.Vector3();
+
 function addWind(mat: THREE.Material, o: { instanced?: boolean; amp: number; base: number; span: number; key: string }) {
   const prev = mat.onBeforeCompile;
   mat.onBeforeCompile = (shader, renderer) => {
@@ -491,7 +493,7 @@ export class World {
     scene.add(this.sun, this.sun.target);
     this.front = new THREE.DirectionalLight(atm.front, atm.frontI);
     this.front.position.set(10, 14, 30);
-    scene.add(this.front);
+    scene.add(this.front, this.front.target);
 
     this.sky = buildSky(atm);
     scene.add(this.sky);
@@ -1165,6 +1167,16 @@ export class World {
     this.garden.update(dt, time, this.atm);
     this.sky.position.copy(camPos);
     (this.sky.material as THREE.ShaderMaterial).uniforms.uTime.value = time;
+
+    // The soft fill rides behind the camera instead of sitting at a fixed spot in the map:
+    // whoever the camera looks at is lit from the viewer's side in every atmosphere (a
+    // fixed fill left everything backlit - near-black silhouettes - whenever the camera
+    // swung to the other side of the temple)
+    FILL_DIR.set(camPos.x - focus.x, 0, camPos.z - focus.z);
+    if (FILL_DIR.lengthSq() < 0.01) FILL_DIR.set(0, 0, 1);
+    FILL_DIR.normalize();
+    this.front.position.set(focus.x + FILL_DIR.x * 30, focus.y + 14, focus.z + FILL_DIR.z * 30);
+    this.front.target.position.copy(focus);
 
     // Sun follows the action so the shadow map covers it at full resolution
     const sd = this.atm.sunDir;

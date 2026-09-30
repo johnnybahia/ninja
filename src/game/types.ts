@@ -1,6 +1,7 @@
 import type * as THREE from 'three';
 import type { Ribbon } from './characters';
 import type { ClipController } from './clipRig';
+import type { BladeTrail } from './vfx';
 
 export type CharacterId = 'kage' | 'samurai';
 
@@ -86,6 +87,10 @@ export interface RigInstance {
   footR?: THREE.Object3D;
   plates?: THREE.Object3D[];
   flash?: { value: number };
+  // rim-light colour (a shader uniform shared by the rig's materials) and its base value,
+  // so the engine can scale it with the atmosphere (see rimBoost)
+  rim?: THREE.Color;
+  rimBase?: THREE.Color;
   cloth?: Ribbon[];
   kind?: 'ninja' | 'samurai' | 'archer' | 'oni';
   dispose?: () => void;
@@ -155,6 +160,20 @@ export interface EnemyInstance {
   bow?: { phase: 'draw' | 'aim' | 'release'; t: number };
   kick?: { t: number; done: boolean };
   bowFx?: { bow: THREE.Object3D; string: THREE.Line; arrow: THREE.Object3D; nock: THREE.Object3D; mid: THREE.Vector3 };
+  // blade-accurate strikes (mocap enemies): the held weapon and its cutting extent, and
+  // the window in which the weapon (or a kicking foot) can actually reach the player
+  weapon?: THREE.Object3D;
+  bladeKey?: string;
+  blade?: {
+    st: EnemyStrike;
+    t: number;
+    dur: number;
+    hit: boolean;
+    limb?: 'foot';
+    prev: { a: THREE.Vector3; b: THREE.Vector3 };
+    prevOk: boolean;
+  };
+  trail?: BladeTrail;
   postureBar?: THREE.Mesh;
   danger?: THREE.Sprite;
   dbMark?: THREE.Sprite;
@@ -199,4 +218,5 @@ export interface GameSettings {
   cameraSensitivity: number; // 0.6 = Baixa, 1.0 = Normal, 1.5 = Alta, 2.0 = Rápida
   autoCamera: boolean; // Auto-align camera behind movement
   autoTurnWithStick: boolean; // Directional rotates camera dynamically
+  cinematicCamera: boolean; // Finisher / special-move camera moves, depth of field and flash
 }

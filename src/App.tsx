@@ -9,6 +9,7 @@ import type { AtmosMode } from './game/atmosphere';
 import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft, ArrowUp, SlidersHorizontal } from 'lucide-react';
 import { TunePanel } from './TunePanel';
 import { loadTune } from './game/tunables';
+import { getLoadProgress, onLoadProgress } from './game/models';
 
 const SLOT_COUNT = 2;
 const SLOT_LABELS = ['Principal', 'Secundária'];
@@ -73,7 +74,7 @@ export default function App() {
   const [posture, setPosture] = useState(0);
   const [heals, setHeals] = useState(3);
   const [dbReady, setDbReady] = useState(false);
-  const [cinematic, setCinematic] = useState(false);
+  const [cinematic, setCinematic] = useState<false | 'full' | 'short'>(false);
   const [bestScore, setBestScore] = useState<number>(() => {
     try {
       return Number(localStorage.getItem('kage_best_score') || 0);
@@ -91,6 +92,11 @@ export default function App() {
     samurai: loadSlots('samurai')
   }));
   const [startingGame, setStartingGame] = useState(false);
+  // model download progress (0-100) for the start button's bar, and the black fade the
+  // screen dips through when a run starts
+  const [loadPct, setLoadPct] = useState(() => Math.round(getLoadProgress() * 100));
+  const [fadeIn, setFadeIn] = useState(false);
+  useEffect(() => onLoadProgress((f) => setLoadPct(Math.round(f * 100))), []);
   const slots = loadouts[charId];
   const slotsRef = useRef(slots);
   const heldSlotRef = useRef<number | null>(null);
@@ -191,6 +197,13 @@ export default function App() {
   const [sensitivity, setSensitivity] = useState(1.0);
   const [autoCamera, setAutoCamera] = useState(true);
   const [autoTurnStick, setAutoTurnStick] = useState(true);
+  const [cineCam, setCineCam] = useState(() => {
+    try {
+      return localStorage.getItem('kage_cine') !== '0';
+    } catch {
+      return true;
+    }
+  });
 
   // Virtual Joystick visual state
   const [joyActive, setJoyActive] = useState(false);
@@ -234,7 +247,7 @@ export default function App() {
       onPostureChange: (p, max) => setPosture(max > 0 ? p / max : 0),
       onHealsChange: (n) => setHeals(n),
       onDeathblowReady: (r) => setDbReady(r),
-      onCinematic: (on) => setCinematic(on),
+      onCinematic: (on, kind) => setCinematic(on ? kind ?? 'full' : false),
       onQualityChange: (_setting, effective) => setEffectiveQuality(effective),
       onGameOver: (finalScore) => {
         setGameState('over');
@@ -279,8 +292,12 @@ export default function App() {
       engineRef.current.settings.cameraSensitivity = sensitivity;
       engineRef.current.settings.autoCamera = autoCamera;
       engineRef.current.settings.autoTurnWithStick = autoTurnStick;
+      engineRef.current.settings.cinematicCamera = cineCam;
     }
-  }, [sensitivity, autoCamera, autoTurnStick]);
+    try {
+      localStorage.setItem('kage_cine', cineCam ? '1' : '0');
+    } catch {}
+  }, [sensitivity, autoCamera, autoTurnStick, cineCam]);
 
   const handleStartGame = async () => {
     initAudio();
@@ -291,6 +308,7 @@ export default function App() {
       // await only matters if they raced through on a slow connection, so the game never
       // starts with a not-yet-ready rig.
       setStartingGame(true);
+      setFadeIn(true);
       await eng.setCharacter(charId);
       setStartingGame(false);
       if (charId === 'samurai' && eng.charId !== 'samurai') {
@@ -298,6 +316,8 @@ export default function App() {
       }
       eng.loadout = slots;
       eng.start();
+      // let the first frame of the run render behind the black, then fade it away
+      requestAnimationFrame(() => requestAnimationFrame(() => setFadeIn(false)));
     }
     setGameState('play');
   };
@@ -748,10 +768,10 @@ export default function App() {
       </div>
 
       {/* Deathblow cinematic: letterbox bars and a brushed 忍殺 */}
-      <div className={`fixed inset-0 z-20 pointer-events-none transition-opacity duration-150 ${cinematic ? 'opacity-100' : 'opacity-0'}`}>
-        <div className={`absolute left-0 right-0 top-0 bg-black transition-all duration-200 ${cinematic ? 'h-[11vh]' : 'h-0'}`} />
-        <div className={`absolute left-0 right-0 bottom-0 bg-black transition-all duration-200 ${cinematic ? 'h-[11vh]' : 'h-0'}`} />
-        {cinematic && (
+      <div className={`fixed inset-0 z-20 pointer-events-none transition-opacity duration-150 ${cinematic === 'full' ? 'opacity-100' : 'opacity-0'}`}>
+        <div className={`absolute left-0 right-0 top-0 bg-black transition-all duration-200 ${cinematic === 'full' ? 'h-[11vh]' : 'h-0'}`} />
+        <div className={`absolute left-0 right-0 bottom-0 bg-black transition-all duration-200 ${cinematic === 'full' ? 'h-[11vh]' : 'h-0'}`} />
+        {cinematic === 'full' && (
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="deathblow-kanji font-serif font-black text-[#e8231a] select-none">忍殺</div>
           </div>
@@ -947,14 +967,17 @@ export default function App() {
             <button
               onClick={handleStartGame}
               disabled={startingGame}
-              className="go-btn w-full font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] py-3.5 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+              className="go-btn relative overflow-hidden w-full font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] py-3.5 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer disabled:opacity-60 disabled:cursor-wait"
             >
-              {startingGame ? 'Carregando…' : 'Entrar em combate'}
+              {startingGame && <span className="absolute inset-y-0 left-0 bg-white/20 transition-[width] duration-200" style={{ width: `${loadPct}%` }} />}
+              <span className="relative">{startingGame ? `Carregando… ${loadPct}%` : 'Entrar em combate'}</span>
             </button>
           </div>
         </div>
       )}
 
+      {/* black dip when a run starts */}
+      <div className={`fixed inset-0 z-[60] bg-black pointer-events-none transition-opacity duration-700 ${fadeIn ? 'opacity-100' : 'opacity-0'}`} />
       {/* Game Over Screen */}
       {gameState === 'over' && (
         <div className="fixed inset-0 flex items-center justify-center bg-[rgba(22,18,31,0.85)] backdrop-blur-md p-6 z-30">
@@ -969,9 +992,10 @@ export default function App() {
             <button
               onClick={handleStartGame}
               disabled={startingGame}
-              className="font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] px-10 py-3.5 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+              className="relative overflow-hidden font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] px-10 py-3.5 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer disabled:opacity-60 disabled:cursor-wait"
             >
-              {startingGame ? 'Carregando…' : 'Recomeçar'}
+              {startingGame && <span className="absolute inset-y-0 left-0 bg-white/20 transition-[width] duration-200" style={{ width: `${loadPct}%` }} />}
+              <span className="relative">{startingGame ? `Carregando… ${loadPct}%` : 'Recomeçar'}</span>
             </button>
             <button
               onClick={() => openArsenal(charId)}
@@ -1027,6 +1051,16 @@ export default function App() {
                   type="checkbox"
                   checked={autoCamera}
                   onChange={(e) => setAutoCamera(e.target.checked)}
+                  className="w-4 h-4 accent-[var(--ember)]"
+                />
+              </div>
+
+              <div className="flex items-center justify-between py-1 border-t border-[rgba(239,230,210,0.1)]">
+                <span>Câmera cinematográfica nos golpes finais:</span>
+                <input
+                  type="checkbox"
+                  checked={cineCam}
+                  onChange={(e) => setCineCam(e.target.checked)}
                   className="w-4 h-4 accent-[var(--ember)]"
                 />
               </div>
