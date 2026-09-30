@@ -28,6 +28,15 @@ O repositório já traz `netlify.toml` (comando de build, pasta publicada, vers�
 
 O workflow `.github/workflows/pages.yml` gera o build e publica em `https://johnnybahia.github.io/ninja/` a cada push na `main`. Uma vez só: em *Settings → Pages → Build and deployment → Source*, escolha **GitHub Actions** (não "Deploy from a branch" — a raiz e `/docs` não servem, o jogo precisa ser compilado). O caminho base `/ninja/` é passado ao build pela variável `VITE_BASE`; sem ela (Netlify, `npm run dev`) o base é `/`.
 
+## Progressão
+
+- **Cartas de nível** (`src/game/cards.ts`): cada nível oferece 3 cartas, uma é mantida na partida. Todas têm nível máximo; o jogo pausa durante a escolha (teclas 1–3 no PC).
+- **Honra 誉** (`src/game/meta.ts`): ganha por abate, finalização, onda limpa, nota da onda (D→S) e chefe. Vale mesmo ao morrer ou sair da partida e é gasta no **Templo da Honra** (menu e tela final) em 6 melhorias permanentes com teto (~+25% no total). Salva em `localStorage` (`kage_meta_v1`, versionado); se o navegador bloquear, o progresso fica só na sessão.
+- **Nota da onda**: sem levar dano (2) + rapidez (1) + finalizações (1) + aparos (1) → S/A/B/C/D, com bônus de Honra.
+- **Desafios de onda** (`src/game/mods.ts`): a partir da onda 3 (nunca nas ondas do chefe) metade das ondas muda o que os inimigos exigem: Névoa Densa, Chuva de Flechas, Ventania, Elites (mais vida/dano, soltam pergaminho) e Aço Temperado (postura difícil de quebrar). Limpar a onda rende Honra extra.
+- **Chefe em 2 fases**: com metade da vida o Oni entra em Fúria — mais rápido, correntes maiores e uma onda de choque no chão depois das pancadas pesadas (pule ou esquive).
+- **Missões do dia** (`src/game/missions.ts`): 3 por dia (uma por dificuldade), sorteadas pela data local, com progresso acumulado e recompensa em Honra ao cumprir; sequência de dias com bônus crescente. Relógio voltado para trás não zera nada.
+
 ## Estrutura
 
 - `src/game/` — motor do jogo (Three.js puro): cenário (`world.ts`, `garden.ts`), personagens procedurais (`characters.ts`, `animation.ts`, `rigs.ts`), personagem com mocap (`clipRig.ts`), tabela de golpes com frames de impacto e janelas de combo (`moves.ts`), carregamento dos modelos (`models.ts`), combate e loop principal (`engine.ts`), pós-processamento (`postfx.ts`), texturas com relevo (`surfaces.ts`).

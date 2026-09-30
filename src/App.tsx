@@ -10,6 +10,13 @@ import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft, ArrowUp, Sli
 import { TunePanel } from './TunePanel';
 import { loadTune } from './game/tunables';
 import { getLoadProgress, onLoadProgress } from './game/models';
+import { bankRun, bonusesFor, buyUpgrade, loadMeta, metaPersistent, saveMeta, type MetaSave, type RunSummary } from './game/meta';
+import { ensureDaily, localDate } from './game/missions';
+import { Missions } from './ui/Missions';
+import type { CardOffer } from './game/cards';
+import { CardPicker } from './ui/CardPicker';
+import { Temple } from './ui/Temple';
+import { RunSummary as RunSummaryScreen, type RunResult } from './ui/RunSummary';
 
 const SLOT_COUNT = 2;
 const SLOT_LABELS = ['Principal', 'Secundária'];
@@ -75,6 +82,17 @@ export default function App() {
   const [heals, setHeals] = useState(3);
   const [dbReady, setDbReady] = useState(false);
   const [cinematic, setCinematic] = useState<false | 'full' | 'short'>(false);
+  // progression: permanent Honra upgrades, the run's Honra, level-up cards, boss bar
+  const [meta, setMeta] = useState<MetaSave>(() => ensureDaily(loadMeta(), localDate()));
+  const metaRef = useRef(meta);
+  const [persistOk, setPersistOk] = useState(() => metaPersistent());
+  const [showTemple, setShowTemple] = useState(false);
+  const [runHonor, setRunHonor] = useState(0);
+  const [cardOffer, setCardOffer] = useState<CardOffer[] | null>(null);
+  const [bossBar, setBossBar] = useState<{ hp: number; max: number; fury: boolean } | null>(null);
+  const [waveMod, setWaveMod] = useState<{ id: string; name: string; glyph: string; desc: string } | null>(null);
+  const [runResult, setRunResult] = useState<RunResult | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
   const [bestScore, setBestScore] = useState<number>(() => {
     try {
       return Number(localStorage.getItem('kage_best_score') || 0);
@@ -82,6 +100,7 @@ export default function App() {
       return 0;
     }
   });
+  const bestScoreRef = useRef(bestScore);
 
   // Action buttons: SLOT_COUNT slots, each bound to a weapon picked on the Arsenal screen
   // before the run (locked during play). Pressing a slot selects its weapon and attacks
@@ -218,6 +237,32 @@ export default function App() {
     bannerTimerRef.current = window.setTimeout(() => setBanner(null), 2000);
   }, []);
 
+  // Banks a finished (or abandoned) run's Honra into the saved progress
+  const bank = useCallback((summary: RunSummary, prevBest: number): RunResult => {
+    const m0 = metaRef.current;
+    const out = bankRun(m0, summary, localDate());
+    metaRef.current = out.meta;
+    setMeta(out.meta);
+    setPersistOk(saveMeta(out.meta));
+    return { summary, before: m0.honor, after: out.meta.honor, prevBest, prevBestWave: m0.bestWave, missions: out.done, streak: out.streak };
+  }, []);
+
+  const buy = useCallback((id: string) => {
+    const m1 = buyUpgrade(metaRef.current, id);
+    if (!m1) return;
+    metaRef.current = m1;
+    setMeta(m1);
+    setPersistOk(saveMeta(m1));
+    if (engineRef.current) engineRef.current.metaBonus = bonusesFor(m1);
+  }, []);
+
+  const toastTimerRef = useRef<number | null>(null);
+  const showToast = useCallback((text: string) => {
+    setToast(text);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 2600);
+  }, []);
+
   // Initialize Game Engine
   useEffect(() => {
     if (!canvasRef.current || !minimapRef.current) return;
@@ -249,14 +294,21 @@ export default function App() {
       onDeathblowReady: (r) => setDbReady(r),
       onCinematic: (on, kind) => setCinematic(on ? kind ?? 'full' : false),
       onQualityChange: (_setting, effective) => setEffectiveQuality(effective),
-      onGameOver: (finalScore) => {
-        setGameState('over');
-        if (finalScore > bestScore) {
+      onHonorChange: (h) => setRunHonor(h),
+      onCardOffer: (offer) => setCardOffer(offer),
+      onBossChange: (b) => setBossBar(b),
+      onWaveMod: (m) => setWaveMod(m),
+      onGameOver: (finalScore, _wave, _level, _kills, _combo, summary) => {
+        const prevBest = bestScoreRef.current;
+        if (finalScore > prevBest) {
+          bestScoreRef.current = finalScore;
           setBestScore(finalScore);
           try {
             localStorage.setItem('kage_best_score', String(finalScore));
           } catch {}
         }
+        setRunResult(bank(summary, prevBest));
+        setGameState('over');
       }
     });
 
@@ -264,6 +316,7 @@ export default function App() {
     // Dev-only handle for automated visual checks; stripped from production builds
     if (import.meta.env.DEV) (window as any).__engine = engine;
     engine.loadout = slotsRef.current;
+    engine.metaBonus = bonusesFor(metaRef.current);
     engine.setQuality(qualityRef.current);
     engine.atmosMode = atmosRef.current;
     setActiveWeapon(engine.weapons[0]);
@@ -275,7 +328,7 @@ export default function App() {
       window.removeEventListener('resize', handleResize);
       engine.destroy();
     };
-  }, [bestScore, showBanner]);
+  }, [showBanner, bank]);
 
   // Freeze the game while a menu is open so enemies can't hit you mid-configuration
   useEffect(() => {
@@ -315,6 +368,12 @@ export default function App() {
         showBanner('Não foi possível carregar o Rōnin', 'Jogando com o Kage');
       }
       eng.loadout = slots;
+      eng.metaBonus = bonusesFor(metaRef.current);
+      setRunResult(null);
+      setCardOffer(null);
+      setBossBar(null);
+      setWaveMod(null);
+      setRunHonor(0);
       eng.start();
       // let the first frame of the run render behind the black, then fade it away
       requestAnimationFrame(() => requestAnimationFrame(() => setFadeIn(false)));
@@ -330,8 +389,17 @@ export default function App() {
 
   const handleBackToMenu = () => {
     if (engineRef.current) {
+      // an abandoned run still pays its Honra out
+      const left = engineRef.current.takeRunSummary();
+      if (left && left.honor.total > 0) {
+        bank(left, bestScoreRef.current);
+        showToast(`+${left.honor.total} 誉 guardados`);
+      }
       engineRef.current.backToMenu();
     }
+    setCardOffer(null);
+    setBossBar(null);
+    setWaveMod(null);
     setShowSettings(false);
     setGameState('menu');
   };
@@ -428,9 +496,37 @@ export default function App() {
   };
 
   // Keyboard controls
+  // opening the menu on a new day rolls the missions over
+  useEffect(() => {
+    if (gameState !== 'menu') return;
+    const m2 = ensureDaily(metaRef.current, localDate());
+    if (m2 !== metaRef.current) {
+      metaRef.current = m2;
+      setMeta(m2);
+      setPersistOk(saveMeta(m2));
+    }
+  }, [gameState]);
+
+  const cardOfferRef = useRef<CardOffer[] | null>(null);
+  useEffect(() => {
+    cardOfferRef.current = cardOffer;
+    if (!cardOffer) return;
+    // whatever was held when the cards opened must not stay held underneath them
+    const eng = engineRef.current;
+    if (eng) {
+      eng.joyTouch.id = null;
+      eng.lookTouch.id = null;
+      eng.input.jx = 0;
+      eng.input.jy = 0;
+      for (const k of Object.keys(eng.input.keys)) eng.input.keys[k] = false;
+    }
+    setJoyActive(false);
+    heldSlotRef.current = null;
+  }, [cardOffer]);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (!engineRef.current || gameState !== 'play') return;
+      if (!engineRef.current || gameState !== 'play' || cardOfferRef.current) return;
       engineRef.current.input.keys[e.code] = true;
 
       if (e.code === 'Space') {
@@ -549,13 +645,36 @@ export default function App() {
                 <span>Onda {engineRef.current?.wave || 1}</span>
                 <span className="text-[var(--jade)]">Nível {level}</span>
               </div>
+              {waveMod && (
+                <div className="mt-0.5 inline-flex items-center gap-1 rounded-full border border-[rgba(255,209,102,0.5)] bg-[rgba(22,18,31,0.7)] px-2 py-0.5 text-[10px] font-bold text-[#ffd166]" title={waveMod.desc}>
+                  <span className="font-serif text-xs leading-none">{waveMod.glyph}</span>
+                  {waveMod.name}
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Top Center-Right: Score */}
+          {/* Top Center-Right: Score and this run's Honra */}
           <div className="absolute top-[calc(var(--sat)+12px)] right-[calc(var(--sar)+126px)] text-right font-extrabold text-2xl font-serif text-[var(--paper)] drop-shadow-md">
             {Math.round(score).toLocaleString('pt-BR')}
+            <div className="text-xs font-bold text-[var(--ember)] leading-none mt-0.5">{runHonor} 誉</div>
           </div>
+
+          {/* Boss life bar (the notch marks where the first deathblow leaves it) */}
+          {bossBar && (
+            <div className="absolute left-1/2 -translate-x-1/2 top-[calc(var(--sat)+10px)] w-[min(38vw,380px)] pointer-events-none">
+              <div className={`text-center font-serif text-xs font-extrabold tracking-[0.3em] drop-shadow mb-0.5 ${bossBar.fury ? 'text-[#ff5a3a]' : 'text-[var(--paper)]'}`}>
+                鬼 ONI{bossBar.fury ? ' · 怒' : ''}
+              </div>
+              <div className="relative h-2.5 rounded-sm bg-[rgba(10,8,14,0.75)] border border-[rgba(239,230,210,0.4)] overflow-hidden">
+                <div
+                  className={`absolute inset-y-0 left-0 transition-[width] duration-200 ${bossBar.fury ? 'bg-[#ff5a1a] animate-pulse' : 'bg-[#d8242a]'}`}
+                  style={{ width: `${Math.max(0, Math.min(100, (bossBar.hp / bossBar.max) * 100))}%` }}
+                />
+                <div className="absolute inset-y-0 left-1/2 w-px bg-[rgba(239,230,210,0.6)]" />
+              </div>
+            </div>
+          )}
 
           {/* Minimap */}
           <canvas
@@ -624,6 +743,12 @@ export default function App() {
                   ? '⚡ Corte Triplo!'
                   : '⚔️ Corte Duplo!'}
               </div>
+            </div>
+          )}
+
+          {toast && (
+            <div className="absolute left-1/2 -translate-x-1/2 bottom-[calc(var(--sab)+120px)] px-3 py-1 rounded-full text-xs font-bold bg-[rgba(22,18,31,0.85)] border border-[rgba(239,230,210,0.3)] text-[var(--ember)] pointer-events-none">
+              {toast}
             </div>
           )}
 
@@ -791,10 +916,19 @@ export default function App() {
             </p>
 
             {bestScore > 0 && (
-              <p className="text-xs text-[var(--ember)] font-bold mb-4">
+              <p className="text-xs text-[var(--ember)] font-bold mb-2">
                 Recorde: {bestScore.toLocaleString('pt-BR')} pontos
               </p>
             )}
+            <button
+              onClick={() => setShowTemple(true)}
+              className="mb-4 inline-flex items-center gap-2 text-xs font-bold border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-4 py-1.5 rounded-full active:scale-95 transition-all cursor-pointer"
+            >
+              <span className="font-serif text-base text-[var(--ember)] leading-none">誉</span>
+              Templo da Honra · {meta.honor.toLocaleString('pt-BR')}
+            </button>
+
+            <Missions meta={meta} today={localDate()} />
 
             {/* Kage is hidden for now (kept in code, not deleted, in case it comes back) -
                 O Rōnin is the only selectable character while it's the one being tuned. */}
@@ -979,33 +1113,23 @@ export default function App() {
       {/* black dip when a run starts */}
       <div className={`fixed inset-0 z-[60] bg-black pointer-events-none transition-opacity duration-700 ${fadeIn ? 'opacity-100' : 'opacity-0'}`} />
       {/* Game Over Screen */}
-      {gameState === 'over' && (
-        <div className="fixed inset-0 flex items-center justify-center bg-[rgba(22,18,31,0.85)] backdrop-blur-md p-6 z-30">
-          <div className="max-w-md w-full text-center py-4">
-            <div className="font-serif text-8xl font-bold text-[var(--torii)] leading-none mb-3">散</div>
-            <h2 className="font-serif text-3xl font-extrabold text-[var(--paper)] mb-2">Você caiu</h2>
-            <p className="text-sm text-[var(--paper)]/85 mb-6 leading-relaxed">
-              Pontuação Final: <b className="text-[var(--ember)]">{score.toLocaleString('pt-BR')}</b> pontos
-              <br />
-              Recorde: {bestScore.toLocaleString('pt-BR')} pontos
-            </p>
-            <button
-              onClick={handleStartGame}
-              disabled={startingGame}
-              className="relative overflow-hidden font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] px-10 py-3.5 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer disabled:opacity-60 disabled:cursor-wait"
-            >
-              {startingGame && <span className="absolute inset-y-0 left-0 bg-white/20 transition-[width] duration-200" style={{ width: `${loadPct}%` }} />}
-              <span className="relative">{startingGame ? `Carregando… ${loadPct}%` : 'Recomeçar'}</span>
-            </button>
-            <button
-              onClick={() => openArsenal(charId)}
-              className="mt-3 mx-auto flex items-center justify-center gap-1.5 font-bold text-sm border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-8 py-2.5 rounded-md active:scale-95 transition-all cursor-pointer"
-            >
-              <Swords className="w-4 h-4 text-[var(--ember)]" /> Trocar armas
-            </button>
-          </div>
-        </div>
+      {gameState === 'over' && runResult && (
+        <RunSummaryScreen
+          result={runResult}
+          meta={meta}
+          starting={startingGame}
+          loadPct={loadPct}
+          onAgain={handleStartGame}
+          onBuy={buy}
+          onTemple={() => setShowTemple(true)}
+          onArsenal={() => openArsenal(charId)}
+        />
       )}
+
+      {/* Level-up cards */}
+      {gameState === 'play' && cardOffer && <CardPicker level={level} offer={cardOffer} onPick={(id) => engineRef.current?.pickCard(id)} />}
+
+      {showTemple && <Temple meta={meta} persistent={persistOk} onBuy={buy} onClose={() => setShowTemple(false)} />}
 
       {/* Settings Modal */}
       {showSettings && (

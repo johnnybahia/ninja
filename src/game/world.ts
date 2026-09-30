@@ -1143,6 +1143,11 @@ export class World {
     this.sun.shadow.mapSize.set(p.shadowMap, p.shadowMap);
   }
 
+  // View-distance multiplier the game can pull down (a fog wave) and back; eased so the
+  // world thickens and clears instead of popping
+  fogScale = 1;
+  private fogScaleCur = 1;
+
   update(dt: number, time: number, focus: THREE.Vector3, camPos: THREE.Vector3) {
     WIND_TIME.value = time;
     if (this.atmBlending) {
@@ -1155,9 +1160,20 @@ export class World {
       }
       if (done) this.atmBlending = false;
     }
+    this.fogScaleCur += (this.fogScale - this.fogScaleCur) * Math.min(1, dt * 1.2);
+    if (Math.abs(this.fogScaleCur - 1) > 0.002 || this.fogScale !== 1) {
+      const fog = this.scene.fog as THREE.Fog;
+      fog.near = this.atm.fogNear * this.fogScaleCur;
+      fog.far = this.atm.fogFar * this.fogScaleCur;
+    } else if (this.fogScaleCur !== 1) {
+      this.fogScaleCur = 1;
+      const fog = this.scene.fog as THREE.Fog;
+      fog.near = this.atm.fogNear;
+      fog.far = this.atm.fogFar;
+    }
     this.petals.count = Math.floor(this.petalMax * Math.min(1, this.petalQuality * this.atm.petals));
     this.mistU.uTime.value = time;
-    this.mistU.uDensity.value = this.atm.mist;
+    this.mistU.uDensity.value = this.atm.mist * (1 + 1.2 * (1 - this.fogScaleCur));
     this.mistU.uColor.value.copy(this.atm.fog).lerp(this.atm.skyFill, 0.25).multiplyScalar(1.15);
     this.mistU.uFocus.value.set(focus.x, focus.z);
     for (const m of this.mist) {
