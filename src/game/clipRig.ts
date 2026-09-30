@@ -86,6 +86,11 @@ function prepare(tpl: CharacterTemplate): Prepared {
   const toLocal = toModel.clone().invert();
   const head = scene.getObjectByName('mixamorigHeadTop_End')!;
   const height = head.getWorldPosition(new THREE.Vector3()).y;
+  // where the hips sit over the character's origin at rest: a clip's own stance offset
+  // (a boxer's stance leans back ~20cm) must not carry into the game, where the origin
+  // is the body's centre and everything - reach, hit spans, body collision - is
+  // measured from it
+  const bindHips = hips.position.clone().applyMatrix4(toModel);
 
   const root = new Map<string, RootCurve>();
   const speed = new Map<string, number>();
@@ -116,8 +121,8 @@ function prepare(tpl: CharacterTemplate): Prepared {
       for (let i = 0; i < n; i++) {
         curve.x[i] = pts[i].x - p0.x;
         curve.z[i] = pts[i].z - p0.z;
-        pts[i].x = p0.x;
-        pts[i].z = p0.z;
+        pts[i].x = bindHips.x;
+        pts[i].z = bindHips.z;
         // the jump clip leaves the ground on its own - the game's physics already
         // lifts the whole character, so keep only its crouch/tuck, never its rise
         if (name === 'jump') pts[i].y = Math.min(pts[i].y, p0.y);
@@ -219,6 +224,7 @@ export class ClipController {
   private fading: OneShot[] = [];
   private overlays: OneShot[] = [];
   private rootAcc = new THREE.Vector2();
+  private pauseT = 0;
 
   constructor(
     private model: THREE.Object3D,
@@ -307,7 +313,17 @@ export class ClipController {
     return out.set(c.x[i - 1] + (c.x[i] - c.x[i - 1]) * k, c.z[i - 1] + (c.z[i] - c.z[i - 1]) * k);
   }
 
+  /** Hit pause: this character's animation nearly freezes for `sec` (game seconds) - the
+   *  attacker and the victim, and only them, hang for a beat when a blow lands. */
+  pause(sec: number) {
+    this.pauseT = Math.max(this.pauseT, sec);
+  }
+
   update(dt: number, input: BaseInput) {
+    if (this.pauseT > 0) {
+      this.pauseT -= dt;
+      dt *= 0.05;
+    }
     const ease = (k: number) => 1 - Math.exp(-k * Math.max(0, dt));
 
     // ---- one-shots

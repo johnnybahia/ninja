@@ -155,6 +155,19 @@ export interface EnemyInstance {
   bow?: { phase: 'draw' | 'aim' | 'release'; t: number };
   kick?: { t: number; done: boolean };
   bowFx?: { bow: THREE.Object3D; string: THREE.Line; arrow: THREE.Object3D; nock: THREE.Object3D; mid: THREE.Vector3 };
+  // blade-accurate strikes (mocap enemies): the held weapon and its cutting extent, and
+  // the window in which the weapon (or a kicking foot) can actually reach the player
+  weapon?: THREE.Object3D;
+  bladeKey?: string;
+  blade?: {
+    st: EnemyStrike;
+    t: number;
+    dur: number;
+    hit: boolean;
+    limb?: 'foot';
+    prev: { a: THREE.Vector3; b: THREE.Vector3 };
+    prevOk: boolean;
+  };
   postureBar?: THREE.Mesh;
   danger?: THREE.Sprite;
   dbMark?: THREE.Sprite;
