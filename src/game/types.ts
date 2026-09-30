@@ -174,6 +174,9 @@ export interface EnemyInstance {
     prevOk: boolean;
   };
   trail?: BladeTrail;
+  elite?: boolean;
+  fury?: boolean; // the Oni's second phase
+  aura?: THREE.Mesh;
   postureBar?: THREE.Mesh;
   danger?: THREE.Sprite;
   dbMark?: THREE.Sprite;

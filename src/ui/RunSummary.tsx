@@ -1,6 +1,7 @@
 import { Swords } from 'lucide-react';
 import { CARDS } from '../game/cards';
 import { nextGoal, upgradeCost, type MetaSave, type RunSummary as Summary } from '../game/meta';
+import type { MissionDone } from '../game/missions';
 
 export interface RunResult {
   summary: Summary;
@@ -8,6 +9,8 @@ export interface RunResult {
   after: number;
   prevBest: number;
   prevBestWave: number;
+  missions: MissionDone[]; // finished by this run (already paid)
+  streak: { count: number; bonus: number } | null; // first run of a new day
 }
 
 const RANK_COLOR: Record<string, string> = { S: '#ffd166', A: '#8fe0c8', B: '#9ec5ff', C: '#c9c2d6', D: '#8a8398' };
@@ -42,6 +45,7 @@ export function RunSummary({
     ['Notas', s.honor.rank],
     ['Finalizações', s.honor.finish],
     ['Abates', s.honor.kill],
+    ['Desafios', s.honor.mod],
     ['Chefe', s.honor.boss]
   ];
   const cards = CARDS.filter((c) => (s.cards[c.id] ?? 0) > 0);
@@ -127,6 +131,27 @@ export function RunSummary({
             )}
           </div>
         </div>
+
+        {(result.missions.length > 0 || result.streak) && (
+          <div className="rounded-lg border border-[rgba(143,224,200,0.45)] bg-[rgba(24,44,40,0.75)] p-3 mb-4">
+            {result.missions.map((m) => (
+              <div key={m.id} className="flex justify-between text-xs text-[var(--paper)]">
+                <span>
+                  <b className="text-[var(--jade)]">✓ Missão cumprida</b> · {m.text}
+                </span>
+                <b className="text-[var(--ember)]">+{m.reward} 誉</b>
+              </div>
+            ))}
+            {result.streak && (
+              <div className="flex justify-between text-xs text-[var(--paper)]">
+                <span>
+                  <b className="text-[var(--jade)]">Sequência</b> · {result.streak.count} {result.streak.count === 1 ? 'dia' : 'dias seguidos'}
+                </span>
+                <b className="text-[var(--ember)]">+{result.streak.bonus} 誉</b>
+              </div>
+            )}
+          </div>
+        )}
 
         {cards.length > 0 && (
           <div className="flex flex-wrap justify-center gap-1.5 mb-4">

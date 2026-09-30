@@ -37,6 +37,7 @@ import { animateCharacter, animateDeath } from './animation';
 import { TUNE } from './tunables';
 import { cardById, describeOffer, drawCards, CardOffer } from './cards';
 import { HONOR, NO_BONUS, MetaBonus, RunSummary } from './meta';
+import { pickWaveMod, WaveMod } from './mods';
 
 // Enemy samurai reuse the Rōnin's mesh, armour darkened toward blued steel
 const ENEMY_TINT = new THREE.Color(0.42, 0.46, 0.62);
@@ -172,7 +173,8 @@ export interface GameEngineCallbacks {
   onHealsChange?: (heals: number) => void;
   onCardOffer?: (offer: CardOffer[] | null) => void;
   onHonorChange?: (honor: number) => void;
-  onBossChange?: (boss: { hp: number; max: number } | null) => void;
+  onBossChange?: (boss: { hp: number; max: number; fury: boolean } | null) => void;
+  onWaveMod?: (mod: { id: string; name: string; glyph: string; desc: string } | null) => void;
 }
 
 // A committed move or reaction on the mocap rig. Times are clip seconds (see moves.ts).
@@ -390,8 +392,18 @@ export class GameEngine {
   private heritageT = 0;
   private runOpen = false;
   private finishers = 0;
-  private honor = { kill: 0, finish: 0, wave: 0, boss: 0, rank: 0 };
+  private honor = { kill: 0, finish: 0, wave: 0, boss: 0, rank: 0, mod: 0 };
   private ranks: string[] = [];
+  // wave modifiers, run stats behind the daily missions, and the Oni's shockwaves
+  private waveMod: WaveMod | null = null;
+  private prevMod: WaveMod['id'] | null = null;
+  private enemyTime = 1;
+  private deflectsTotal = 0;
+  private flawless = 0;
+  private bossKills = 0;
+  private modWaves = 0;
+  private bestRank = 0;
+  private shocks: { x: number; z: number; r: number; mesh: THREE.Mesh; hit: boolean }[] = [];
   private waveStat = { t0: 0, enemies: 0, finishers: 0, deflects: 0 };
   private lastBossKey = -1;
   private time = 0;
@@ -784,9 +796,21 @@ export class GameEngine {
     this.pickDelay = 0;
     this.heritageT = 0;
     this.finishers = 0;
-    this.honor = { kill: 0, finish: 0, wave: 0, boss: 0, rank: 0 };
+    this.honor = { kill: 0, finish: 0, wave: 0, boss: 0, rank: 0, mod: 0 };
     this.ranks = [];
     this.lastBossKey = -1;
+    this.waveMod = null;
+    this.prevMod = null;
+    this.enemyTime = 1;
+    this.world.fogScale = 1;
+    this.deflectsTotal = 0;
+    this.flawless = 0;
+    this.bossKills = 0;
+    this.modWaves = 0;
+    this.bestRank = 0;
+    for (const sh of this.shocks) this.disposeShock(sh);
+    this.shocks = [];
+    this.callbacks.onWaveMod?.(null);
     this.callbacks.onCardOffer?.(null);
     this.callbacks.onHonorChange?.(0);
     this.callbacks.onBossChange?.(null);
@@ -863,36 +887,75 @@ export class GameEngine {
     this.player.tookDamage = false;
 
     const boss = this.wave % 4 === 0;
-    const nS = Math.min(9, 2 + this.wave);
-    const nA = Math.min(4, Math.floor(this.wave / 2));
+    const mod = pickWaveMod(this.wave, this.prevMod);
+    this.waveMod = mod;
+    if (mod) this.prevMod = mod.id;
+    let nS = Math.min(9, 2 + this.wave);
+    let nA = Math.min(4, Math.floor(this.wave / 2));
+    if (mod?.id === 'flechas') {
+      nA = Math.min(7, nA + 3);
+      nS = Math.max(1, Math.ceil(nS * 0.5));
+    }
+    this.enemyTime = mod?.id === 'ventania' ? 1.22 : 1;
+    this.world.fogScale = mod?.id === 'nevoa' ? 0.35 : 1;
+    // fog wave: they come out of the mist close by
+    const near = mod?.id === 'nevoa';
 
     const list: ('samurai' | 'archer' | 'boss')[] = [];
     for (let i = 0; i < nS; i++) list.push('samurai');
     for (let i = 0; i < nA; i++) list.push('archer');
     if (boss) list.push('boss');
 
+    const spawned: EnemyInstance[] = [];
     list.forEach((type) => {
       for (let k = 0; k < 30; k++) {
         const a = Math.random() * TAU;
-        const r = rand(20, 34);
+        const r = near ? rand(14, 22) : rand(20, 34);
         const x = Math.sin(a) * r;
         const z = Math.cos(a) * r;
-        if (Math.hypot(x - this.player.pos.x, z - this.player.pos.z) < 13) continue;
+        if (Math.hypot(x - this.player.pos.x, z - this.player.pos.z) < (near ? 10 : 13)) continue;
         if (this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r + (type === 'boss' ? 1.5 : 0.8))) continue;
-        this.spawnEnemy(type, x, z);
+        spawned.push(this.spawnEnemy(type, x, z));
         break;
       }
     });
+    if (mod?.id === 'ferro') for (const e of spawned) e.maxPosture *= 1.6;
+    if (mod?.id === 'elite') {
+      const pool = spawned.filter((e) => e.type === 'samurai');
+      for (let n = 1 + Math.floor(this.wave / 6); n > 0 && pool.length; n--) this.makeElite(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+    }
 
     this.waveStat = { t0: this.time, enemies: list.length, finishers: 0, deflects: 0 };
-    let sub = boss ? 'O oni despertou' : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
+    let sub = boss ? 'O oni despertou' : mod ? mod.desc : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
     const atmIdx = atmosphereForWave(this.wave, this.atmosMode, this.world.atmIndex);
     if (atmIdx !== this.world.atmIndex) {
       this.world.setAtmosphere(atmIdx);
       sub += ` · ${ATMOSPHERES[atmIdx].name}`;
     }
-    this.callbacks.onWaveChange(this.wave, `Onda ${this.wave}`, sub);
+    this.callbacks.onWaveMod?.(mod ? { id: mod.id, name: mod.name, glyph: mod.glyph, desc: mod.desc } : null);
+    this.callbacks.onWaveChange(this.wave, mod ? `Onda ${this.wave} · ${mod.name}` : `Onda ${this.wave}`, sub);
     sfx.wave();
+  }
+
+  // Elite samurai: tougher and harder-hitting, marked with a golden ground ring and a gold
+  // life bar, and always drop a scroll
+  private makeElite(e: EnemyInstance) {
+    e.elite = true;
+    e.hp *= 1.7;
+    e.maxHp = e.hp;
+    e.speed *= 1.08;
+    (e.barFg.material as THREE.MeshBasicMaterial).color.set(0xffd166);
+    e.aura = this.makeAura(0xff9a10, 1.25);
+  }
+
+  private makeAura(color: number, radius: number): THREE.Mesh {
+    const m = new THREE.Mesh(
+      new THREE.RingGeometry(radius * 0.78, radius, 40).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(color).multiplyScalar(1.3), transparent: true, opacity: 0.7, depthWrite: false, blending: THREE.AdditiveBlending, fog: false })
+    );
+    m.renderOrder = 6;
+    this.scene.add(m);
+    return m;
   }
 
   private spawnEnemy(type: 'samurai' | 'archer' | 'boss', x: number, z: number) {
@@ -1136,6 +1199,11 @@ export class GameEngine {
       (e.bowFx.string.material as THREE.Material).dispose();
     }
     e.trail?.dispose();
+    if (e.aura) {
+      this.scene.remove(e.aura);
+      e.aura.geometry.dispose();
+      (e.aura.material as THREE.Material).dispose();
+    }
     this.scene.remove(e.rig.root);
     this.scene.remove(e.bar);
     if (e.tele) this.scene.remove(e.tele);
@@ -2741,8 +2809,11 @@ export class GameEngine {
     this.cancelStrike(e);
 
     this.player.kills++;
-    if (e.type === 'boss') this.addHonor('boss', HONOR.boss);
-    else this.addHonor('kill', HONOR.kill[e.type] ?? 1);
+    if (e.type === 'boss') {
+      this.addHonor('boss', HONOR.boss);
+      this.bossKills++;
+    } else this.addHonor('kill', HONOR.kill[e.type] ?? 1);
+    if (e.elite) this.addHonor('mod', HONOR.elite);
     const pts = e.type === 'boss' ? 1200 : e.type === 'archer' ? 120 : 80;
     this.player.score += pts;
     this.callbacks.onScoreChange(this.player.score);
@@ -2763,7 +2834,7 @@ export class GameEngine {
     this.emitParticles(e.pos.x, 1, e.pos.z, 28, 0x9a88c0, 5, 3, 4, 1);
 
     // Bosses always drop a scroll; other kills roll against the loadout-proportional rate
-    if (e.type === 'boss' || this.rollScroll()) this.dropScroll(e.pos.x, e.pos.z);
+    if (e.type === 'boss' || e.elite || this.rollScroll()) this.dropScroll(e.pos.x, e.pos.z);
     else if (Math.random() < 0.2) this.dropPickup(e.pos.x, e.pos.z);
   }
 
@@ -2805,7 +2876,7 @@ export class GameEngine {
 
   private honorTotal() {
     const h = this.honor;
-    return Math.round(h.kill + h.finish + h.wave + h.boss + h.rank);
+    return Math.round(h.kill + h.finish + h.wave + h.boss + h.rank + h.mod);
   }
 
   private makeSummary(): RunSummary {
@@ -2817,7 +2888,12 @@ export class GameEngine {
       kills: this.player.kills,
       bestCombo: this.player.bestCombo,
       finishers: this.finishers,
-      honor: { kill: Math.round(h.kill), finish: Math.round(h.finish), wave: Math.round(h.wave), boss: Math.round(h.boss), rank: Math.round(h.rank), total: this.honorTotal() },
+      deflects: this.deflectsTotal,
+      flawless: this.flawless,
+      bossKills: this.bossKills,
+      modWaves: this.modWaves,
+      bestRank: (['D', 'C', 'B', 'A', 'S'] as const)[this.bestRank],
+      honor: { kill: Math.round(h.kill), finish: Math.round(h.finish), wave: Math.round(h.wave), boss: Math.round(h.boss), rank: Math.round(h.rank), mod: Math.round(h.mod), total: this.honorTotal() },
       cards: { ...this.cardLv },
       ranks: [...this.ranks]
     };
@@ -2905,10 +2981,10 @@ export class GameEngine {
       if (this.pickDelay <= 0) this.openCardOffer();
     }
     const boss = this.enemies.find((e) => e.type === 'boss' && !e.dead);
-    const key = boss ? Math.round((Math.max(0, boss.hp) / boss.maxHp) * 200) : -1;
+    const key = boss ? Math.round((Math.max(0, boss.hp) / boss.maxHp) * 200) + (boss.fury ? 1000 : 0) : -1;
     if (key !== this.lastBossKey) {
       this.lastBossKey = key;
-      this.callbacks.onBossChange?.(boss ? { hp: Math.max(0, boss.hp), max: boss.maxHp } : null);
+      this.callbacks.onBossChange?.(boss ? { hp: Math.max(0, boss.hp), max: boss.maxHp, fury: !!boss.fury } : null);
     }
   }
 
@@ -3211,7 +3287,7 @@ export class GameEngine {
   private startStrike(e: EnemyInstance, first: boolean) {
     const boss = e.type === 'boss';
     const last = e.comboLeft <= 1;
-    const perilChance = boss ? 0.35 : this.wave >= 2 ? 0.28 : 0.1;
+    const perilChance = boss ? (e.fury ? 0.45 : 0.35) : this.wave >= 2 ? 0.28 : 0.1;
     let kind: StrikeKind = boss ? 'smash' : 'slash';
     let perilous = false;
     if (last && Math.random() < perilChance) {
@@ -3220,7 +3296,7 @@ export class GameEngine {
     }
     const windup = boss ? (kind === 'sweep' ? 0.85 : first ? 0.62 : 0.46) : perilous ? 0.64 : first ? 0.46 : 0.32;
     const reach = boss ? (kind === 'sweep' ? 4.6 : 3.9) : kind === 'thrust' ? 3.4 : kind === 'sweep' ? 2.8 : 2.3;
-    const dmg = boss ? (kind === 'sweep' ? 22 : 24) : kind === 'thrust' ? 18 : kind === 'sweep' ? 15 : 12;
+    const dmg = Math.round((boss ? (kind === 'sweep' ? 22 : 24) : kind === 'thrust' ? 18 : kind === 'sweep' ? 15 : 12) * (e.elite ? 1.25 : 1));
     let wind = windup;
     if (e.rig.clip && boss) {
       const opts = BOSS_STRIKES[kind] ?? BOSS_STRIKES.smash;
@@ -3311,6 +3387,7 @@ export class GameEngine {
     const deflect = canAct && st.kind !== 'sweep' && this.time - this.player.guardPressT <= DEFLECT_WINDOW;
     if (deflect) {
       this.waveStat.deflects++;
+      this.deflectsTotal++;
       this.faceEnemy(e);
       const mid = contact ? this.tmpV.copy(contact) : this.tmpV.set(this.player.pos.x - nx * 0.75, this.player.pos.y + 1.35, this.player.pos.z - nz * 0.75);
       this.impacts.spawn(mid, IMPACT_DEFLECT, st.kind === 'thrust' ? 2.4 : 1.9, 0.16);
@@ -3986,12 +4063,22 @@ export class GameEngine {
     this.applyCineCamera(dt, lookTarget);
   }
 
-  private updateEnemies(dt: number) {
+  private updateEnemies(gdt: number) {
     this.enemyBlades.length = 0;
     const tokensFree = this.maxTokens() - this.tokensInUse();
     let granted = 0;
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const e = this.enemies[i];
+      // a windy wave (and the Oni in its fury) runs the whole fighter faster - movement,
+      // timers and its animation alike
+      const dt = e.dead ? gdt : gdt * this.enemyTime * (e.fury ? 1.2 : 1);
+      if (e.aura) {
+        e.aura.visible = !e.dead;
+        e.aura.position.set(e.pos.x, 0.07, e.pos.z);
+        const pulse = 1 + Math.sin(this.time * 5 + i) * 0.06;
+        e.aura.scale.setScalar(pulse * (e.type === 'boss' ? this.sizeOf(e) * 0.5 : 1));
+        (e.aura.material as THREE.MeshBasicMaterial).opacity = 0.55 + Math.sin(this.time * 4 + i) * 0.2;
+      }
       if (e.dead) {
         e.deathT += dt;
         if (e.rig.flash) e.rig.flash.value = Math.max(0, 0.6 - e.deathT * 2);
@@ -4017,6 +4104,7 @@ export class GameEngine {
       const nz = dz / d;
       const toP = Math.atan2(dx, dz);
       const boss = e.type === 'boss';
+      if (boss && !e.fury && e.hp <= e.maxHp * 0.5 && e.brokenT <= 0 && !this.cine) this.startFury(e);
 
       e.trail?.update(this.time);
       e.cd -= dt;
@@ -4178,6 +4266,8 @@ export class GameEngine {
           }
           if (boss) sfx.boom();
           else sfx.swing();
+          // furious Oni: the slam sends a shockwave along the ground - jump it
+          if (boss && e.fury && st.kind === 'smash') this.spawnShock(e.pos.x + Math.sin(e.yaw) * 3.3, e.pos.z + Math.cos(e.yaw) * 3.3);
           const live = e.blade;
           this.cancelStrike(e);
           if (live) e.blade = live;
@@ -4229,7 +4319,7 @@ export class GameEngine {
           e.modeT = 0;
           e.t = 0;
           e.cd2 = 0;
-          const maxCombo = boss ? 2 : Math.min(3, 1 + Math.floor(this.wave / 2));
+          const maxCombo = boss ? (e.fury ? 3 : 2) : Math.min(3, 1 + Math.floor(this.wave / 2));
           e.comboLeft = 1 + Math.floor(Math.random() * maxCombo);
         } else if (d > ring + 1.4) {
           e.mode = 'approach';
@@ -4343,6 +4433,83 @@ export class GameEngine {
         const pm = e.postureBar.material as THREE.MeshBasicMaterial;
         if (e.brokenT > 0) pm.color.setRGB(1.6, 0.25 + Math.sin(this.time * 14) * 0.2, 0.15);
         else pm.color.setRGB(1, 0.85 - pr * 0.6, 0.3 - pr * 0.2);
+      }
+    }
+  }
+
+  // The Oni at half life: a roar, a red aura, faster everything and longer chains; its
+  // slams now throw a shockwave (see spawnShock)
+  private startFury(e: EnemyInstance) {
+    e.fury = true;
+    this.cancelStrike(e);
+    e.blade = undefined;
+    e.mode = 'recover';
+    e.modeT = 0;
+    e.staggerT = Math.max(e.staggerT, 1.5);
+    e.cd = Math.max(e.cd, 1.6);
+    this.enemyClip(e, 'powerUp', { from: 0.3, to: 1.9, speed: 1.1, fadeIn: 0.15 });
+    if (e.aura) this.disposeAura(e);
+    e.aura = this.makeAura(0xff3018, 2.6);
+    this.shake = Math.max(this.shake, 0.45);
+    sfx.boom();
+    this.spawnLabel(e.pos.x, e.pos.y + 6.2, e.pos.z, 'FÚRIA!', '#ff3b24', 1.8);
+    this.callbacks.onWaveChange(this.wave, 'A Fúria do Oni', 'Cada golpe pesado abala o chão: pule a onda de choque');
+    this.lastBossKey = -1;
+  }
+
+  private disposeAura(e: EnemyInstance) {
+    if (!e.aura) return;
+    this.scene.remove(e.aura);
+    e.aura.geometry.dispose();
+    (e.aura.material as THREE.Material).dispose();
+    e.aura = undefined;
+  }
+
+  private spawnShock(x: number, z: number) {
+    const mesh = new THREE.Mesh(
+      new THREE.RingGeometry(0.9, 1, 64).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(1.9, 0.55, 0.2), transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending, fog: false })
+    );
+    mesh.position.set(x, 0.09, z);
+    mesh.scale.setScalar(0.5);
+    mesh.renderOrder = 7;
+    this.scene.add(mesh);
+    this.shocks.push({ x, z, r: 0.5, mesh, hit: false });
+    this.shake = Math.max(this.shake, 0.3);
+    this.emitParticles(x, 0.3, z, 18, 0xff8a40, 6, 2, 8, 0.5);
+  }
+
+  private disposeShock(sh: { mesh: THREE.Mesh }) {
+    this.scene.remove(sh.mesh);
+    sh.mesh.geometry.dispose();
+    (sh.mesh.material as THREE.Material).dispose();
+  }
+
+  // Expanding ground ring: it hurts whoever it passes over while on the ground - jump it
+  // (or dash through it)
+  private updateShocks(dt: number) {
+    const P = this.player;
+    for (let i = this.shocks.length - 1; i >= 0; i--) {
+      const s = this.shocks[i];
+      s.r += 12 * dt;
+      s.mesh.scale.setScalar(s.r);
+      (s.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 0.9 * (1 - s.r / 11));
+      const dx = P.pos.x - s.x;
+      const dz = P.pos.z - s.z;
+      const d = Math.hypot(dx, dz) || 0.001;
+      if (!s.hit && this.state === 'play' && Math.abs(d - s.r) < 0.75) {
+        s.hit = true;
+        if (P.pos.y > 0.4) {
+          this.spawnLabel(P.pos.x, P.pos.y + 2.5, P.pos.z, 'SALTOU!', '#ffd166', 1.2);
+        } else if (P.inv > 0) {
+          if (P.dashInv) this.spawnLabel(P.pos.x, P.pos.y + 2.5, P.pos.z, 'ESQUIVOU!', '#8fe0c8', 1.1);
+        } else {
+          this.damagePlayer(16, dx / d, dz / d);
+        }
+      }
+      if (s.r > 11) {
+        this.disposeShock(s);
+        this.shocks.splice(i, 1);
       }
     }
   }
@@ -4548,6 +4715,7 @@ export class GameEngine {
       this.stepProgress(dt);
       this.updatePlayerMovementAndCamera(dt);
       this.updateEnemies(dt);
+      this.updateShocks(dt);
       this.updateProjectiles(dt);
       this.updatePickups(dt);
       this.updateScrolls(dt);
@@ -4559,7 +4727,14 @@ export class GameEngine {
           this.clearedShown = true;
           const rank = this.waveRank();
           this.ranks.push(rank);
-          const gain = Math.round(this.addHonor('wave', HONOR.waveBase + HONOR.wavePer * this.wave) + this.addHonor('rank', HONOR.rank[rank]));
+          this.bestRank = Math.max(this.bestRank, ['D', 'C', 'B', 'A', 'S'].indexOf(rank));
+          if (!this.player.tookDamage) this.flawless++;
+          let gain = this.addHonor('wave', HONOR.waveBase + HONOR.wavePer * this.wave) + this.addHonor('rank', HONOR.rank[rank]);
+          if (this.waveMod) {
+            gain += this.addHonor('mod', this.waveMod.honor);
+            this.modWaves++;
+          }
+          gain = Math.round(gain);
           this.player.score += 100 * this.wave;
           this.callbacks.onScoreChange(this.player.score);
           this.callbacks.onWaveChange(this.wave, `Onda limpa · Nota ${rank}`, `+${100 * this.wave} pontos · +${gain} 誉`);

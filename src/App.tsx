@@ -11,6 +11,8 @@ import { TunePanel } from './TunePanel';
 import { loadTune } from './game/tunables';
 import { getLoadProgress, onLoadProgress } from './game/models';
 import { bankRun, bonusesFor, buyUpgrade, loadMeta, metaPersistent, saveMeta, type MetaSave, type RunSummary } from './game/meta';
+import { ensureDaily, localDate } from './game/missions';
+import { Missions } from './ui/Missions';
 import type { CardOffer } from './game/cards';
 import { CardPicker } from './ui/CardPicker';
 import { Temple } from './ui/Temple';
@@ -81,13 +83,14 @@ export default function App() {
   const [dbReady, setDbReady] = useState(false);
   const [cinematic, setCinematic] = useState<false | 'full' | 'short'>(false);
   // progression: permanent Honra upgrades, the run's Honra, level-up cards, boss bar
-  const [meta, setMeta] = useState<MetaSave>(() => loadMeta());
+  const [meta, setMeta] = useState<MetaSave>(() => ensureDaily(loadMeta(), localDate()));
   const metaRef = useRef(meta);
   const [persistOk, setPersistOk] = useState(() => metaPersistent());
   const [showTemple, setShowTemple] = useState(false);
   const [runHonor, setRunHonor] = useState(0);
   const [cardOffer, setCardOffer] = useState<CardOffer[] | null>(null);
-  const [bossBar, setBossBar] = useState<{ hp: number; max: number } | null>(null);
+  const [bossBar, setBossBar] = useState<{ hp: number; max: number; fury: boolean } | null>(null);
+  const [waveMod, setWaveMod] = useState<{ id: string; name: string; glyph: string; desc: string } | null>(null);
   const [runResult, setRunResult] = useState<RunResult | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [bestScore, setBestScore] = useState<number>(() => {
@@ -237,11 +240,11 @@ export default function App() {
   // Banks a finished (or abandoned) run's Honra into the saved progress
   const bank = useCallback((summary: RunSummary, prevBest: number): RunResult => {
     const m0 = metaRef.current;
-    const m1 = bankRun(m0, summary);
-    metaRef.current = m1;
-    setMeta(m1);
-    setPersistOk(saveMeta(m1));
-    return { summary, before: m0.honor, after: m1.honor, prevBest, prevBestWave: m0.bestWave };
+    const out = bankRun(m0, summary, localDate());
+    metaRef.current = out.meta;
+    setMeta(out.meta);
+    setPersistOk(saveMeta(out.meta));
+    return { summary, before: m0.honor, after: out.meta.honor, prevBest, prevBestWave: m0.bestWave, missions: out.done, streak: out.streak };
   }, []);
 
   const buy = useCallback((id: string) => {
@@ -294,6 +297,7 @@ export default function App() {
       onHonorChange: (h) => setRunHonor(h),
       onCardOffer: (offer) => setCardOffer(offer),
       onBossChange: (b) => setBossBar(b),
+      onWaveMod: (m) => setWaveMod(m),
       onGameOver: (finalScore, _wave, _level, _kills, _combo, summary) => {
         const prevBest = bestScoreRef.current;
         if (finalScore > prevBest) {
@@ -368,6 +372,7 @@ export default function App() {
       setRunResult(null);
       setCardOffer(null);
       setBossBar(null);
+      setWaveMod(null);
       setRunHonor(0);
       eng.start();
       // let the first frame of the run render behind the black, then fade it away
@@ -394,6 +399,7 @@ export default function App() {
     }
     setCardOffer(null);
     setBossBar(null);
+    setWaveMod(null);
     setShowSettings(false);
     setGameState('menu');
   };
@@ -490,6 +496,17 @@ export default function App() {
   };
 
   // Keyboard controls
+  // opening the menu on a new day rolls the missions over
+  useEffect(() => {
+    if (gameState !== 'menu') return;
+    const m2 = ensureDaily(metaRef.current, localDate());
+    if (m2 !== metaRef.current) {
+      metaRef.current = m2;
+      setMeta(m2);
+      setPersistOk(saveMeta(m2));
+    }
+  }, [gameState]);
+
   const cardOfferRef = useRef<CardOffer[] | null>(null);
   useEffect(() => {
     cardOfferRef.current = cardOffer;
@@ -628,6 +645,12 @@ export default function App() {
                 <span>Onda {engineRef.current?.wave || 1}</span>
                 <span className="text-[var(--jade)]">Nível {level}</span>
               </div>
+              {waveMod && (
+                <div className="mt-0.5 inline-flex items-center gap-1 rounded-full border border-[rgba(255,209,102,0.5)] bg-[rgba(22,18,31,0.7)] px-2 py-0.5 text-[10px] font-bold text-[#ffd166]" title={waveMod.desc}>
+                  <span className="font-serif text-xs leading-none">{waveMod.glyph}</span>
+                  {waveMod.name}
+                </div>
+              )}
             </div>
           </div>
 
@@ -640,10 +663,12 @@ export default function App() {
           {/* Boss life bar (the notch marks where the first deathblow leaves it) */}
           {bossBar && (
             <div className="absolute left-1/2 -translate-x-1/2 top-[calc(var(--sat)+10px)] w-[min(38vw,380px)] pointer-events-none">
-              <div className="text-center font-serif text-xs font-extrabold tracking-[0.3em] text-[var(--paper)] drop-shadow mb-0.5">鬼 ONI</div>
+              <div className={`text-center font-serif text-xs font-extrabold tracking-[0.3em] drop-shadow mb-0.5 ${bossBar.fury ? 'text-[#ff5a3a]' : 'text-[var(--paper)]'}`}>
+                鬼 ONI{bossBar.fury ? ' · 怒' : ''}
+              </div>
               <div className="relative h-2.5 rounded-sm bg-[rgba(10,8,14,0.75)] border border-[rgba(239,230,210,0.4)] overflow-hidden">
                 <div
-                  className="absolute inset-y-0 left-0 bg-[#d8242a] transition-[width] duration-200"
+                  className={`absolute inset-y-0 left-0 transition-[width] duration-200 ${bossBar.fury ? 'bg-[#ff5a1a] animate-pulse' : 'bg-[#d8242a]'}`}
                   style={{ width: `${Math.max(0, Math.min(100, (bossBar.hp / bossBar.max) * 100))}%` }}
                 />
                 <div className="absolute inset-y-0 left-1/2 w-px bg-[rgba(239,230,210,0.6)]" />
@@ -902,6 +927,8 @@ export default function App() {
               <span className="font-serif text-base text-[var(--ember)] leading-none">誉</span>
               Templo da Honra · {meta.honor.toLocaleString('pt-BR')}
             </button>
+
+            <Missions meta={meta} today={localDate()} />
 
             {/* Kage is hidden for now (kept in code, not deleted, in case it comes back) -
                 O Rōnin is the only selectable character while it's the one being tuned. */}

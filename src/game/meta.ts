@@ -3,14 +3,19 @@
 // early game, they never replace skill. Saved in localStorage as a versioned blob; when
 // storage is blocked the game keeps working with progress held in memory for the session.
 
+import { applyRun, freshDaily, freshStreak, type DailyState, type MissionOutcome, type StreakState } from './missions';
+
 export const META_KEY = 'kage_meta_v1';
 
+// (fields added later - daily, streak - are optional in old saves: sanitize() fills them in)
 export interface MetaSave {
   v: 1;
   honor: number;
   up: Record<string, number>;
   runs: number;
   bestWave: number;
+  daily: DailyState;
+  streak: StreakState;
 }
 
 export interface UpgradeDef {
@@ -69,6 +74,7 @@ export const HONOR = {
   kill: { samurai: 1, archer: 2, boss: 0 } as Record<string, number>,
   finisher: 4,
   boss: 40,
+  elite: 6,
   waveBase: 8,
   wavePer: 2,
   rank: { S: 30, A: 20, B: 12, C: 6, D: 0 } as Record<string, number>
@@ -80,6 +86,7 @@ export interface HonorBreakdown {
   wave: number;
   boss: number;
   rank: number;
+  mod: number; // wave modifiers and elites
 }
 
 export interface RunSummary {
@@ -89,13 +96,18 @@ export interface RunSummary {
   kills: number;
   bestCombo: number;
   finishers: number;
+  deflects: number;
+  flawless: number; // waves cleared without taking damage
+  bossKills: number;
+  modWaves: number; // waves with a modifier that were cleared
+  bestRank: 'S' | 'A' | 'B' | 'C' | 'D';
   honor: HonorBreakdown & { total: number };
   cards: Record<string, number>;
   ranks: string[];
 }
 
 export function freshMeta(): MetaSave {
-  return { v: 1, honor: 0, up: {}, runs: 0, bestWave: 0 };
+  return { v: 1, honor: 0, up: {}, runs: 0, bestWave: 0, daily: freshDaily(), streak: freshStreak() };
 }
 
 // Anything read from storage is untrusted: rebuild the blob field by field
@@ -111,6 +123,20 @@ function sanitize(raw: unknown): MetaSave {
     for (const def of UPGRADES) {
       m.up[def.id] = num((r.up as Record<string, unknown>)[def.id], def.max);
     }
+  }
+  const date = (v: unknown) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : '');
+  if (r.daily && typeof r.daily === 'object') {
+    const d = r.daily as Record<string, unknown>;
+    m.daily.date = date(d.date);
+    if (d.prog && typeof d.prog === 'object') {
+      for (const [k, v] of Object.entries(d.prog as Record<string, unknown>)) m.daily.prog[k.slice(0, 16)] = num(v, 1e6);
+    }
+    if (Array.isArray(d.done)) m.daily.done = d.done.filter((x): x is string => typeof x === 'string').map((x) => x.slice(0, 16)).slice(0, 8);
+  }
+  if (r.streak && typeof r.streak === 'object') {
+    const t = r.streak as Record<string, unknown>;
+    m.streak.last = date(t.last);
+    m.streak.count = num(t.count, 9999);
   }
   return m;
 }
@@ -154,8 +180,10 @@ export function buyUpgrade(m: MetaSave, id: string): MetaSave | null {
   return { ...m, honor: m.honor - cost, up: { ...m.up, [id]: lvl + 1 } };
 }
 
-export function bankRun(m: MetaSave, s: RunSummary): MetaSave {
-  return { ...m, honor: m.honor + Math.round(s.honor.total), runs: m.runs + 1, bestWave: Math.max(m.bestWave, s.wave) };
+/** Banks a run: its Honra, then the day's missions and streak (which pay on top). */
+export function bankRun(m: MetaSave, s: RunSummary, today: string): MissionOutcome {
+  const banked = { ...m, honor: m.honor + Math.round(s.honor.total), runs: m.runs + 1, bestWave: Math.max(m.bestWave, s.wave) };
+  return applyRun(banked, s, today);
 }
 
 /** The cheapest upgrade still to buy: the "one more run" goal shown after a run. */
