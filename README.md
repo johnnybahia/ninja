@@ -35,6 +35,9 @@ O workflow `.github/workflows/pages.yml` gera o build e publica em `https://john
 - **Nota da onda**: sem levar dano (2) + rapidez (1) + finalizações (1) + aparos (1) → S/A/B/C/D, com bônus de Honra.
 - **Desafios de onda** (`src/game/mods.ts`): a partir da onda 3 (nunca nas ondas do chefe) metade das ondas muda o que os inimigos exigem: Névoa Densa, Chuva de Flechas, Ventania, Elites (mais vida/dano, soltam pergaminho) e Aço Temperado (postura difícil de quebrar). Limpar a onda rende Honra extra.
 - **Chefe em 2 fases**: com metade da vida o Oni entra em Fúria — mais rápido, correntes maiores e uma onda de choque no chão depois das pancadas pesadas (pule ou esquive).
+- **Inimigos que reagem**: um golpe que conecta num samurai pode ser bloqueado (já existia, agora com aviso), aparado (o golpe quica, o combo quebra e ele contra-ataca rápido) ou esquivado (passo para trás/lado e volta). Quem está golpeando, tonto ou com a postura quebrada não defende; aparo e esquiva têm descanso (2,5 s por inimigo) e a chance sobe depois de 3 golpes seguidos sem defesa. Especiais atravessam a defesa. O chefe só bloqueia de vez em quando.
+- **Flechas**: parte dos tiros antecipa o seu movimento, o dano cresce com a onda e, a partir da onda 4, o tiro vira rajada de 2 flechas (3 a partir da onda 8) — continuam só abalando, sem derrubar.
+- **Ajuste ao vivo**: abra o jogo com `?tune=1` (engrenagem de ajustes) para mexer em chance de bloqueio/aparo/esquiva, vida e postura dos inimigos, dano e antecipação das flechas.
 - **Missões do dia** (`src/game/missions.ts`): 3 por dia (uma por dificuldade), sorteadas pela data local, com progresso acumulado e recompensa em Honra ao cumprir; sequência de dias com bônus crescente. Relógio voltado para trás não zera nada.
 
 ## Estrutura
