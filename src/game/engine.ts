@@ -30,7 +30,7 @@ import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
 import { createClipRig, Grip, OneShot, PlayOptions } from './clipRig';
 import { loadCharacter, loadWeapons, preloadModels, characterIfReady, CharacterTemplate } from './models';
-import { COMBOS, SPECIAL_MOVES, RUSH, ENEMY_STRIKES, BOSS_STRIKES, ClipMove } from './moves';
+import { COMBOS, SPECIAL_MOVES, RUSH, ENEMY_STRIKES, BOSS_STRIKES, FINISHERS, FINISHER_CLIP_LEN, Finisher, ClipMove } from './moves';
 import { BladeSeg, makeSeg, sweepVsCapsule, BLADE_SEG, MAGNET_REACH, HURT_BOTTOM, HURT_TOP } from './combat';
 import { DebugDraw } from './debugdraw';
 import { animateCharacter, animateDeath } from './animation';
@@ -458,7 +458,13 @@ export class GameEngine {
     boss: boolean;
     side: number;
     dist: number;
+    hitAt: number; // game-seconds from the start to the blow (set by the finisher)
+    style: Finisher['style'];
+    boom: boolean;
   } | null = null;
+  // finisher chosen last for each weapon (so it never repeats back to back); dev hook to force one
+  private lastFinisher: Record<string, number> = {};
+  public forceFinisher: number | null = null;
   private cineSide = Math.random() < 0.5 ? 1 : -1;
   private lastDeathblowAt = -99;
   private cineW = 0;
@@ -3611,6 +3617,48 @@ export class GameEngine {
     return best;
   }
 
+  // One of the active weapon's three finishers at random, never the one it used last time
+  private pickFinisher(): Finisher {
+    const id = this.weapons[this.activeWeaponIdx]?.id ?? 'katana';
+    const list = FINISHERS[id] ?? FINISHERS.katana;
+    let i = this.forceFinisher !== null ? this.forceFinisher % list.length : Math.floor(Math.random() * list.length);
+    const last = this.lastFinisher[id];
+    if (this.forceFinisher === null && list.length > 1 && i === last) i = (i + 1 + Math.floor(Math.random() * (list.length - 1))) % list.length;
+    this.lastFinisher[id] = i;
+    return list[i];
+  }
+
+  // What each finisher adds at the moment of the blow, beyond the shared flash and sparks
+  private finisherFx(c: NonNullable<GameEngine['cine']>, e: EnemyInstance, sc: number) {
+    const P = this.player;
+    const fx = Math.sin(P.yaw);
+    const fz = Math.cos(P.yaw);
+    const y = e.pos.y + 1.2 * sc;
+    if (c.style === 'slam') {
+      this.puff(e.pos.x, e.pos.z, 14, 4);
+      this.shake = Math.max(this.shake, 0.75);
+    } else if (c.style === 'slide') {
+      this.puff(P.pos.x, P.pos.z, 12, 3, -fx, -fz);
+      this.puff(e.pos.x, e.pos.z, 8, 3, fx, fz);
+    } else if (c.style === 'stab') {
+      this.emitBlood(e.pos.x, y, e.pos.z, fx, fz, 50, true, true);
+    } else if (c.style === 'spin') {
+      for (let k = 0; k < 10; k++) {
+        const a = (k / 10) * TAU;
+        this.emitParticles(e.pos.x + Math.cos(a) * 1.2 * sc, y, e.pos.z + Math.sin(a) * 1.2 * sc, 3, 0xffd49a, 5, 1, 4, 0.35);
+      }
+    } else if (c.style === 'kick') {
+      this.impacts.spawn(this.tmpV.set(e.pos.x, y, e.pos.z), IMPACT_HEAVY, 3.4 * (sc > 1 ? 1.3 : 1), 0.3);
+      this.shake = Math.max(this.shake, 0.65);
+    }
+    if (c.boom) {
+      this.emitParticles(e.pos.x, y, e.pos.z, 70, 0xff7a20, 12, 4, 10, 0.7);
+      this.impacts.spawn(this.tmpV.set(e.pos.x, y, e.pos.z), IMPACT_HEAVY, 4.6 * (sc > 1 ? 1.3 : 1), 0.4);
+      this.shake = Math.max(this.shake, 0.85);
+      sfx.boom();
+    }
+  }
+
   private performDeathblow(e: EnemyInstance) {
     const dx = this.player.pos.x - e.pos.x;
     const dz = this.player.pos.z - e.pos.z;
@@ -3623,11 +3671,16 @@ export class GameEngine {
     this.player.inv = Math.max(this.player.inv, 1.6);
     this.player.dashInv = false;
     this.player.atkCd = 0.85;
+    const fin = this.pickFinisher();
+    const lead = fin.lead ?? 0.3;
     if (this.player.rig.clip) {
-      // the leaping slam, timed so it lands on the cinematic's strike (0.3s in): skip
-      // its run-up, play the rest in place (its own leap would carry past the target)
+      // the clip is played in place from `from` so the blow lands exactly `lead` seconds in
+      // (its own travel - a leap, a slide - would carry past the target); the recovery
+      // runs about a second, kept inside the clip
       this.actQueued = false;
-      this.startAct('deathblow', 'jumpAttack', { from: 0.55, speed: (1.07 - 0.55) / 0.3, cancel: 99, end: 2.1, fadeIn: 0.06 });
+      const speed = (fin.hit - fin.from) / lead;
+      const end = Math.min((FINISHER_CLIP_LEN[fin.clip] ?? 2) - 0.06, fin.from + 0.95 * speed);
+      this.startAct('deathblow', fin.clip, { from: fin.from, speed, cancel: 99, end, fadeIn: 0.06 });
     } else {
       this.player.anim = { kind: 'deathblow', t: 0, dur: 0.8, side: 0 };
     }
@@ -3643,7 +3696,7 @@ export class GameEngine {
     this.cineSide = -this.cineSide;
     const sc = this.sizeOf(e);
     const shot = cinema ? this.pickCineShot(e, sc) : { side: 1, dist: 4 };
-    this.cine = { t: 0, after: 0, e, struck: false, full, boss: boss && !boss1, side: shot.side, dist: shot.dist };
+    this.cine = { t: 0, after: 0, e, struck: false, full, boss: boss && !boss1, side: shot.side, dist: shot.dist * (fin.style === 'stab' ? 0.9 : 1), hitAt: lead, style: fin.style, boom: !!fin.boom };
     this.triggerSlowmo(full ? 0.75 : 0.4, full ? 0.38 : 0.5);
     this.fovKick = -9;
     this.callbacks.onCinematic?.(true, full ? 'full' : 'short');
@@ -3696,7 +3749,7 @@ export class GameEngine {
       const k = Math.min(1, Math.max(0, (x - a) / (b - a)));
       return k * k * (3 - 2 * k);
     };
-    const w = (c.struck ? 1 - ss(0.25, 0.85, c.after) : ss(0, 0.3, c.t)) * (c.full ? 1 : 0.6);
+    const w = (c.struck ? 1 - ss(0.25, 0.85, c.after) : ss(0, c.hitAt, c.t)) * (c.full ? 1 : 0.6);
     this.cineW = w;
     if (w < 0.001) return;
     const P = this.player.pos;
@@ -3710,13 +3763,14 @@ export class GameEngine {
     const bias = c.boss || sc > 1.5 ? 0.62 : 0.5;
     const fy = P.y + 1.3 * (1 + (sc - 1) * 0.5);
     this.cineFocus.set(P.x + (e.pos.x - P.x) * bias, fy, P.z + (e.pos.z - P.z) * bias);
-    const push = c.struck ? 1 : ss(0, 0.3, c.t);
+    const push = c.struck ? 1 : ss(0, c.hitAt, c.t);
     const d = c.dist * (1 - 0.18 * push);
     const px = -az * c.side;
     const pz = ax * c.side;
     const camX = this.cineFocus.x + (px * 0.92 - ax * 0.4) * d;
     const camZ = this.cineFocus.z + (pz * 0.92 - az * 0.4) * d;
-    const camY = Math.max(0.7, P.y + 0.75 + 0.3 * sc);
+    // a sliding finisher is filmed from near the ground
+    const camY = Math.max(0.45, P.y + 0.75 + 0.3 * sc - (c.style === 'slide' ? 0.35 : 0));
     this.camera.position.x += (camX - this.camera.position.x) * w;
     this.camera.position.y += (camY - this.camera.position.y) * w;
     this.camera.position.z += (camZ - this.camera.position.z) * w;
@@ -3735,7 +3789,7 @@ export class GameEngine {
     c.t += dt;
     const e = c.e;
     const cinema = this.settings.cinematicCamera;
-    if (!c.struck && c.t >= 0.3) {
+    if (!c.struck && c.t >= c.hitAt) {
       c.struck = true;
       const sc = this.sizeOf(e);
       const p = this.tmpV.set(e.pos.x, e.pos.y + 1.3 * sc, e.pos.z);
@@ -3743,6 +3797,7 @@ export class GameEngine {
       this.emitBlood(e.pos.x, e.pos.y + 1.2 * sc, e.pos.z, Math.sin(this.player.yaw), Math.cos(this.player.yaw), 70, true, true);
       this.decals.spawn(e.pos.x + Math.sin(this.player.yaw) * 1.2, e.pos.z + Math.cos(this.player.yaw) * 1.2, Math.sin(this.player.yaw), Math.cos(this.player.yaw), 2.4 * sc);
       this.emitParticles(p.x, p.y, p.z, 30, 0xff6a3a, 8, 3, 12, 0.5);
+      this.finisherFx(c, e, sc);
       this.shake = Math.max(this.shake, c.full ? 0.55 : 0.4);
       this.hitstop = 0.14;
       this.lastHS = performance.now();
@@ -5163,7 +5218,7 @@ export class GameEngine {
     let radial = 0;
     if (c && this.settings.cinematicCamera) {
       const ss = (a: number, b: number, x: number) => Math.min(1, Math.max(0, (x - a) / (b - a)));
-      radial = (c.struck ? 1 - ss(0, 0.35, c.after) : ss(0.12, 0.3, c.t) * 0.7) * (c.full ? 1 : 0.5);
+      radial = (c.struck ? 1 - ss(0, 0.35, c.after) : ss(c.hitAt * 0.4, c.hitAt, c.t) * 0.7) * (c.full ? 1 : 0.5);
     }
     const dof = this.profile.dof ? this.cineW : 0;
     if (dof > 0.01 || radial > 0.01) {

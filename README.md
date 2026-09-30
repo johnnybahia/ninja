@@ -38,6 +38,7 @@ O workflow `.github/workflows/pages.yml` gera o build e publica em `https://john
 - **Inimigos que reagem**: um golpe que conecta num samurai pode ser bloqueado (já existia, agora com aviso), aparado (o golpe quica, o combo quebra e ele contra-ataca rápido) ou esquivado (passo para trás/lado e volta). Quem está golpeando, tonto ou com a postura quebrada não defende; aparo e esquiva têm descanso (2,5 s por inimigo) e a chance sobe depois de 3 golpes seguidos sem defesa. Especiais atravessam a defesa. O chefe só bloqueia de vez em quando.
 - **Flechas**: parte dos tiros antecipa o seu movimento, o dano cresce com a onda e, a partir da onda 4, o tiro vira rajada de 2 flechas (3 a partir da onda 8) — continuam só abalando, sem derrubar.
 - **Ajuste ao vivo**: abra o jogo com `?tune=1` (engrenagem de ajustes) para mexer em chance de bloqueio/aparo/esquiva, vida e postura dos inimigos, dano e antecipação das flechas.
+- **Golpes finais variados** (`FINISHERS` em `src/game/moves.ts`): 3 por arma, sorteadas a cada execução sem repetir a última da mesma arma (salto, estocada, corte deslizante, giro, arremesso, chute giratório, bomba com explosão…). Cada uma tem o instante do impacto medido no clipe, efeito próprio (poeira, sangue direcional, explosão) e a câmera acompanha.
 - **Missões do dia** (`src/game/missions.ts`): 3 por dia (uma por dificuldade), sorteadas pela data local, com progresso acumulado e recompensa em Honra ao cumprir; sequência de dias com bônus crescente. Relógio voltado para trás não zera nada.
 
 ## Estrutura
