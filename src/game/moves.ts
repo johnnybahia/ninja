@@ -99,3 +99,39 @@ export const BOSS_STRIKES: Record<string, { clip: string; hit: number; from?: nu
   ],
   sweep: [{ clip: 'slash2', hit: 0.87, from: 0.1 }]
 };
+
+// Finishers (golpe final): three per weapon, one drawn at random each time (never the same
+// one twice in a row for a weapon). `from`/`hit` are clip seconds - the clip is played from
+// `from` so the blow lands at `hit`, `lead` game-seconds after the cinematic starts (the
+// camera peaks then). `style` picks the extra effects and camera (see engine.ts).
+export type FinisherStyle = 'slam' | 'slide' | 'stab' | 'spin' | 'throw' | 'kick';
+
+export interface Finisher {
+  name: string;
+  clip: string;
+  from: number;
+  hit: number;
+  lead?: number;
+  style: FinisherStyle;
+  boom?: boolean; // bombs: the blow ends in an explosion
+}
+
+// length of each clip used above, to keep the recovery inside it
+export const FINISHER_CLIP_LEN: Record<string, number> = { jumpAttack: 2.2, slideAttack: 2.17, eSwordAttack: 1.93, spin: 1.9, cast: 1.17, kick2: 1.77 };
+
+const SLAM: Finisher = { name: 'Salto e golpe', clip: 'jumpAttack', from: 0.55, hit: 1.07, style: 'slam' };
+const SLIDE: Finisher = { name: 'Deslize', clip: 'slideAttack', from: 0.95, hit: 1.43, lead: 0.36, style: 'slide' };
+const STAB: Finisher = { name: 'Estocada', clip: 'eSwordAttack', from: 0.3, hit: 0.58, style: 'stab' };
+const SPIN: Finisher = { name: 'Giro', clip: 'spin', from: 0.1, hit: 0.43, style: 'spin' };
+const THROW: Finisher = { name: 'Arremesso à queima-roupa', clip: 'cast', from: 0.05, hit: 0.37, style: 'throw' };
+const KICK: Finisher = { name: 'Chute giratório', clip: 'kick2', from: 0.25, hit: 0.73, style: 'kick' };
+
+export const FINISHERS: Record<string, Finisher[]> = {
+  katana: [SLAM, STAB, SLIDE],
+  bo: [{ ...SPIN, name: 'Giro do bastão' }, { ...SLAM, name: 'Pancada de cima' }, { ...SLIDE, name: 'Varredura baixa' }],
+  kama: [{ ...SPIN, name: 'Giro da corrente' }, STAB, SLAM],
+  kunai: [STAB, SLIDE, SLAM],
+  shuriken: [THROW, SLIDE, SLAM],
+  bomb: [{ ...THROW, name: 'Bomba no alvo', boom: true }, { ...SLAM, boom: true }, { ...SLIDE, boom: true }],
+  karate: [{ ...SLAM, name: 'Voadora' }, KICK, { ...SLIDE, name: 'Rasteira' }]
+};
