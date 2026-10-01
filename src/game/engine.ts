@@ -45,6 +45,23 @@ import { pickWaveGoal, pickWaveMod, WaveMod, type GoalId } from './mods';
 const ENEMY_TINT = new THREE.Color(0.42, 0.46, 0.62);
 const ENEMY_RIM = new THREE.Color(0.35, 0.45, 1.0).multiplyScalar(0.18);
 // samurai variants: the Brutamontes (darker, bigger) and the Monge (saffron robes)
+// The Oni takes a different form every boss wave: 4 the Oni, 8 the Trovão (lightning that
+// marks the ground), 12 the Sombrio (vanishes and strikes from behind), then round again
+const BOSS_NAME: Record<string, string> = { oni: '鬼 ONI', trovao: '雷 ONI TROVÃO', sombrio: '影 ONI SOMBRIO' };
+const BOSS_COLOR: Record<string, number> = { trovao: 0x40b0ff, sombrio: 0xa060ff };
+const BOSS_HINT: Record<string, string> = {
+  oni: 'O oni despertou',
+  trovao: 'Oni Trovão: raios marcam o chão, saia do círculo',
+  sombrio: 'Oni Sombrio: ele some e reaparece de surpresa'
+};
+function bossFormFor(wave: number): EnemyVariant | undefined {
+  const k = (Math.floor(wave / 4) - 1) % 3;
+  return k === 1 ? 'trovao' : k === 2 ? 'sombrio' : undefined;
+}
+const BOLT_DELAY = 1.15;
+const BOLT_R = 1.75;
+const BOLT_RING = new THREE.RingGeometry(0.88, 1, 48).rotateX(-Math.PI / 2);
+const BOLT_PILLAR = new THREE.CylinderGeometry(0.14, 0.24, 22, 10, 1, true);
 const BRUTE_TINT = new THREE.Color(0.62, 0.34, 0.3);
 const MONK_TINT = new THREE.Color(1.25, 1.0, 0.5);
 // Archer's bow hand, measured from its own aiming clip: arrow flight along the line from
@@ -178,7 +195,7 @@ export interface GameEngineCallbacks {
   onHealsChange?: (heals: number) => void;
   onCardOffer?: (offer: CardOffer[] | null) => void;
   onHonorChange?: (honor: number) => void;
-  onBossChange?: (boss: { hp: number; max: number; fury: boolean } | null) => void;
+  onBossChange?: (boss: { hp: number; max: number; fury: boolean; name: string } | null) => void;
   onWaveMod?: (mod: { id: string; name: string; glyph: string; desc: string } | null) => void;
 }
 
@@ -413,6 +430,7 @@ export class GameEngine {
   private bossKills = 0;
   private modWaves = 0;
   private bestRank = 0;
+  private bolts: { x: number; z: number; t: number; ring: THREE.Mesh; pillar: THREE.Mesh; struck: boolean }[] = [];
   private shocks: { x: number; z: number; r: number; mesh: THREE.Mesh; hit: boolean }[] = [];
   private waveStat = { t0: 0, enemies: 0, finishers: 0, deflects: 0 };
   private lastBossKey = -1;
@@ -853,6 +871,8 @@ export class GameEngine {
     this.bestRank = 0;
     for (const sh of this.shocks) this.disposeShock(sh);
     this.shocks = [];
+    for (const b of this.bolts) this.disposeBolt(b);
+    this.bolts = [];
     this.callbacks.onWaveMod?.(null);
     this.callbacks.onCardOffer?.(null);
     this.callbacks.onHonorChange?.(0);
@@ -969,13 +989,14 @@ export class GameEngine {
     for (let i = 0; i < nBrute; i++) list.push({ type: 'samurai', variant: 'brute' });
     for (let i = 0; i < nMonk; i++) list.push({ type: 'samurai', variant: 'monk' });
     for (let i = 0; i < nA; i++) list.push({ type: 'archer' });
-    if (boss) list.push({ type: 'boss' });
+    if (boss) list.push({ type: 'boss', variant: bossFormFor(this.wave) });
 
     const spawned: EnemyInstance[] = [];
     list.forEach((it) => {
       const e = this.spawnRing(it.type, near, it.variant);
       if (e) spawned.push(e);
     });
+    for (const e of spawned) if (e.type === 'boss' && e.variant) e.aura = this.makeAura(BOSS_COLOR[e.variant], 3.0);
     this.goal = null;
     if (goalDef) {
       let captain: EnemyInstance | undefined;
@@ -996,7 +1017,7 @@ export class GameEngine {
     }
 
     this.waveStat = { t0: this.time, enemies: list.length, finishers: 0, deflects: 0 };
-    let sub = boss ? 'O oni despertou' : mod ? mod.desc : goalDef ? goalDef.desc : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
+    let sub = boss ? BOSS_HINT[bossFormFor(this.wave) ?? 'oni'] : mod ? mod.desc : goalDef ? goalDef.desc : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
     const atmIdx = atmosphereForWave(this.wave, this.atmosMode, this.world.atmIndex);
     if (atmIdx !== this.world.atmIndex) {
       this.world.setAtmosphere(atmIdx);
@@ -1008,7 +1029,7 @@ export class GameEngine {
       sub += ` · ${THEMES[themeIdx].glyph} ${THEMES[themeIdx].name}`;
     }
     // the first time a new kind of samurai shows up, a hint on how to beat it
-    const HINTS: Record<EnemyVariant, [string, string]> = {
+    const HINTS: Partial<Record<EnemyVariant, [string, string]>> = {
       brute: ['Novo inimigo: Brutamontes', 'Pule a varrida e castigue a recuperação'],
       monk: ['Novo inimigo: Monge de bastão', 'Ataca de longe: feche a distância com a esquiva']
     };
@@ -1017,7 +1038,7 @@ export class GameEngine {
       if (!this.seenVariants.has(v) && spawned.some((e) => e.variant === v)) {
         this.seenVariants.add(v);
         const wv = this.wave;
-        this.timers.push({ at: this.time + hintAt, fn: () => this.state === 'play' && this.wave === wv && this.callbacks.onWaveChange(wv, HINTS[v][0], HINTS[v][1]) });
+        this.timers.push({ at: this.time + hintAt, fn: () => this.state === 'play' && this.wave === wv && this.callbacks.onWaveChange(wv, HINTS[v]![0], HINTS[v]![1]) });
         hintAt += 2.3;
       }
     }
@@ -1187,7 +1208,9 @@ export class GameEngine {
     } else {
       const tpl = characterIfReady('giant');
       if (tpl) {
-        rig = createClipRig(tpl, { lod: true, kind: 'oni', height: GIANT_HEIGHT, grips: { right: GIANT_GRIP } });
+        // a coloured rim glow marks the form (the Trovão blue, the Sombrio violet)
+        const glow = variant ? new THREE.Color(BOSS_COLOR[variant]).multiplyScalar(0.55) : undefined;
+        rig = createClipRig(tpl, { lod: true, kind: 'oni', height: GIANT_HEIGHT, grips: { right: GIANT_GRIP }, rim: glow });
         // the great sword is modelled at human scale - sized to the giant's hand
         const sword = makeWeapon('greatsword');
         sword.scale.setScalar(rig.sizeScale ?? 1);
@@ -3333,7 +3356,7 @@ export class GameEngine {
     const key = boss ? Math.round((Math.max(0, boss.hp) / boss.maxHp) * 200) + (boss.fury ? 1000 : 0) : -1;
     if (key !== this.lastBossKey) {
       this.lastBossKey = key;
-      this.callbacks.onBossChange?.(boss ? { hp: Math.max(0, boss.hp), max: boss.maxHp, fury: !!boss.fury } : null);
+      this.callbacks.onBossChange?.(boss ? { hp: Math.max(0, boss.hp), max: boss.maxHp, fury: !!boss.fury, name: BOSS_NAME[boss.variant ?? 'oni'] } : null);
     }
   }
 
@@ -3642,7 +3665,8 @@ export class GameEngine {
     const perilChance = boss ? (e.fury ? 0.45 : 0.35) : brute ? 1 : monk ? 0.3 : this.wave >= 2 ? 0.28 : 0.1;
     let kind: StrikeKind = boss ? 'smash' : 'slash';
     let perilous = false;
-    if (last && Math.random() < perilChance) {
+    if (last && (e.forcePeril || Math.random() < perilChance)) {
+      e.forcePeril = false;
       perilous = true;
       kind = boss || brute ? 'sweep' : monk ? 'thrust' : Math.random() < 0.5 ? 'thrust' : 'sweep';
     }
@@ -4608,7 +4632,7 @@ export class GameEngine {
       // timers and its animation alike
       const dt = e.dead ? gdt : gdt * this.enemyTime * (e.fury ? 1.2 : 1);
       if (e.aura) {
-        e.aura.visible = !e.dead;
+        e.aura.visible = !e.dead && (e.vanishT ?? 0) <= 0;
         e.aura.position.set(e.pos.x, 0.07, e.pos.z);
         const pulse = 1 + Math.sin(this.time * 5 + i) * 0.06;
         e.aura.scale.setScalar(pulse * (e.type === 'boss' ? this.sizeOf(e) * 0.5 : 1));
@@ -4640,6 +4664,8 @@ export class GameEngine {
       const toP = Math.atan2(dx, dz);
       const boss = e.type === 'boss';
       if (boss && !e.fury && e.hp <= e.maxHp * 0.5 && e.brokenT <= 0 && !this.cine) this.startFury(e);
+      if (boss && e.variant === 'trovao') this.stepThunder(e, dt);
+      if (boss && e.variant === 'sombrio') this.stepShadow(e, dt, d);
 
       e.trail?.update(this.time);
       e.cd -= dt;
@@ -4661,7 +4687,11 @@ export class GameEngine {
       let spd = 0;
       const freezeAttacks = !!this.cine;
 
-      if (e.brokenT > 0) {
+      if ((e.vanishT ?? 0) > 0) {
+        // the Sombrio is gone: nothing to hit and nothing hitting, until it steps out behind the player
+        e.vanishT = (e.vanishT ?? 0) - dt;
+        if (e.vanishT <= 0) this.shadowStrike(e);
+      } else if (e.brokenT > 0) {
         e.brokenT -= dt;
         e.mode = 'broken';
         e.yaw = turnTo(e.yaw, toP, dt * 2);
@@ -5023,6 +5053,135 @@ export class GameEngine {
     }
   }
 
+  // ---- Oni Trovão: bolts are marked on the ground (the first one leads the player a little,
+  // the rest fall around), and strike a moment later
+  private stepThunder(e: EnemyInstance, dt: number) {
+    if (e.brokenT > 0 || e.staggerT > 0 || this.cine || this.state !== 'play') return;
+    e.bossT = (e.bossT ?? 4.5) - dt;
+    if (e.bossT > 0) return;
+    e.bossT = e.fury ? 3.4 : 5;
+    const P = this.player;
+    const lim = R_ARENA - 2;
+    for (let i = 0; i < (e.fury ? 4 : 3); i++) {
+      let x = i === 0 ? P.pos.x + P.vel.x * 0.4 : P.pos.x + rand(-5.5, 5.5);
+      let z = i === 0 ? P.pos.z + P.vel.z * 0.4 : P.pos.z + rand(-5.5, 5.5);
+      const d = Math.hypot(x, z);
+      if (d > lim) {
+        x *= lim / d;
+        z *= lim / d;
+      }
+      const ring = new THREE.Mesh(
+        BOLT_RING,
+        new THREE.MeshBasicMaterial({ color: new THREE.Color(0.6, 1.4, 3), transparent: true, opacity: 0.4, depthWrite: false, blending: THREE.AdditiveBlending, fog: false })
+      );
+      ring.position.set(x, 0.08, z);
+      ring.scale.setScalar(0.4);
+      ring.renderOrder = 7;
+      const pillar = new THREE.Mesh(
+        BOLT_PILLAR,
+        new THREE.MeshBasicMaterial({ color: new THREE.Color(0.7, 1.05, 1.9), transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending, fog: false })
+      );
+      pillar.position.set(x, 11, z);
+      pillar.visible = false;
+      this.scene.add(ring, pillar);
+      this.bolts.push({ x, z, t: 0, ring, pillar, struck: false });
+    }
+    sfx.danger();
+  }
+
+  private disposeBolt(b: { ring: THREE.Mesh; pillar: THREE.Mesh }) {
+    this.scene.remove(b.ring, b.pillar);
+    (b.ring.material as THREE.Material).dispose();
+    (b.pillar.material as THREE.Material).dispose();
+  }
+
+  private updateBolts(dt: number) {
+    const P = this.player;
+    for (let i = this.bolts.length - 1; i >= 0; i--) {
+      const b = this.bolts[i];
+      b.t += dt;
+      const ringMat = b.ring.material as THREE.MeshBasicMaterial;
+      if (!b.struck) {
+        const k = Math.min(1, b.t / BOLT_DELAY);
+        b.ring.scale.setScalar(BOLT_R * (0.25 + 0.75 * k));
+        ringMat.opacity = 0.35 + 0.5 * k + Math.sin(b.t * 28) * 0.08;
+        if (b.t >= BOLT_DELAY) {
+          b.struck = true;
+          b.pillar.visible = true;
+          b.ring.scale.setScalar(BOLT_R);
+          sfx.boom();
+          this.world.props.slam(b.x, b.z, 1.5);
+          this.shake = Math.max(this.shake, 0.3);
+          this.emitParticles(b.x, 0.5, b.z, 22, 0x9fd0ff, 8, 2, 16, 0.4);
+          const dx = P.pos.x - b.x;
+          const dz = P.pos.z - b.z;
+          const d = Math.hypot(dx, dz) || 0.001;
+          if (this.state === 'play' && d < BOLT_R) {
+            if (P.inv > 0) {
+              if (P.dashInv) this.spawnLabel(P.pos.x, P.pos.y + 2.5, P.pos.z, 'ESQUIVOU!', '#8fe0c8', 1.1);
+            } else this.damagePlayer(18, dx / d, dz / d);
+          }
+        }
+      } else {
+        const f = Math.max(0, 1 - (b.t - BOLT_DELAY) / 0.2);
+        (b.pillar.material as THREE.MeshBasicMaterial).opacity = 0.9 * f;
+        ringMat.opacity = 0.9 * f;
+        b.pillar.scale.x = b.pillar.scale.z = 0.6 + 0.4 * f;
+        if (f <= 0) {
+          this.disposeBolt(b);
+          this.bolts.splice(i, 1);
+        }
+      }
+    }
+  }
+
+  // ---- Oni Sombrio: it slips out of sight and steps out near the player, already winding
+  // up a sweep to jump (to the front-left or front-right on screen, so it is seen coming)
+  private stepShadow(e: EnemyInstance, dt: number, d: number) {
+    if (e.brokenT > 0 || e.staggerT > 0 || this.cine || this.state !== 'play' || (e.vanishT ?? 0) > 0) return;
+    e.bossT = (e.bossT ?? 6) - dt;
+    if (e.bossT > 0 || e.strike || d < 3) return;
+    e.bossT = e.fury ? 5 : 7.5;
+    this.cancelStrike(e);
+    e.token = false;
+    this.puff(e.pos.x, e.pos.z, 16, 4);
+    this.emitParticles(e.pos.x, 1.6, e.pos.z, 24, 0x8050d0, 6, 2, 14, 0.5);
+    sfx.dash();
+    e.rig.clip?.stop(0.1);
+    e.vanishT = 0.85;
+    e.pos.set(0, -30, -39);
+  }
+
+  private shadowStrike(e: EnemyInstance) {
+    const P = this.player;
+    // on screen, ahead of the camera's view of the player
+    const toward = Math.atan2(-Math.sin(this.camYaw), -Math.cos(this.camYaw));
+    const first = Math.random() < 0.5 ? 0.7 : -0.7;
+    let placed = false;
+    for (const off of [first, -first, 0, 1.6]) {
+      const a = toward + off;
+      const x = P.pos.x + Math.sin(a) * 4.6;
+      const z = P.pos.z + Math.cos(a) * 4.6;
+      if (Math.hypot(x, z) > R_ARENA - 2) continue;
+      if (this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r + e.r + 0.3)) continue;
+      e.pos.set(x, 0, z);
+      placed = true;
+      break;
+    }
+    if (!placed) e.pos.set(P.pos.x * 0.5, 0, P.pos.z * 0.5);
+    e.yaw = Math.atan2(P.pos.x - e.pos.x, P.pos.z - e.pos.z);
+    this.puff(e.pos.x, e.pos.z, 18, 4.5);
+    this.emitParticles(e.pos.x, 1.6, e.pos.z, 26, 0x8050d0, 7, 2, 14, 0.5);
+    sfx.boom();
+    this.shake = Math.max(this.shake, 0.25);
+    e.mode = 'attack';
+    e.modeT = 0;
+    e.t = 0;
+    e.comboLeft = 1;
+    e.cd2 = 0.1;
+    e.forcePeril = true;
+  }
+
   // The Oni at half life: a roar, a red aura, faster everything and longer chains; its
   // slams now throw a shockwave (see spawnShock)
   private startFury(e: EnemyInstance) {
@@ -5035,7 +5194,7 @@ export class GameEngine {
     e.cd = Math.max(e.cd, 1.6);
     this.enemyClip(e, 'powerUp', { from: 0.3, to: 1.9, speed: 1.1, fadeIn: 0.15 });
     if (e.aura) this.disposeAura(e);
-    e.aura = this.makeAura(0xff3018, 2.6);
+    e.aura = this.makeAura(e.variant ? BOSS_COLOR[e.variant] : 0xff3018, e.variant ? 3.1 : 2.6);
     this.shake = Math.max(this.shake, 0.45);
     sfx.boom();
     this.spawnLabel(e.pos.x, e.pos.y + 6.2, e.pos.z, 'FÚRIA!', '#ff3b24', 1.8);
@@ -5293,6 +5452,7 @@ export class GameEngine {
     this.updatePlayerMovementAndCamera(dt);
     this.updateEnemies(dt);
     this.updateShocks(dt);
+    this.updateBolts(dt);
     this.updateProjectiles(dt);
     this.updatePickups(dt);
     this.updateScrolls(dt);

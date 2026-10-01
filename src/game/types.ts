@@ -103,7 +103,7 @@ export interface RigInstance {
   sizeScale?: number;
 }
 
-export type EnemyVariant = 'brute' | 'monk';
+export type EnemyVariant = 'brute' | 'monk' | 'trovao' | 'sombrio'; // samurai kinds, and the Oni's boss-wave forms
 
 export interface EnemyInstance {
   type: 'samurai' | 'archer' | 'boss';
@@ -197,6 +197,10 @@ export interface EnemyInstance {
   // a samurai with its own way of fighting: the heavy Brutamontes or the long-reach Monge
   variant?: EnemyVariant;
   // wave goals: the captain to hunt, and a routed enemy running away before it vanishes
+  // boss forms: the ability clock, the Sombrio's time out of sight, a forced perilous strike
+  bossT?: number;
+  vanishT?: number;
+  forcePeril?: boolean;
   captain?: boolean;
   flee?: boolean;
   fleeT?: number;
