@@ -84,6 +84,7 @@ interface Prop {
   maxHp: number;
   broken: boolean;
   token: object | null;
+  shockTok?: object | null; // the last ground shock that reached it
   lastSnd: number;
   tree?: number;
   canopy?: Canopy;
@@ -508,6 +509,14 @@ export class PropSystem {
     return null;
   }
 
+  private contactAt(p: Prop, x: number, y: number, z: number): Contact {
+    const s = p.segs[0];
+    const nrm = new THREE.Vector3(x - p.cx, 0, z - p.cz);
+    if (nrm.lengthSq() < 1e-6) nrm.set(1, 0, 0);
+    else nrm.normalize();
+    return { point: new THREE.Vector3(p.cx, Math.min(Math.max(y, s.a.y), s.b.y), p.cz).addScaledVector(nrm, s.r), normal: nrm, seg: s };
+  }
+
   /** A blast: everything inside the radius reacts at full power */
   explode(x: number, y: number, z: number, radius: number, power = 10) {
     const tok = {};
@@ -515,11 +524,81 @@ export class PropSystem {
       if (p.broken && p.kind !== 'tree') continue;
       const d = Math.hypot(p.cx - x, p.cz - z);
       if (d > radius + p.reach) continue;
-      const s = p.segs[0];
-      const nrm = new THREE.Vector3(x - p.cx, 0, z - p.cz).normalize();
-      const c: Contact = { point: new THREE.Vector3(p.cx, Math.min(Math.max(y, s.a.y), s.b.y), p.cz).addScaledVector(nrm, s.r), normal: nrm, seg: s };
+      const c = this.contactAt(p, x, y, z);
       p.token = tok;
-      this.react(p, c, { power, edged: false, token: tok, radius: 0 }, -nrm.x, -nrm.z);
+      this.react(p, c, { power, edged: false, token: tok, radius: 0 }, -c.normal.x, -c.normal.z);
+    }
+  }
+
+  /** The Oni's club hits the ground: a blast around the impact, flung earth and a heavy cloud. */
+  slam(x: number, z: number, radius: number) {
+    this.explode(x, 0.4, z, radius, 10);
+    const n = this.count(8 + 5 * radius);
+    for (let i = 0; i < n; i++) {
+      const a = rnd(0, Math.PI * 2);
+      const sp = rnd(1.8, 5.2);
+      this.chips.spawn(
+        {
+          x: x + Math.sin(a) * rnd(0.2, 1),
+          y: 0.15,
+          z: z + Math.cos(a) * rnd(0.2, 1),
+          vx: Math.sin(a) * sp,
+          vy: rnd(2.5, 6.5),
+          vz: Math.cos(a) * sp,
+          wx: rnd(-12, 12),
+          wy: rnd(-12, 12),
+          wz: rnd(-12, 12),
+          sx: rnd(0.09, 0.2),
+          sy: rnd(0.06, 0.12),
+          sz: rnd(0.09, 0.2),
+          life: rnd(3, 5.5),
+          gy: 0.04
+        },
+        tmpC.setHSL(0.07, 0.28, rnd(0.2, 0.36))
+      );
+    }
+    this.fx?.dust(x, z, this.count(26), 5.5);
+    this.fx?.shake(0.25);
+  }
+
+  /**
+   * A shockwave ring sweeping outwards from (x, z), from radius r0 to r1 this frame: whatever
+   * stands in its band is shaken once per wave. Crowns let go of leaves, bamboo and flimsy
+   * poles go down, stone lanterns rattle and give after a few waves; rocks and pillars hold.
+   */
+  shock(x: number, z: number, r0: number, r1: number, tok: object) {
+    for (const p of this.props) {
+      if ((p.broken && p.kind !== 'tree') || p.shockTok === tok || p.kind === 'rock' || p.kind === 'pillar') continue;
+      const d = Math.hypot(p.cx - x, p.cz - z);
+      if (d < r0 - p.reach - 0.4 || d > r1 + p.reach + 0.4) continue;
+      p.shockTok = tok;
+      const ox = (p.cx - x) / (d || 1);
+      const oz = (p.cz - z) / (d || 1);
+      switch (p.kind) {
+        case 'tree':
+          this.shed(p, 2.2, true);
+          break;
+        case 'stalk': {
+          // bamboo bends: most of a grove sways and rains leaves, some stalks snap
+          const c = this.contactAt(p, x, rnd(0.8, 2.2), z);
+          if (Math.random() < 0.3) this.cutStalk(p, c, ox, oz);
+          else this.shedBamboo(p, c.point, 5);
+          break;
+        }
+        case 'thin':
+          p.hp -= 2.1;
+          if (p.hp <= 0) this.breakThin(p, this.contactAt(p, x, 0.6, z), ox, oz);
+          else this.fx?.dust(p.cx, p.cz, 3, 1.4, ox, oz);
+          break;
+        case 'lantern':
+          p.hp -= 3.2;
+          if (p.hp <= 0) this.breakLantern(p, ox, oz);
+          else {
+            this.fx?.dust(p.cx, p.cz, 3, 1.4, ox, oz);
+            sfx.thud(1);
+          }
+          break;
+      }
     }
   }
 
@@ -920,6 +999,7 @@ export class PropSystem {
     this.treeShake.fill(0);
     for (const p of this.props) {
       p.token = null;
+      p.shockTok = null;
       if (p.kind === 'lantern' && p.broken) {
         const L = p.lantern!;
         const s = p.saved as { hr: number; sr: number; sh: number };
