@@ -103,6 +103,8 @@ export interface RigInstance {
   sizeScale?: number;
 }
 
+export type EnemyVariant = 'brute' | 'monk';
+
 export interface EnemyInstance {
   type: 'samurai' | 'archer' | 'boss';
   hp: number;
@@ -192,6 +194,12 @@ export interface EnemyInstance {
   sdz?: number;
   stuckT?: number;
   escapeT?: number;
+  // a samurai with its own way of fighting: the heavy Brutamontes or the long-reach Monge
+  variant?: EnemyVariant;
+  // wave goals: the captain to hunt, and a routed enemy running away before it vanishes
+  captain?: boolean;
+  flee?: boolean;
+  fleeT?: number;
   postureBar?: THREE.Mesh;
   danger?: THREE.Sprite;
   dbMark?: THREE.Sprite;
