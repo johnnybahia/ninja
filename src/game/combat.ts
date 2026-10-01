@@ -168,3 +168,31 @@ export const MAGNET_REACH: Record<string, number> = {
 // ground (a low sweep still connects) to a little under the top of the head
 export const HURT_BOTTOM = 0.15;
 export const HURT_TOP = 2.15;
+
+const lpA = new THREE.Vector3();
+const lpB = new THREE.Vector3();
+
+/** Blade segment `k` (0..1) of the way from `prev` to `cur`: the base moves linearly and the
+ *  direction is slerped, so the tip follows the true arc (see sweepVsCapsule). */
+export function bladeLerp(prev: BladeSeg, cur: BladeSeg, k: number, outA: THREE.Vector3, outB: THREE.Vector3) {
+  outA.lerpVectors(prev.a, cur.a, k);
+  lpA.subVectors(prev.b, prev.a);
+  lpB.subVectors(cur.b, cur.a);
+  const lenP = lpA.length();
+  const lenC = lpB.length();
+  const angle = lenP > 1e-4 && lenC > 1e-4 ? lpA.angleTo(lpB) : 0;
+  if (angle > 1e-3) {
+    const sinA = Math.sin(angle);
+    const w0 = Math.sin((1 - k) * angle) / sinA;
+    const w1 = Math.sin(k * angle) / sinA;
+    const len = lenP + (lenC - lenP) * k;
+    outB
+      .set(
+        (lpA.x / lenP) * w0 + (lpB.x / lenC) * w1,
+        (lpA.y / lenP) * w0 + (lpB.y / lenC) * w1,
+        (lpA.z / lenP) * w0 + (lpB.z / lenC) * w1
+      )
+      .multiplyScalar(len)
+      .add(outA);
+  } else outB.lerpVectors(prev.b, cur.b, k);
+}

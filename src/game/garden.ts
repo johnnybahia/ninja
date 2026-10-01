@@ -31,6 +31,7 @@ function pondRadius(a: number) {
 }
 
 export class Garden {
+  bamboo: { stalks: { matrix: THREE.Matrix4; idx: number; leafStart: number; leafCount: number }[]; mesh: THREE.InstancedMesh; leaves: THREE.InstancedMesh; map: THREE.Texture } | null = null;
   solids: Solid[] = [];
   private water: THREE.Mesh;
   private waterU: Record<string, THREE.IUniform>;
@@ -324,6 +325,8 @@ export class Garden {
     }
     leaves.castShadow = true;
     root.add(leaves);
+    // handed to the scenery system: each stalk can be cut (its crown is 4 leaf spots x 9 blades)
+    this.bamboo = { stalks: stalks.map((m, idx) => ({ matrix: m, idx, leafStart: idx * 4 * perSpot, leafCount: 4 * perSpot })), mesh: stalkMesh, leaves, map: tex };
   }
 
   private buildFlowers(root: THREE.Object3D, windTime: { value: number }, isFree: (x: number, z: number, pad: number) => boolean) {

@@ -89,6 +89,30 @@ export const sfx = {
   hurt: () => tone(260, 110, 0.25, 'sawtooth', 0.15),
   jump: () => tone(300, 620, 0.12, 'sine', 0.1),
   dash: () => noise(0.18, 0.3, 3500, 'highpass'),
+  // Scenery: steel on stone (a bright tick with a short ring), blunt thud, wood, snapping, leaves, rubble
+  stone: (power = 1) => {
+    noise(0.06, 0.32, 5200, 'highpass');
+    tone(1900 + Math.random() * 800, 1400, 0.13, 'triangle', 0.1);
+    if (power > 1.5) noise(0.14, 0.3, 900);
+  },
+  thud: (power = 1) => {
+    tone(150, 62, 0.13, 'sine', 0.2 + 0.04 * Math.min(power, 3));
+    noise(0.08, 0.22, 700);
+  },
+  wood: (power = 1) => {
+    tone(230, 95, 0.1, 'square', 0.09);
+    noise(0.1, 0.22 + 0.05 * Math.min(power, 3), 1100);
+  },
+  crack: () => {
+    noise(0.12, 0.5, 2400);
+    tone(520, 150, 0.1, 'sawtooth', 0.14);
+  },
+  leaves: () => noise(0.32, 0.1, 4200),
+  rubble: () => {
+    noise(0.6, 0.5, 500, 'lowpass');
+    tone(72, 34, 0.5, 'sine', 0.35);
+    noise(0.22, 0.3, 3000);
+  },
   // Perfect deflect: bright metallic clang with a ringing tail
   clang: () => {
     noise(0.09, 0.5, 5200, 'highpass');
