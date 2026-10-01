@@ -26,12 +26,12 @@ import { sfx } from './audio';
 import { World } from './world';
 import { ATMOSPHERES, AtmosMode, atmosphereForWave } from './atmosphere';
 import { THEMES, ThemeMode, themeForWave } from './theme';
-import { Afterimages, BladeTrail, DustPool, ImpactPool, InkDecals, softDotTexture } from './vfx';
+import { Afterimages, BladeTrail, DustPool, ImpactPool, InkDecals, softDotTexture, makeBladeGlow, makeLightning } from './vfx';
 import { PostFX, NINJA_LOOK, Quality, QualitySetting, QualityProfile, qualityProfile, detectQuality } from './postfx';
 import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
 import { createClipRig, Grip, OneShot, PlayOptions } from './clipRig';
-import { loadCharacter, loadWeapons, preloadModels, characterIfReady, CharacterTemplate } from './models';
+import { loadCharacter, loadWeapons, loadLazyWeapons, weaponsReady, preloadModels, characterIfReady, CharacterTemplate, LAZY_CHARACTERS, type CharacterModel } from './models';
 import { COMBOS, SPECIAL_MOVES, RUSH, ENEMY_STRIKES, BOSS_STRIKES, FINISHERS, FINISHER_CLIP_LEN, Finisher, ClipMove } from './moves';
 import { BladeSeg, makeSeg, sweepVsCapsule, BLADE_SEG, MAGNET_REACH, HURT_BOTTOM, HURT_TOP } from './combat';
 import { DebugDraw } from './debugdraw';
@@ -44,7 +44,7 @@ import { pickWaveGoal, pickWaveMod, WaveMod, type GoalId } from './mods';
 // Enemy samurai reuse the Rōnin's mesh, armour darkened toward blued steel
 const ENEMY_TINT = new THREE.Color(0.42, 0.46, 0.62);
 const ENEMY_RIM = new THREE.Color(0.35, 0.45, 1.0).multiplyScalar(0.18);
-// samurai variants: the Brutamontes (darker, bigger) and the Monge (saffron robes)
+// the Brutamontes: a darker, bigger samurai
 // The Oni takes a different form every boss wave: 4 the Oni, 8 the Trovão (lightning that
 // marks the ground), 12 the Sombrio (vanishes and strikes from behind), then round again
 const BOSS_NAME: Record<string, string> = { oni: '鬼 ONI', trovao: '雷 ONI TROVÃO', sombrio: '影 ONI SOMBRIO' };
@@ -62,8 +62,29 @@ const BOLT_DELAY = 1.15;
 const BOLT_R = 1.75;
 const BOLT_RING = new THREE.RingGeometry(0.88, 1, 48).rotateX(-Math.PI / 2);
 const BOLT_PILLAR = new THREE.CylinderGeometry(0.14, 0.24, 22, 10, 1, true);
+// The fighters with their own models, and where the sword sits in each hand (measured so the
+// weapon matches how the Rōnin holds it in the same clips)
+const VARIANT_MODEL: Partial<Record<EnemyVariant, CharacterModel>> = { monk: 'bonin', shinobi: 'shinobi', raio: 'raio', nito: 'nito' };
+const VARIANT_HEIGHT: Partial<Record<EnemyVariant, number>> = { brute: 2.8, monk: 2.4, shinobi: 2.3, raio: 2.3, nito: 2.45 };
+const V3 = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
+const VARIANT_GRIP: Partial<Record<EnemyVariant, { right: Grip; left?: Grip }>> = {
+  shinobi: { right: { axis: V3(0.731, -0.225, -0.644), edge: V3(-0.645, 0.08, -0.76) } },
+  // claws on the knuckles: +Z along the forearm, +Y on the back of the hand (from the skeleton's rest pose)
+  raio: { right: { axis: V3(0, 1, 0.003), edge: V3(-0.272, -0.003, 0.962) }, left: { axis: V3(0, 0.998, 0.057), edge: V3(-0.334, 0.054, -0.941) } },
+  nito: { right: { axis: V3(0.658, -0.383, -0.648), edge: V3(-0.581, 0.288, -0.761) }, left: { axis: V3(-0.728, -0.084, 0.68), edge: V3(-0.042, 0.996, 0.079) } },
+  monk: { right: { axis: V3(0.323, -0.167, -0.931), edge: V3(-0.946, -0.057, -0.318) } }
+};
+// the weapons each fighter wields (right hand, left hand) - fetched in the background
+const VARIANT_WEAPONS: Partial<Record<EnemyVariant, [string, string]>> = { nito: ['dsfire', 'dsmagic'], raio: ['claw_r', 'claw_l'] };
+const FIGHTER_NAME: Partial<Record<EnemyVariant, string>> = { shinobi: 'Shinobi', raio: 'Lutador do Raio', nito: 'Samurai das Duas Espadas', monk: 'Samurai do Bō' };
+const SHINOBI_LIGHT = new THREE.Color(0.5, 1.7, 3.2);
+const RAIO_LIGHT = new THREE.Color(1.7, 1.3, 3.4);
+const FIRE_LIGHT = new THREE.Color(2.2, 0.85, 0.25);
+const MAGIC_LIGHT = new THREE.Color(1.3, 0.7, 2.6);
+// the named fighters, the wave each one joins at, and in what order they take turns
+const FIGHTER_ORDER: EnemyVariant[] = ['nito', 'shinobi', 'raio'];
+const FIGHTER_MIN: Partial<Record<EnemyVariant, number>> = { nito: 4, shinobi: 5, raio: 6 };
 const BRUTE_TINT = new THREE.Color(0.62, 0.34, 0.3);
-const MONK_TINT = new THREE.Color(1.25, 1.0, 0.5);
 // Archer's bow hand, measured from its own aiming clip: arrow flight along the line from
 // the drawing hand to the bow hand, limbs as upright as the pose allows
 const ARCHER_BOW_GRIP: Grip = { axis: new THREE.Vector3(-0.038, 0.93, -0.366), edge: new THREE.Vector3(-0.798, 0.193, 0.571) };
@@ -116,6 +137,8 @@ const TRAIL_SPEC: Record<string, { base: number; tip: number; tint: THREE.Color 
 const LIMB_TRAIL = { base: 0, tip: 0, tint: new THREE.Color(1.45, 1.4, 1.25) };
 const ENEMY_TRAIL = new THREE.Color(2.3, 0.95, 0.6);
 const ENEMY_TRAIL_BOSS = new THREE.Color(2.6, 0.6, 0.4);
+const SHINOBI_TRAIL = new THREE.Color(0.6, 1.8, 3.2);
+const RAIO_TRAIL = new THREE.Color(1.8, 1.3, 3.4);
 const TRAIL_SPECIAL = new THREE.Color(2.2, 1.6, 0.5);
 const IMPACT_NORMAL = new THREE.Color(2.2, 1.9, 1.5);
 const IMPACT_HEAVY = new THREE.Color(2.6, 1.7, 0.9);
@@ -423,6 +446,7 @@ export class GameEngine {
   private goal: { id: GoalId; name: string; glyph: string; honor: number; t: number; dur: number; next: number; shown: number; done: boolean; captain?: EnemyInstance } | null = null;
   private prevGoal: GoalId | null = null;
   private seenVariants = new Set<EnemyVariant>();
+  private fighterTurn = 0;
   private prevMod: WaveMod['id'] | null = null;
   private enemyTime = 1;
   private deflectsTotal = 0;
@@ -430,7 +454,7 @@ export class GameEngine {
   private bossKills = 0;
   private modWaves = 0;
   private bestRank = 0;
-  private bolts: { x: number; z: number; t: number; ring: THREE.Mesh; pillar: THREE.Mesh; struck: boolean }[] = [];
+  private bolts: { x: number; z: number; t: number; ring: THREE.Mesh; pillar: THREE.Mesh; struck: boolean; visual?: boolean }[] = [];
   private shocks: { x: number; z: number; r: number; mesh: THREE.Mesh; hit: boolean }[] = [];
   private waveStat = { t0: 0, enemies: 0, finishers: 0, deflects: 0 };
   private lastBossKey = -1;
@@ -519,6 +543,7 @@ export class GameEngine {
   private rootTmp = new THREE.Vector2();
   private bladePrev = makeSeg();
   private bladeCur = makeSeg();
+  private enemyBladeCurL = makeSeg();
   private bladePrevOk = false;
   private bladeRadius = 0.06;
   private hitPt = new THREE.Vector3();
@@ -807,14 +832,25 @@ export class GameEngine {
     const pin = parseInt(new URLSearchParams(location.search).get('theme') ?? '', 10);
     this.themeForce = Number.isFinite(pin) ? Math.min(THEMES.length - 1, Math.max(0, pin)) : null;
     this.world.setTheme(this.themeForce ?? 0, true);
+    // the new fighters load in the background while the first waves are fought
+    LAZY_CHARACTERS.forEach((id) => void loadCharacter(id).catch(() => undefined));
+    void loadLazyWeapons();
     this.paused = false;
     this.state = 'play';
     this.runOpen = true;
     this.heritageT = this.metaBonus.startSpecial > 0 ? 6 : 0;
     const from = parseInt(new URLSearchParams(location.search).get('wave') ?? '', 10);
     this.practice = Number.isFinite(from) && from > 1;
-    if (this.practice) this.wave = Math.min(40, from) - 1;
-    this.nextWave();
+    if (this.practice) {
+      // a practice run opens straight on a late wave: give the fighters' models (fetched in
+      // the background) a few seconds to arrive so that wave can show them
+      const go = () => {
+        if (this.state !== 'play' || this.wave !== 0) return;
+        this.wave = Math.min(40, from) - 1;
+        this.nextWave();
+      };
+      Promise.race([Promise.allSettled([...LAZY_CHARACTERS.map(loadCharacter), loadLazyWeapons()]), new Promise((r) => setTimeout(r, 8000))]).then(go);
+    } else this.nextWave();
     if (!this.isRunning) {
       this.isRunning = true;
       this.clock.start();
@@ -862,6 +898,7 @@ export class GameEngine {
     this.goal = null;
     this.prevGoal = null;
     this.seenVariants.clear();
+    this.fighterTurn = 0;
     this.enemyTime = 1;
     this.world.fogScale = 1;
     this.deflectsTotal = 0;
@@ -984,10 +1021,27 @@ export class GameEngine {
       if (this.wave >= 3) nBrute = Math.min(2, 1 + Math.floor((this.wave - 3) / 5), Math.max(0, nS - 2));
       if (this.wave >= 3) nMonk = Math.min(3, Math.floor(this.wave / 3), Math.max(0, nS - nBrute - 1));
     }
+    // the named fighters (see roster below) join from wave 4: one a wave, two from wave 9,
+    // taking turns so the same one doesn't come twice running
+    const fighters: EnemyVariant[] = [];
+    if (!boss && !goalDef && this.wave >= 4) {
+      const pool = FIGHTER_ORDER.filter((v) => this.wave >= FIGHTER_MIN[v]! && this.fighterReady(v));
+      for (let k = 0; k < (this.wave >= 9 ? 2 : 1) && pool.length; k++) {
+        fighters.push(pool.splice(this.fighterTurn++ % pool.length, 1)[0]);
+        if (nS - nBrute - nMonk - fighters.length < 1) fighters.pop();
+      }
+    }
+    // a duel is fought against one of them once they are around
+    let duelist: EnemyVariant | undefined;
+    if (goalDef?.id === 'duelo' && this.wave >= 4) {
+      const pool = FIGHTER_ORDER.filter((v) => this.wave >= FIGHTER_MIN[v]! && this.fighterReady(v));
+      if (pool.length) duelist = pool[this.fighterTurn++ % pool.length];
+    }
     const list: { type: 'samurai' | 'archer' | 'boss'; variant?: EnemyVariant }[] = [];
-    for (let i = 0; i < nS - nBrute - nMonk; i++) list.push({ type: 'samurai' });
+    for (let i = 0; i < nS - nBrute - nMonk - fighters.length; i++) list.push({ type: 'samurai', variant: duelist });
     for (let i = 0; i < nBrute; i++) list.push({ type: 'samurai', variant: 'brute' });
-    for (let i = 0; i < nMonk; i++) list.push({ type: 'samurai', variant: 'monk' });
+    for (let i = 0; i < nMonk; i++) list.push({ type: 'samurai', variant: this.fighterReady('monk') ? 'monk' : undefined });
+    for (const v of fighters) list.push({ type: 'samurai', variant: v });
     for (let i = 0; i < nA; i++) list.push({ type: 'archer' });
     if (boss) list.push({ type: 'boss', variant: bossFormFor(this.wave) });
 
@@ -1017,7 +1071,7 @@ export class GameEngine {
     }
 
     this.waveStat = { t0: this.time, enemies: list.length, finishers: 0, deflects: 0 };
-    let sub = boss ? BOSS_HINT[bossFormFor(this.wave) ?? 'oni'] : mod ? mod.desc : goalDef ? goalDef.desc : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
+    let sub = boss ? BOSS_HINT[bossFormFor(this.wave) ?? 'oni'] : mod ? mod.desc : goalDef ? (duelist ? `Duelo contra ${FIGHTER_NAME[duelist]}` : goalDef.desc) : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
     const atmIdx = atmosphereForWave(this.wave, this.atmosMode, this.world.atmIndex);
     if (atmIdx !== this.world.atmIndex) {
       this.world.setAtmosphere(atmIdx);
@@ -1031,10 +1085,13 @@ export class GameEngine {
     // the first time a new kind of samurai shows up, a hint on how to beat it
     const HINTS: Partial<Record<EnemyVariant, [string, string]>> = {
       brute: ['Novo inimigo: Brutamontes', 'Pule a varrida e castigue a recuperação'],
-      monk: ['Novo inimigo: Monge de bastão', 'Ataca de longe: feche a distância com a esquiva']
+      monk: ['Novo inimigo: Samurai do Bō', 'Ataca de longe: feche a distância com a esquiva'],
+      nito: ['Novo inimigo: Samurai das Duas Espadas', 'Espadas gêmeas de fogo e magia: apare ou afaste-se'],
+      shinobi: ['Novo inimigo: Shinobi', 'Veloz: some e reaparece perto, atira estrelas'],
+      raio: ['Novo inimigo: Lutador do Raio', 'Garras em combos relâmpago e teletransporte: esquive no ritmo']
     };
     let hintAt = 2.3;
-    for (const v of ['brute', 'monk'] as EnemyVariant[]) {
+    for (const v of ['brute', 'monk', 'nito', 'shinobi', 'raio'] as EnemyVariant[]) {
       if (!this.seenVariants.has(v) && spawned.some((e) => e.variant === v)) {
         this.seenVariants.add(v);
         const wv = this.wave;
@@ -1056,6 +1113,13 @@ export class GameEngine {
     e.speed *= 1.08;
     (e.barFg.material as THREE.MeshBasicMaterial).color.set(0xffd166);
     e.aura = this.makeAura(0xff9a10, 1.25);
+  }
+
+  // A fighter can only appear once its model has finished loading (it loads in the background)
+  private fighterReady(v: EnemyVariant) {
+    const m = VARIANT_MODEL[v];
+    const w = VARIANT_WEAPONS[v];
+    return !!m && !!characterIfReady(m) && (!w || weaponsReady(w));
   }
 
   // One spot on the ring around the arena (never on top of the player or a solid prop)
@@ -1159,7 +1223,9 @@ export class GameEngine {
     let rig: RigInstance;
     let bowObj: THREE.Object3D | null = null;
     let weaponObj: THREE.Object3D | null = null;
+    let weaponObjL: THREE.Object3D | null = null;
     let bladeKey = '';
+    let bladeKeyL = '';
     let hp = 60;
     let speed = 3.7;
     let r = 0.5;
@@ -1172,16 +1238,36 @@ export class GameEngine {
       // per spawn, same clips and AI
       const tpl = characterIfReady('ronin');
       const tpl2 = characterIfReady('samurai2');
-      const vTint = variant === 'brute' ? BRUTE_TINT : variant === 'monk' ? MONK_TINT : undefined;
+      const vTint = variant === 'brute' ? BRUTE_TINT : undefined;
       const vHeight = variant === 'brute' ? 2.8 : undefined;
-      if (tpl2 && (!tpl || Math.random() < 0.5)) rig = createClipRig(tpl2, { lod: true, grips: { right: SAMURAI2_GRIP }, tint: vTint, height: vHeight });
+      // a fighter with a model of its own (when it has finished loading)
+      const fm = variant && VARIANT_MODEL[variant] ? characterIfReady(VARIANT_MODEL[variant]!) : null;
+      if (fm && variant) rig = createClipRig(fm, { lod: true, height: VARIANT_HEIGHT[variant], grips: VARIANT_GRIP[variant] });
+      else if (tpl2 && (!tpl || Math.random() < 0.5)) rig = createClipRig(tpl2, { lod: true, grips: { right: SAMURAI2_GRIP }, tint: vTint, height: vHeight });
       else if (tpl) rig = createClipRig(tpl, { lod: true, tint: vTint ? ENEMY_TINT.clone().multiply(vTint) : ENEMY_TINT, rim: ENEMY_RIM, height: vHeight });
       else rig = buildCharacter('samurai');
-      // the Monge fights with a long staff, the Brutamontes with an oversized blade
-      weaponObj = makeWeapon(variant === 'monk' ? 'bo' : 'ekatana');
-      bladeKey = variant === 'monk' ? 'bo' : 'ekatana';
-      if (variant === 'brute') weaponObj.scale.setScalar(1.45);
-      rig.hand.add(weaponObj);
+      // the Samurai do Bō fights with a long staff, the Brutamontes with an oversized blade,
+      // the Samurai das Duas Espadas with one in each hand
+      // (the Lutador do Raio has claws on both fists, the Duas Espadas the Dancer's pair)
+      const own = fm && variant ? VARIANT_WEAPONS[variant] : undefined;
+      if (own && weaponsReady(own)) {
+        bladeKey = own[0];
+        bladeKeyL = own[1];
+        weaponObj = makeWeapon(own[0]);
+        weaponObjL = makeWeapon(own[1]);
+        rig.hand.add(weaponObj);
+        rig.handL.add(weaponObjL);
+      } else {
+        weaponObj = makeWeapon(variant === 'monk' ? 'bo' : 'ekatana');
+        bladeKey = variant === 'monk' ? 'bo' : 'ekatana';
+        if (variant === 'brute') weaponObj.scale.setScalar(1.45);
+        rig.hand.add(weaponObj);
+        if (variant === 'nito' && fm) {
+          weaponObjL = makeWeapon('ekatana');
+          bladeKeyL = 'ekatana';
+          rig.handL.add(weaponObjL);
+        }
+      }
       hp = 60 * hpMul;
       speed = 3.7;
       if (variant === 'brute') {
@@ -1192,6 +1278,16 @@ export class GameEngine {
       } else if (variant === 'monk') {
         hp *= 0.85;
         speed *= 1.12;
+      } else if (variant === 'shinobi') {
+        hp *= 0.85;
+        speed *= 1.5;
+      } else if (variant === 'raio') {
+        hp *= 1.2;
+        speed *= 1.3;
+      } else if (variant === 'nito') {
+        hp *= 1.4;
+        speed *= 1.02;
+        r = 0.6;
       }
     } else if (type === 'archer') {
       const tpl = characterIfReady('archer');
@@ -1341,6 +1437,19 @@ export class GameEngine {
     if (rig.clip && weaponObj) {
       enemy.weapon = weaponObj;
       enemy.bladeKey = bladeKey;
+      if (weaponObjL) {
+        enemy.weaponL = weaponObjL;
+        enemy.bladeKeyL = bladeKeyL;
+      }
+      // a sheath of light on the Shinobi's sword, arcs of lightning on the Lutador's
+      const seg = BLADE_SEG[bladeKey];
+      if (variant === 'shinobi' && seg && characterIfReady('shinobi')) enemy.fx = [makeBladeGlow(weaponObj, SHINOBI_LIGHT, seg.base, seg.tip)];
+      const segL = BLADE_SEG[bladeKeyL];
+      if (variant === 'raio' && seg && segL && weaponObjL && bladeKey === 'claw_r') {
+        enemy.fx = [makeLightning(weaponObj, RAIO_LIGHT, seg.base, seg.tip), makeLightning(weaponObjL, RAIO_LIGHT, segL.base, segL.tip)];
+      } else if (variant === 'nito' && seg && segL && weaponObjL && bladeKey === 'dsfire') {
+        enemy.fx = [makeBladeGlow(weaponObj, FIRE_LIGHT, seg.base, seg.tip), makeBladeGlow(weaponObjL, MAGIC_LIGHT, segL.base, segL.tip)];
+      }
     }
 
     this.scene.add(rig.root);
@@ -1412,6 +1521,7 @@ export class GameEngine {
       (e.bowFx.string.material as THREE.Material).dispose();
     }
     e.trail?.dispose();
+    e.fx?.forEach((f) => f.dispose());
     if (e.aura) {
       this.scene.remove(e.aura);
       e.aura.geometry.dispose();
@@ -2844,6 +2954,16 @@ export class GameEngine {
     return true;
   }
 
+  // The left-hand sword's segment (only the Samurai das Duas Espadas has one)
+  private readEnemySecondBlade(e: EnemyInstance, foot: boolean): BladeSeg | null {
+    if (foot || !e.weaponL) return null;
+    const spec = BLADE_SEG[e.bladeKeyL ?? 'ekatana'];
+    const out = this.enemyBladeCurL;
+    e.weaponL.localToWorld(out.a.set(0, 0, spec.base));
+    e.weaponL.localToWorld(out.b.set(0, 0, spec.tip));
+    return out;
+  }
+
   private stepEnemyBlade(e: EnemyInstance, dt: number) {
     const b = e.blade;
     if (!b) return;
@@ -2861,20 +2981,30 @@ export class GameEngine {
     // enemy swings hit the scenery too (the Oni's great sword shatters lanterns)
     this.world.props.sweep(b.prevOk ? b.prev : null, cur, { power: e.type === 'boss' ? 4 : 1.5, edged: b.limb !== 'foot', token: b, radius: 0.08 });
     const P = this.player;
+    // the second sword (Samurai das Duas Espadas) cuts along with the first
+    const curL = this.readEnemySecondBlade(e, b.limb === 'foot');
+    if (curL) this.enemyTrail(e, curL, false, b.prevLOk ? b.prevL.b : null, dt);
     if (!b.hit && this.state === 'play' && !this.cine) {
       const radius = 0.45 + 0.15 + (b.limb === 'foot' ? 0.2 : 0.06);
       // a sweep the player must jump is decided by height in resolveStrike, so where the
       // blade happens to pass vertically doesn't matter for it
       const flat = b.st.kind === 'sweep';
-      if (sweepVsCapsule(b.prevOk ? b.prev : null, cur, P.pos.x, P.pos.z, P.pos.y + HURT_BOTTOM, P.pos.y + HURT_TOP, radius, this.hitPt, flat, 0.45)) {
+      const touch = (prev: BladeSeg | null, seg: BladeSeg) => sweepVsCapsule(prev, seg, P.pos.x, P.pos.z, P.pos.y + HURT_BOTTOM, P.pos.y + HURT_TOP, radius, this.hitPt, flat, 0.45);
+      if (touch(b.prevOk ? b.prev : null, cur) || (curL && touch(b.prevLOk ? b.prevL : null, curL))) {
         b.hit = true;
         this.dbgHits.push({ p: this.hitPt.clone(), t: this.time });
+        if (e.variant === 'raio') this.flashBolt(P.pos.x, P.pos.z, 0xb69cff);
         this.resolveStrike(e, b.st, this.hitPt);
       }
     }
     b.prev.a.copy(cur.a);
     b.prev.b.copy(cur.b);
     b.prevOk = true;
+    if (curL) {
+      b.prevL.a.copy(curL.a);
+      b.prevL.b.copy(curL.b);
+      b.prevLOk = true;
+    }
     if (b.t >= b.dur) e.blade = undefined;
   }
 
@@ -3656,6 +3786,46 @@ export class GameEngine {
     return this.wave <= 2 ? 1 : this.wave <= 5 ? 2 : 3;
   }
 
+  // The moves of the named fighters: the Rōnin's own clips, in each one's style. The opening
+  // move of a chain is slower (readable); the rest follow quickly.
+  private fighterStrike(e: EnemyInstance, first: boolean, last: boolean) {
+    const sp = first ? 0.8 : 1;
+    type FS = { kind: StrikeKind; clip: string; hit: number; from?: number; speed: number; dmg: number; reach: number; perilous: boolean; limb?: 'foot' };
+    const r = Math.random();
+    switch (e.variant) {
+      case 'shinobi': {
+        // fast cuts and stabs; now and then the sliding cut (jump it)
+        if (last && r < 0.3) return { kind: 'sweep', clip: 'slideAttack', hit: 1.43, from: 0.95, speed: 1, dmg: 14, reach: 3.3, perilous: true } as FS;
+        if (r < 0.4) return { kind: 'slash', clip: 'eSwordAttack', hit: 0.52, speed: 1.45 * sp, dmg: 11, reach: 3, perilous: false } as FS;
+        return { kind: 'slash', clip: 'eSwordSlash', hit: 0.7, from: 0.12, speed: 1.7 * sp, dmg: 9, reach: 2.4, perilous: false } as FS;
+      }
+      case 'raio': {
+        // Wolverine-style: claw swipes in quick left-right chains, ending in a berserk spin
+        // (jump it) or a kick
+        if (last) {
+          if (r < 0.45) return { kind: 'sweep', clip: 'spin', hit: 0.43, from: 0.1, speed: 1, dmg: 16, reach: 3.1, perilous: true } as FS;
+          return { kind: 'slash', clip: 'kick1', hit: 0.68, from: 0.15, speed: 1.7 * sp, dmg: 12, reach: 2.6, perilous: false, limb: 'foot' } as FS;
+        }
+        const step = e.t % 3;
+        if (step === 0) return { kind: 'slash', clip: 'jabL', hit: 0.33, speed: 1.75 * sp, dmg: 9, reach: 2.5, perilous: false } as FS;
+        if (step === 1) return { kind: 'slash', clip: 'jabR', hit: 0.25, speed: 1.75 * sp, dmg: 9, reach: 2.5, perilous: false } as FS;
+        return { kind: 'slash', clip: 'cross', hit: 0.28, speed: 1.6 * sp, dmg: 12, reach: 2.6, perilous: false } as FS;
+      }
+      case 'monk': {
+        // the staff's whirl now and then (jump it); the usual cuts and jabs otherwise
+        if (last && r < 0.35) return { kind: 'sweep', clip: 'spin', hit: 0.43, from: 0.1, speed: 0.95, dmg: 13, reach: 3.6, perilous: true } as FS;
+        return null;
+      }
+      case 'nito': {
+        // two blades: wide, quick cuts in long chains, and a spin with both (jump it)
+        if (last && r < 0.4) return { kind: 'sweep', clip: 'spin', hit: 0.43, from: 0.1, speed: 0.95, dmg: 15, reach: 3.1, perilous: true } as FS;
+        if (r < 0.35) return { kind: 'slash', clip: 'attack', hit: 0.5, speed: 1.3 * sp, dmg: 12, reach: 2.7, perilous: false } as FS;
+        return { kind: 'slash', clip: 'eSwordSlash', hit: 0.7, from: 0.12, speed: 1.5 * sp, dmg: 11, reach: 2.7, perilous: false } as FS;
+      }
+    }
+    return null;
+  }
+
   private startStrike(e: EnemyInstance, first: boolean) {
     const boss = e.type === 'boss';
     const last = e.comboLeft <= 1;
@@ -3671,10 +3841,22 @@ export class GameEngine {
       kind = boss || brute ? 'sweep' : monk ? 'thrust' : Math.random() < 0.5 ? 'thrust' : 'sweep';
     }
     const windup = boss ? (kind === 'sweep' ? 0.85 : first ? 0.62 : 0.46) : perilous ? 0.64 : first ? 0.46 : 0.32;
-    const reach = boss ? (kind === 'sweep' ? 4.6 : 3.9) : brute ? (kind === 'sweep' ? 3.7 : 3.0) : monk ? (kind === 'thrust' ? 4.3 : 3.3) : kind === 'thrust' ? 3.4 : kind === 'sweep' ? 2.8 : 2.3;
-    const dmg = Math.round((boss ? (kind === 'sweep' ? 22 : 24) : kind === 'thrust' ? 18 : kind === 'sweep' ? 15 : 12) * (e.elite ? 1.25 : 1) * (brute ? 1.7 : monk ? 0.85 : 1));
+    let reach = boss ? (kind === 'sweep' ? 4.6 : 3.9) : brute ? (kind === 'sweep' ? 3.7 : 3.0) : monk ? (kind === 'thrust' ? 4.3 : 3.3) : kind === 'thrust' ? 3.4 : kind === 'sweep' ? 2.8 : 2.3;
+    let dmg = Math.round((boss ? (kind === 'sweep' ? 22 : 24) : kind === 'thrust' ? 18 : kind === 'sweep' ? 15 : 12) * (e.elite ? 1.25 : 1) * (brute ? 1.7 : monk ? 0.85 : 1));
     let wind = windup;
-    if (e.rig.clip && boss) {
+    // the named fighters use the Rōnin's own moves in their own style (see fighterStrike)
+    const fs = e.rig.clip ? this.fighterStrike(e, first, last) : null;
+    let limb: 'foot' | undefined;
+    if (fs) {
+      kind = fs.kind;
+      perilous = fs.perilous;
+      reach = fs.reach;
+      dmg = Math.round(fs.dmg * (e.elite ? 1.25 : 1));
+      limb = fs.limb;
+      const from = fs.from ?? 0;
+      wind = (fs.hit - from) / fs.speed;
+      this.enemyClip(e, fs.clip, { from, speed: fs.speed, fadeIn: 0.1, fadeOut: 0.28 });
+    } else if (e.rig.clip && boss) {
       const opts = BOSS_STRIKES[kind] ?? BOSS_STRIKES.smash;
       const pick = opts[Math.floor(Math.random() * opts.length)];
       const speed = kind === 'sweep' ? 0.85 : first ? 0.9 : 1.05;
@@ -3699,6 +3881,7 @@ export class GameEngine {
       feint: first && !perilous && !boss && Math.random() < 0.08,
       reach,
       dmg,
+      limb,
       side: e.strike ? e.strike.side ^ 1 : Math.random() < 0.5 ? 0 : 1
     };
     e.strike = strike;
@@ -4666,8 +4849,10 @@ export class GameEngine {
       if (boss && !e.fury && e.hp <= e.maxHp * 0.5 && e.brokenT <= 0 && !this.cine) this.startFury(e);
       if (boss && e.variant === 'trovao') this.stepThunder(e, dt);
       if (boss && e.variant === 'sombrio') this.stepShadow(e, dt, d);
+      if (!boss && (e.variant === 'shinobi' || e.variant === 'raio')) this.stepBlink(e, dt, d);
 
       e.trail?.update(this.time);
+      if (e.fx) for (const f of e.fx) f.update(this.time);
       e.cd -= dt;
       e.cd2 -= dt;
       if (e.defCd) e.defCd -= dt;
@@ -4690,7 +4875,10 @@ export class GameEngine {
       if ((e.vanishT ?? 0) > 0) {
         // the Sombrio is gone: nothing to hit and nothing hitting, until it steps out behind the player
         e.vanishT = (e.vanishT ?? 0) - dt;
-        if (e.vanishT <= 0) this.shadowStrike(e);
+        if (e.vanishT <= 0) {
+          if (e.type === 'boss') this.shadowStrike(e);
+          else this.blinkArrive(e);
+        }
       } else if (e.brokenT > 0) {
         e.brokenT -= dt;
         e.mode = 'broken';
@@ -4732,6 +4920,10 @@ export class GameEngine {
           e.dead = true;
           e.deathT = 99;
         }
+      } else if ((e.castT ?? 0) > 0) {
+        // throwing stars: planted, facing the player
+        e.castT = (e.castT ?? 0) - dt;
+        e.yaw = turnTo(e.yaw, toP, dt * 9);
       } else if (e.type === 'archer' && e.rig.clip) {
         // ---- mocap archer: keep range and shoot (draw -> hold -> loose), kick anyone
         // who closes in, and (from wave 4) sidestep a swing it sees coming
@@ -4749,7 +4941,7 @@ export class GameEngine {
             sfx.swing();
             // the foot is live through the kick's extension (a thrown kick, not a timer)
             const st: EnemyStrike = { kind: 'slash', windup: 0, t: 0, perilous: false, feint: false, reach: 2.3, dmg: 10, side: 0 };
-            if (e.rig.clip) e.blade = { st, t: 0, dur: 0.5, hit: false, limb: 'foot', prev: makeSeg(), prevOk: false };
+            if (e.rig.clip) e.blade = { st, t: 0, dur: 0.5, hit: false, limb: 'foot', prev: makeSeg(), prevOk: false, prevL: makeSeg(), prevLOk: false };
             else this.resolveStrike(e, st);
           }
           if (e.kick.t >= 1.15) e.kick = undefined;
@@ -4833,7 +5025,7 @@ export class GameEngine {
         // mocap enemies: a short lead before the clip's hit frame the blade becomes live -
         // the strike lands when it actually touches the player, not when a timer ends
         if (e.rig.clip && e.weapon && !e.blade && !st.feint && st.t >= st.windup - 0.06) {
-          e.blade = { st, t: 0, dur: 0.3, hit: false, prev: makeSeg(), prevOk: false };
+          e.blade = { st, t: 0, dur: 0.3, hit: false, limb: st.limb, prev: makeSeg(), prevOk: false, prevL: makeSeg(), prevLOk: false };
         }
         if (st.feint && st.t >= st.windup * 0.6) {
           this.cancelStrike(e);
@@ -5001,7 +5193,8 @@ export class GameEngine {
           runSpeed: e.speed * 1.2,
           dirX: wx * c - wz * sn,
           dirZ: wx * sn + wz * c,
-          guard: e.mode === 'guard' && e.guardT > 0
+          guard: e.mode === 'guard' && e.guardT > 0,
+          fight: e.variant === 'raio'
         };
         // a live blade window plays long frames as short steps (see updatePlayerClip)
         const bSteps = e.blade ? Math.min(8, Math.max(1, Math.ceil(dt * 60))) : 1;
@@ -5087,6 +5280,111 @@ export class GameEngine {
       this.bolts.push({ x, z, t: 0, ring, pillar, struck: false });
     }
     sfx.danger();
+  }
+
+  // A column of light that only looks the part (teleports, a lightning-sword hit)
+  private flashBolt(x: number, z: number, color: number) {
+    const ring = new THREE.Mesh(BOLT_RING, new THREE.MeshBasicMaterial({ visible: false }));
+    const pillar = new THREE.Mesh(
+      BOLT_PILLAR,
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(color).multiplyScalar(1.9), transparent: true, opacity: 0.8, depthWrite: false, blending: THREE.AdditiveBlending, fog: false })
+    );
+    pillar.position.set(x, 11, z);
+    pillar.scale.set(0.8, 1, 0.8);
+    ring.visible = false;
+    this.scene.add(ring, pillar);
+    this.bolts.push({ x, z, t: BOLT_DELAY, ring, pillar, struck: true, visual: true });
+  }
+
+  // ---- The Shinobi and the Lutador do Raio: teleport. They slip out of sight and step out
+  // near the player (front-left or front-right on screen, so it is seen), already starting a
+  // chain; the Shinobi also throws a fan of stars from afar.
+  private stepBlink(e: EnemyInstance, dt: number, d: number) {
+    if (e.brokenT > 0 || e.staggerT > 0 || e.flee || this.cine || this.state !== 'play' || (e.vanishT ?? 0) > 0 || (e.castT ?? 0) > 0 || e.strike || (e.dodgeT ?? 0) > 0) return;
+    const shinobi = e.variant === 'shinobi';
+    e.abilT = (e.abilT ?? 3 + Math.random() * 2) - dt;
+    if (shinobi) e.starCd = (e.starCd ?? 2.5 + Math.random() * 2) - dt;
+    if (shinobi && (e.starCd ?? 1) <= 0 && d > 5.5 && d < 15) {
+      e.starCd = 4.5 + Math.random() * 2;
+      e.castT = 0.62;
+      e.token = false;
+      this.enemyClip(e, 'cast', { from: 0, speed: 1.25, fadeIn: 0.08, fadeOut: 0.25 });
+      sfx.swing();
+      this.timers.push({ at: this.time + 0.3, fn: () => this.releaseStars(e) });
+      return;
+    }
+    // to close a gap - or, after a few idle seconds, to flank a target it can't get at
+    if (e.abilT > 0 || (d < (shinobi ? 5.5 : 4.2) && e.abilT > -3.5)) return;
+    e.abilT = shinobi ? 5.5 : 4.5;
+    this.cancelStrike(e);
+    e.token = false;
+    this.blinkFx(e);
+    sfx.dash();
+    e.rig.clip?.stop(0.1);
+    e.vanishT = shinobi ? 0.28 : 0.35;
+    e.pos.set(0, -30, -39);
+  }
+
+  private blinkFx(e: EnemyInstance) {
+    if (e.variant === 'raio') {
+      this.flashBolt(e.pos.x, e.pos.z, 0xb69cff);
+      this.emitParticles(e.pos.x, 1.4, e.pos.z, 22, 0xb69cff, 7, 2, 14, 0.45);
+      sfx.boom();
+    } else {
+      this.emitParticles(e.pos.x, 1.3, e.pos.z, 22, 0x5ad0ff, 6, 2, 12, 0.4);
+    }
+    this.puff(e.pos.x, e.pos.z, 8, 3);
+  }
+
+  private blinkArrive(e: EnemyInstance) {
+    const P = this.player;
+    const toward = Math.atan2(-Math.sin(this.camYaw), -Math.cos(this.camYaw));
+    const first = Math.random() < 0.5 ? 0.7 : -0.7;
+    const dist = e.variant === 'shinobi' ? 2.5 : 2.2;
+    let placed = false;
+    for (const off of [first, -first, 0, 1.6, -1.6]) {
+      const a = toward + off;
+      const x = P.pos.x + Math.sin(a) * dist;
+      const z = P.pos.z + Math.cos(a) * dist;
+      if (Math.hypot(x, z) > R_ARENA - 2) continue;
+      if (this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r + e.r + 0.3)) continue;
+      e.pos.set(x, 0, z);
+      placed = true;
+      break;
+    }
+    if (!placed) e.pos.set(P.pos.x * 0.6, 0, P.pos.z * 0.6);
+    e.yaw = Math.atan2(P.pos.x - e.pos.x, P.pos.z - e.pos.z);
+    this.blinkFx(e);
+    sfx.swing();
+    e.mode = 'attack';
+    e.modeT = 0;
+    e.t = 0;
+    e.comboLeft = e.variant === 'shinobi' ? 1 + Math.floor(Math.random() * 3) : 2 + Math.floor(Math.random() * 3);
+    e.cd2 = 0.1;
+    e.token = true;
+  }
+
+  // A fan of three stars at the player (they can be deflected, blocked or dodged)
+  private releaseStars(e: EnemyInstance) {
+    if (e.dead || e.flee || (e.vanishT ?? 0) > 0 || this.state !== 'play') return;
+    e.rig.root.updateMatrixWorld(true);
+    e.rig.handL.getWorldPosition(this.tmpH);
+    const h = this.tmpH;
+    const P = this.player;
+    const base = Math.atan2(P.pos.x - h.x, P.pos.z - h.z);
+    for (let i = -1; i <= 1; i++) {
+      const a = base + i * 0.2;
+      this.spawnProj({
+        type: 'shuriken',
+        friendly: false,
+        pos: new THREE.Vector3(h.x, h.y, h.z),
+        vel: new THREE.Vector3(Math.sin(a) * 17, 0, Math.cos(a) * 17),
+        dmg: 7,
+        life: 1.8
+      });
+    }
+    this.emitParticles(h.x, h.y, h.z, 10, 0x5ad0ff, 5, 1.5, 14, 0.3);
+    sfx.swing();
   }
 
   private disposeBolt(b: { ring: THREE.Mesh; pillar: THREE.Mesh }) {
@@ -5661,7 +5959,7 @@ export class GameEngine {
     if (foot) this.trailA.y += 0.35 * this.sizeOf(e);
     const speed = prevTip && dt > 1e-4 ? this.trailB.distanceTo(prevTip) / dt : 0;
     if (speed > 6) {
-      tr.setTint(e.type === 'boss' ? ENEMY_TRAIL_BOSS : ENEMY_TRAIL);
+      tr.setTint(e.type === 'boss' ? ENEMY_TRAIL_BOSS : e.variant === 'shinobi' ? SHINOBI_TRAIL : e.variant === 'raio' ? RAIO_TRAIL : ENEMY_TRAIL);
       tr.push(this.trailA, this.trailB, this.time);
     }
   }

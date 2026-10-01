@@ -154,7 +154,12 @@ export const BLADE_SEG: Record<string, { base: number; tip: number }> = {
   katana: { base: 0.25, tip: 1.33 },
   ekatana: { base: 0.3, tip: 1.35 },
   greatsword: { base: 0.45, tip: 2.05 },
-  bo: { base: -1.1, tip: 1.6 }
+  bo: { base: -1.1, tip: 1.6 },
+  // the Dancer's twin swords (guard to tip) and the Lutador's claws (knuckle plate to points)
+  dsfire: { base: 0.3, tip: 1.75 },
+  dsmagic: { base: 0.3, tip: 1.75 },
+  claw_r: { base: 0.05, tip: 0.85 },
+  claw_l: { base: 0.05, tip: 0.85 }
 };
 
 // How far in front of its own centre a character's swing reaches, per weapon, and thus

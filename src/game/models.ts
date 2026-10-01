@@ -15,8 +15,15 @@ const CHARACTER_FILES = {
   ronin: `${M}ronin.glb`,
   archer: `${M}archer.glb`,
   samurai2: `${M}samurai2.glb`,
-  giant: `${M}giant.glb`
+  giant: `${M}giant.glb`,
+  // the four fighters that join the waves later (loaded in the background once a run
+  // starts, see LAZY_CHARACTERS - a wave only draws them when they are ready)
+  shinobi: `${M}shinobi.glb`,
+  raio: `${M}raio.glb`,
+  nito: `${M}nito.glb`,
+  bonin: `${M}bonin.glb`
 };
+export const LAZY_CHARACTERS: CharacterModel[] = ['shinobi', 'raio', 'nito', 'bonin'];
 export type CharacterModel = keyof typeof CHARACTER_FILES;
 
 // Weapon id (as makeWeapon() knows them) -> file. Every file is pre-normalized to the
@@ -33,6 +40,15 @@ const WEAPON_FILES: Record<string, string> = {
   longbow: `${M}weapons/bow.glb`,
   arrow: `${M}weapons/arrow.glb`
 };
+// The new fighters' own weapons (the Dancer's twin swords, the Lutador's claws): fetched in the
+// background like their models, so they stay out of the first load and its progress bar
+const LAZY_WEAPON_FILES: Record<string, string> = {
+  dsfire: `${M}weapons/dsfire.glb`,
+  dsmagic: `${M}weapons/dsmagic.glb`,
+  claw_r: `${M}weapons/claw_r.glb`,
+  claw_l: `${M}weapons/claw_l.glb`
+};
+export const LAZY_WEAPONS = Object.keys(LAZY_WEAPON_FILES);
 
 // Approximate download sizes (KB), the weights of the loading progress bar: the total
 // fraction is the size-weighted mean of each file's own progress
@@ -128,27 +144,42 @@ export function characterIfReady(id: CharacterModel): CharacterTemplate | null {
 const weaponReady = new Map<string, THREE.Object3D>();
 let weaponsPromise: Promise<void> | null = null;
 
+function loadWeaponFile(id: string, url: string, track: boolean) {
+  return gltfLoader()
+    .loadAsync(url, track ? trackProgress(id) : undefined)
+    .then((gltf) => {
+      gltf.scene.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (!m.isMesh) return;
+        m.castShadow = true;
+        m.receiveShadow = false;
+      });
+      weaponReady.set(id, gltf.scene);
+    })
+    .catch((e) => console.warn('weapon model failed, using procedural', id, e))
+    .finally(() => {
+      if (track) setFileProgress(id, 1);
+    });
+}
+
 export function loadWeapons(): Promise<void> {
   if (!weaponsPromise) {
-    weaponsPromise = Promise.all(
-      Object.entries(WEAPON_FILES).map(([id, url]) =>
-        gltfLoader()
-          .loadAsync(url, trackProgress(id))
-          .then((gltf) => {
-            gltf.scene.traverse((o) => {
-              const m = o as THREE.Mesh;
-              if (!m.isMesh) return;
-              m.castShadow = true;
-              m.receiveShadow = false;
-            });
-            weaponReady.set(id, gltf.scene);
-          })
-          .catch((e) => console.warn('weapon model failed, using procedural', id, e))
-          .finally(() => setFileProgress(id, 1))
-      )
-    ).then(() => undefined);
+    weaponsPromise = Promise.all(Object.entries(WEAPON_FILES).map(([id, url]) => loadWeaponFile(id, url, true))).then(() => undefined);
   }
   return weaponsPromise;
+}
+
+let lazyWeaponsPromise: Promise<void> | null = null;
+/** The fighters' own weapons, fetched in the background (callers check weaponsReady). */
+export function loadLazyWeapons(): Promise<void> {
+  if (!lazyWeaponsPromise) {
+    lazyWeaponsPromise = Promise.all(Object.entries(LAZY_WEAPON_FILES).map(([id, url]) => loadWeaponFile(id, url, false))).then(() => undefined);
+  }
+  return lazyWeaponsPromise;
+}
+
+export function weaponsReady(ids: readonly string[]): boolean {
+  return ids.every((id) => weaponReady.has(id));
 }
 
 /** A fresh instance of an imported weapon (geometry/materials shared), or null if it
@@ -162,5 +193,6 @@ export function cloneWeaponModel(id: string): THREE.Group | null {
 }
 
 export function preloadModels(): Promise<unknown> {
-  return Promise.allSettled([...(Object.keys(CHARACTER_FILES) as CharacterModel[]).map(loadCharacter), loadWeapons()]);
+  const eager = (Object.keys(CHARACTER_FILES) as CharacterModel[]).filter((id) => !LAZY_CHARACTERS.includes(id));
+  return Promise.allSettled([...eager.map(loadCharacter), loadWeapons()]);
 }

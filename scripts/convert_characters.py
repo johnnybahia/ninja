@@ -115,6 +115,16 @@ GIANT_RETARGET = from_ronin(
     'idle', 'walk', 'run', 'walkBack', 'strafeL', 'strafeR', 'hit1', 'hit2', 'hit3',
     'death', 'death2', 'attack', 'slash1', 'slash2', 'jumpAttack', 'powerUp')
 
+# Four more enemies from the Tripo + Mixamo uploads (their weapons are modelled into the one
+# skinned mesh, sheathed). They fight with the Rōnin's own moves, retargeted onto each
+# skeleton: the clips every enemy needs, plus the ones that give each its style.
+ENEMY_COMMON = ('idle', 'walk', 'run', 'walkBack', 'strafeL', 'strafeR', 'guard', 'hit1', 'hit2', 'hit3',
+                'death', 'death2', 'attack', 'slash2', 'eSwordSlash', 'eSwordAttack')
+SHINOBI_RETARGET = from_ronin(*ENEMY_COMMON, 'cast', 'jumpAttack', 'slideAttack', 'kick1', 'slash1')
+RAIO_RETARGET = from_ronin(*ENEMY_COMMON, 'fightIdle', 'jab', 'cross', 'jabL', 'jabR', 'kick1', 'kick2', 'spin', 'powerUp')
+NITO_RETARGET = from_ronin(*ENEMY_COMMON, 'spin', 'slash1', 'slash3', 'kick1')
+BONIN_RETARGET = from_ronin(*ENEMY_COMMON, 'spin', 'slash1', 'slash3', 'kick1')
+
 # tex: max size of the base color / of the other maps. Enemy-only models keep base color
 # sharp but halve the normal/roughness/metal maps - they never fill the screen, and four
 # characters' worth of 1K maps adds up in a phone's GPU memory.
@@ -125,6 +135,14 @@ CHARACTERS = {
                    clips=ARCHER_CLIPS, retarget={}, full=False, lod_ratio=0.24, tex=(1024, 512)),
     'samurai2': dict(name='Samurai2', pack='inimigo 2 samurai pronto.zip', fbx='inimigo 2 atualizado.fbx',
                      clips={}, retarget=SAMURAI2_RETARGET, full=False, lod_ratio=0.24, tex=(1024, 512)),
+    'shinobi': dict(name='Shinobi', pack=None, fbx='shinobi ninja espada e kunai pronto.fbx',
+                    clips={}, retarget=SHINOBI_RETARGET, full=False, lod_ratio=0.25, tex=(1024, 512)),
+    'raio': dict(name='Raio', pack=None, fbx='lutador espada de raios pronto.fbx',
+                 clips={}, retarget=RAIO_RETARGET, full=False, lod_ratio=0.25, tex=(1024, 512)),
+    'nito': dict(name='Nito', pack=None, fbx='samurai 2 espadas pronto.fbx',
+                 clips={}, retarget=NITO_RETARGET, full=False, lod_ratio=0.25, tex=(1024, 512)),
+    'bonin': dict(name='Bonin', pack=None, fbx='samurai com bo pronto.fbx',
+                  clips={}, retarget=BONIN_RETARGET, full=False, lod_ratio=0.25, tex=(1024, 512)),
     'giant': dict(name='Giant', pack=None, fbx='chefe grande atualizado pronto.fbx',
                   clips={}, retarget=GIANT_RETARGET, full=False, lod_ratio=0.34, tex=(1024, 512)),
 }
@@ -402,7 +420,7 @@ def main():
         keep = only.split(',')
         clips = {k: v for k, v in clips.items() if k in keep}
 
-    if not export_all:
+    if not export_all and spec['lod_ratio']:
         make_lod(body, spec['name'], spec['lod_ratio'])
         if not spec['full']:
             bpy.data.objects.remove(body, do_unlink=True)
