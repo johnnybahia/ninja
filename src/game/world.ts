@@ -9,6 +9,7 @@ import { Lobe, coniferGeometry, foliageCards, foliageMaterial, makeRng, rockGeom
 import { applySurface, initSurfaces, neutralize } from './surfaces';
 import { detectQuality } from './postfx';
 import { PropSystem, Seg } from './props';
+import { THEMES, Theme, ThemeUniforms, addThemeTint, blendTheme, cloneTheme, themeUniforms } from './theme';
 
 export type Solid = { x: number; z: number; r: number; h: number };
 
@@ -48,6 +49,7 @@ let WM: WorldMats;
 // Shared wind clock for every swaying material (grass, foliage, banners)
 const WIND_TIME = { value: 0 };
 const IDENT = new THREE.Matrix4();
+const TMP_C = new THREE.Color();
 
 function glsl(n: number) {
   return n.toFixed(4);
@@ -494,6 +496,20 @@ export class World {
   private atmTarget: Atmos = ATMOSPHERES[0];
   private atmBlending = false;
   atmIndex = 0;
+  // scenery theme (see theme.ts): `theme` is the blended look the materials read
+  theme: Theme = cloneTheme(THEMES[0]);
+  private themeTarget: Theme = THEMES[0];
+  private themeBlending = false;
+  themeIndex = 0;
+  private themeU = { sakura: themeUniforms(), pine: themeUniforms(), grass: themeUniforms(), carpet: themeUniforms(), lily: themeUniforms() };
+  private groundMat!: THREE.MeshStandardMaterial;
+  private groundBase = new THREE.Color();
+  private plazaMat!: THREE.MeshStandardMaterial;
+  private plazaBase = new THREE.Color();
+  private forestMat!: THREE.MeshLambertMaterial;
+  private forestBase = new THREE.Color();
+  private petalMat!: THREE.MeshLambertMaterial;
+  private sakuraMesh?: THREE.Mesh;
   private garden: Garden;
   // image-based lighting baked from the live sky (re-baked when the atmosphere moves)
   private pmrem: THREE.PMREMGenerator;
@@ -561,7 +577,7 @@ export class World {
     this.buildTorches(batch);
     batch.build(this.root);
 
-    this.garden = new Garden(this.root, atm, WIND_TIME, (x, z, pad) => this.isFree(x, z, pad));
+    this.garden = new Garden(this.root, atm, WIND_TIME, (x, z, pad) => this.isFree(x, z, pad), this.themeU);
     this.updateEnv();
     this.solids.push(...this.garden.solids);
     this.registerBamboo();
@@ -606,12 +622,16 @@ export class World {
   private buildGround() {
     const groundMat = new THREE.MeshStandardMaterial({ roughness: 0.95, color: new THREE.Color(0.075, 0.08, 0.06) });
     applySurface(groundMat, 'ground', { mode: 'top', scale: 0.33, normal: 1.0, breakup: true, sat: 0.55 });
+    this.groundMat = groundMat;
+    this.groundBase.copy(groundMat.color);
     const ground = new THREE.Mesh(new THREE.CircleGeometry(170, 64).rotateX(-Math.PI / 2), groundMat);
     ground.receiveShadow = true;
     this.root.add(ground);
 
     const plazaMat = new THREE.MeshStandardMaterial({ roughness: 0.8, color: new THREE.Color(0.12, 0.12, 0.125) });
     applySurface(plazaMat, 'cobble', { mode: 'top', scale: 0.6, normal: 1.1, breakup: true });
+    this.plazaMat = plazaMat;
+    this.plazaBase.copy(plazaMat.color);
     const plaza = new THREE.Mesh(new THREE.CircleGeometry(13, 64).rotateX(-Math.PI / 2), plazaMat);
     plaza.position.y = 0.02;
     plaza.receiveShadow = true;
@@ -837,6 +857,8 @@ export class World {
     addWind(pineMat, { amp: 0.07, base: 2.0, span: 5, key: 'pine-card' });
     addShake(sakuraMat, this.props.treeShake);
     addShake(pineMat, this.props.treeShake);
+    addThemeTint(sakuraMat, this.themeU.sakura, 'card');
+    addThemeTint(pineMat, this.themeU.pine, 'card');
     const mk = (parts: THREE.BufferGeometry[], mat: THREE.Material) => {
       const g = mergeGeometries(parts, false)!;
       parts.forEach((p) => p.dispose());
@@ -848,6 +870,7 @@ export class World {
       return m;
     };
     sakMesh = mk(sakuraCards, sakuraMat);
+    this.sakuraMesh = sakMesh;
     pineMesh = mk(pineCards, pineMat);
   }
 
@@ -936,7 +959,9 @@ export class World {
   private buildDistantForest() {
     const n = 150;
     const g = coniferGeometry(9);
-    const m = new THREE.InstancedMesh(g, new THREE.MeshLambertMaterial({ color: 0x1a2a22, side: THREE.DoubleSide }), n);
+    this.forestMat = new THREE.MeshLambertMaterial({ color: 0x1a2a22, side: THREE.DoubleSide });
+    this.forestBase.copy(this.forestMat.color);
+    const m = new THREE.InstancedMesh(g, this.forestMat, n);
     const d = this.dummy;
     for (let i = 0; i < n; i++) {
       const a = rand(0, TAU);
@@ -1067,6 +1092,7 @@ export class World {
       );
     };
     mat.customProgramCacheKey = () => 'grass';
+    addThemeTint(mat, this.themeU.grass, null);
     const m = new THREE.InstancedMesh(bladeGeometry(), mat, this.grassMax);
     const d = this.dummy;
     const cA = new THREE.Color(0x7a9a48);
@@ -1109,6 +1135,7 @@ export class World {
   private buildPetals() {
     const g = new THREE.PlaneGeometry(0.085, 0.06);
     const mat = new THREE.MeshLambertMaterial({ color: 0xf7bccb, emissive: 0x4a1e2a, side: THREE.DoubleSide });
+    this.petalMat = mat;
     const m = new THREE.InstancedMesh(g, mat, this.petalMax);
     m.frustumCulled = false;
     for (let i = 0; i < this.petalMax; i++) {
@@ -1197,8 +1224,15 @@ export class World {
     this.front.intensity = a.frontI;
     (this.sky.material as THREE.ShaderMaterial).uniforms.uStars.value = a.stars;
     MAT.glow.color.set(0xff9a3c).multiplyScalar(a.glow);
+    this.tintMountains();
+  }
+
+  // ridge colours: the atmosphere's, shifted toward the theme's (snow on the peaks...)
+  private tintMountains() {
+    const a = this.atm;
+    const t = this.theme.ridge;
     for (const m of this.mountains) {
-      const ridge = m.far ? a.ridgeFar : a.ridgeNear;
+      const ridge = TMP_C.copy(m.far ? a.ridgeFar : a.ridgeNear).lerp(t.color, t.k);
       const col = m.mesh.geometry.attributes.color as THREE.BufferAttribute;
       for (let i = 0; i < col.count; i += 2) {
         col.setXYZ(i, a.fog.r, a.fog.g, a.fog.b);
@@ -1206,6 +1240,43 @@ export class World {
       }
       col.needsUpdate = true;
     }
+  }
+
+  // Start easing toward another scenery theme (instant when a run starts)
+  setTheme(i: number, instant = false) {
+    this.themeIndex = i;
+    this.themeTarget = THEMES[i];
+    if (instant) {
+      blendTheme(this.theme, this.themeTarget, 1);
+      this.applyTheme();
+      this.themeBlending = false;
+    } else {
+      this.themeBlending = true;
+    }
+  }
+
+  private applyTheme() {
+    const th = this.theme;
+    const put = (u: ThemeUniforms, t: { color: THREE.Color; k: number }, bare = 0, emis = 0.06) => {
+      u.uThTint.value.copy(t.color);
+      u.uThK.value = t.k;
+      u.uThBare.value = bare;
+      u.uThEmis.value = emis;
+    };
+    put(this.themeU.sakura, th.sakura, th.sakura.bare, th.sakura.glow);
+    put(this.themeU.pine, th.pine, th.pine.bare, th.pine.glow);
+    put(this.themeU.grass, th.grass, 0, 0);
+    put(this.themeU.carpet, th.carpet, 0, 0);
+    put(this.themeU.lily, { color: th.grass.color, k: 0 }, 1 - th.flowers, 0);
+    this.groundMat.color.copy(this.groundBase).lerp(th.ground.color, th.ground.k);
+    this.plazaMat.color.copy(this.plazaBase).lerp(th.ground.color, th.ground.k * 0.45);
+    this.forestMat.color.copy(this.forestBase).lerp(th.forest.color, th.forest.k);
+    this.petalMat.color.copy(th.fall.color);
+    this.petalMat.emissive.copy(th.fall.emissive);
+    this.props.look = th.leaf;
+    // the shadow pass doesn't know the leaves are gone: bare trees stop casting a full crown
+    if (this.sakuraMesh) this.sakuraMesh.castShadow = th.sakura.bare < 0.5;
+    this.tintMountains();
   }
 
   private petalQuality = 1;
@@ -1298,6 +1369,15 @@ export class World {
       }
       if (done) this.atmBlending = false;
     }
+    if (this.themeBlending) {
+      const done = blendTheme(this.theme, this.themeTarget, 1 - Math.exp(-dt * 0.7));
+      this.applyTheme();
+      if (done) {
+        blendTheme(this.theme, this.themeTarget, 1);
+        this.applyTheme();
+        this.themeBlending = false;
+      }
+    }
     this.props.update(dt);
     this.fogScaleCur += (this.fogScale - this.fogScaleCur) * Math.min(1, dt * 1.2);
     if (Math.abs(this.fogScaleCur - 1) > 0.002 || this.fogScale !== 1) {
@@ -1310,7 +1390,8 @@ export class World {
       fog.near = this.atm.fogNear;
       fog.far = this.atm.fogFar;
     }
-    this.petals.count = Math.floor(this.petalMax * Math.min(1, this.petalQuality * this.atm.petals));
+    const fall = this.theme.fall;
+    this.petals.count = Math.floor(this.petalMax * Math.min(1, this.petalQuality * Math.max(this.atm.petals * fall.mul, fall.min)));
     this.mistU.uTime.value = time;
     this.mistU.uDensity.value = this.atm.mist * (1 + 1.2 * (1 - this.fogScaleCur));
     this.mistU.uColor.value.copy(this.atm.fog).lerp(this.atm.skyFill, 0.25).multiplyScalar(1.15);
@@ -1358,8 +1439,8 @@ export class World {
     for (let i = 0; i < n; i++) {
       const pt = this.petalData[i];
       pt.ph += dt * 2.2;
-      pt.p.x += (pt.v.x + Math.sin(pt.ph) * 0.35) * dt;
-      pt.p.y += pt.v.y * dt;
+      pt.p.x += (pt.v.x * fall.drift + Math.sin(pt.ph) * 0.35) * dt;
+      pt.p.y += pt.v.y * fall.speed * dt;
       pt.p.z += (pt.v.z + Math.cos(pt.ph * 0.7) * 0.25) * dt;
       pt.rot.x += pt.spin.x * dt;
       pt.rot.y += pt.spin.y * dt;
@@ -1378,7 +1459,7 @@ export class World {
       // lens-only radius below.
       const nearCam = pt.p.distanceToSquared(camPos) < 4;
       const nearPlayer = pt.p.distanceToSquared(focus) < 2.25;
-      d.scale.setScalar(nearCam || nearPlayer ? 0 : 1);
+      d.scale.setScalar(nearCam || nearPlayer ? 0 : fall.size);
       d.updateMatrix();
       this.petals.setMatrixAt(i, d.matrix);
     }
