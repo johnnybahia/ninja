@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { BladeSeg, bladeLerp, closestSegSeg } from './combat';
 import { sfx } from './audio';
+import { THEMES, type ThemeLeaf } from './theme';
 
 // ===========================================================================
 // Reactive scenery. A blade (or fist, or blast) that touches a tree, rock, lantern, pillar,
@@ -346,6 +347,8 @@ export class PropSystem {
   /** per-tree crown sway amplitude, read by the foliage shader (see World.addShake) */
   readonly treeShake = new Float32Array(32);
   fx: PropFx | null = null;
+  /** colours of the leaves that fly off (the scenery theme's; sakura by default) */
+  look: ThemeLeaf = THEMES[0].leaf;
   private props: Prop[] = [];
   private leaves: DebrisPool;
   private chips: DebrisPool;
@@ -737,10 +740,13 @@ export class PropSystem {
   }
 
   private leafColor(pink: boolean) {
-    return pink ? tmpC.setHSL(0.95 + rnd(-0.02, 0.02), rnd(0.2, 0.45), rnd(0.8, 0.94)) : tmpC.setHSL(0.3 + rnd(-0.03, 0.03), rnd(0.35, 0.55), rnd(0.28, 0.42));
+    const L = pink ? this.look.sakura : this.look.green;
+    return tmpC.setHSL(L.h + rnd(-L.hv, L.hv), rnd(L.s0, L.s1), rnd(L.l0, L.l1));
   }
 
   private leaf(x: number, y: number, z: number, pink: boolean, vx = 0, vz = 0) {
+    // a bare winter tree has little left to lose
+    if (this.look.shed < 1 && Math.random() > this.look.shed) return;
     this.leaves.spawn(
       {
         x,

@@ -6,6 +6,7 @@ import { ICON_URLS } from './game/icons';
 import { initAudio } from './game/audio';
 import type { Quality, QualitySetting } from './game/postfx';
 import type { AtmosMode } from './game/atmosphere';
+import type { ThemeMode } from './game/theme';
 import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft, ArrowUp, SlidersHorizontal } from 'lucide-react';
 import { TunePanel } from './TunePanel';
 import { loadTune } from './game/tunables';
@@ -213,6 +214,14 @@ export default function App() {
     }
   });
   const atmosRef = useRef(atmosMode);
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
+    try {
+      return localStorage.getItem('kage_theme') === 'off' ? 'off' : 'three';
+    } catch {
+      return 'three';
+    }
+  });
+  const themeRef = useRef(themeMode);
   const [sensitivity, setSensitivity] = useState(1.0);
   const [autoCamera, setAutoCamera] = useState(true);
   const [autoTurnStick, setAutoTurnStick] = useState(true);
@@ -319,6 +328,7 @@ export default function App() {
     engine.metaBonus = bonusesFor(metaRef.current);
     engine.setQuality(qualityRef.current);
     engine.atmosMode = atmosRef.current;
+    engine.themeMode = themeRef.current;
     setActiveWeapon(engine.weapons[0]);
 
     const handleResize = () => engine.resize();
@@ -1261,6 +1271,38 @@ export default function App() {
                   ))}
                 </div>
                 <p className="text-[10px] text-[var(--paper)]/50 mt-1">Entardecer, Noite de lua e Amanhecer com névoa.</p>
+              </div>
+
+              <div className="py-1 border-t border-[rgba(239,230,210,0.1)]">
+                <div className="font-bold mb-1.5">Mudança de cenário:</div>
+                <div className="grid grid-cols-2 gap-1">
+                  {(
+                    [
+                      ['three', 'A cada 3 ondas'],
+                      ['off', 'Desligada']
+                    ] as [ThemeMode, string][]
+                  ).map(([m, label]) => (
+                    <button
+                      key={m}
+                      onClick={() => {
+                        setThemeMode(m);
+                        themeRef.current = m;
+                        if (engineRef.current) engineRef.current.themeMode = m;
+                        try {
+                          localStorage.setItem('kage_theme', m);
+                        } catch {}
+                      }}
+                      className={`py-1.5 rounded border text-[11px] font-bold cursor-pointer ${
+                        themeMode === m
+                          ? 'border-[var(--ember)] bg-[rgba(242,166,90,0.25)] text-[var(--paper)]'
+                          : 'border-[rgba(239,230,210,0.2)] text-[var(--paper)]/70'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-[var(--paper)]/50 mt-1">Sakura, Outono, Inverno e Brasas; a troca acontece no início da onda.</p>
               </div>
 
             </div>

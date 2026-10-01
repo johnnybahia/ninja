@@ -3,6 +3,7 @@ import { TAU, rand } from './constants';
 import type { Atmos } from './atmosphere';
 import { rockGeometry } from './shapes';
 import { applySurface } from './surfaces';
+import { ThemeUniforms, addThemeTint } from './theme';
 
 // ===========================================================================
 // Garden details around the temple: koi pond, bamboo grove, red spider lilies,
@@ -41,7 +42,7 @@ export class Garden {
   private reflOn = false;
   private refl: { target: THREE.WebGLRenderTarget; cam: THREE.PerspectiveCamera } | null = null;
 
-  constructor(root: THREE.Object3D, atm: Atmos, windTime: { value: number }, isFree: (x: number, z: number, pad: number) => boolean) {
+  constructor(root: THREE.Object3D, atm: Atmos, windTime: { value: number }, isFree: (x: number, z: number, pad: number) => boolean, private themeU: { carpet: ThemeUniforms; lily: ThemeUniforms }) {
     this.water = this.buildPond(root, atm);
     this.waterU = (this.water.material as THREE.ShaderMaterial).uniforms;
     this.koi = this.buildKoi(root);
@@ -381,6 +382,7 @@ export class Garden {
         );
     };
     mat.customProgramCacheKey = () => 'lily';
+    addThemeTint(mat, this.themeU.lily, 'instance');
 
     const drifts = [
       [-10, 14, 2.6, 40], [10.5, 13.5, 2.4, 36], [-14, -14, 2.2, 30], [14, -15, 2.5, 34],
@@ -446,7 +448,9 @@ export class Garden {
   private buildPetalCarpet(root: THREE.Object3D, isFree: (x: number, z: number, pad: number) => boolean) {
     const n = 1400;
     const g = new THREE.PlaneGeometry(0.09, 0.06).rotateX(-Math.PI / 2);
-    const m = new THREE.InstancedMesh(g, new THREE.MeshStandardMaterial({ color: 0xf0b0c2, roughness: 0.8 }), n);
+    const carpetMat = new THREE.MeshStandardMaterial({ color: 0xf0b0c2, roughness: 0.8 });
+    addThemeTint(carpetMat, this.themeU.carpet, null);
+    const m = new THREE.InstancedMesh(g, carpetMat, n);
     let i = 0;
     for (let t = 0; t < n * 3 && i < n; t++) {
       // thicker drifts on the plaza edges and path, thinner everywhere else

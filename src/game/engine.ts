@@ -24,6 +24,7 @@ import {
 import { sfx } from './audio';
 import { World } from './world';
 import { ATMOSPHERES, AtmosMode, atmosphereForWave } from './atmosphere';
+import { THEMES, ThemeMode, themeForWave } from './theme';
 import { Afterimages, BladeTrail, DustPool, ImpactPool, InkDecals, softDotTexture } from './vfx';
 import { PostFX, NINJA_LOOK, Quality, QualitySetting, QualityProfile, qualityProfile, detectQuality } from './postfx';
 import { MAT, makeWeapon, mesh } from './rigs';
@@ -429,6 +430,10 @@ export class GameEngine {
   private fx: PostFX | null = null;
   public qualitySetting: QualitySetting = 'auto';
   public atmosMode: AtmosMode = 'two';
+  /** scenery theme: a new one every 3 waves, or always the first */
+  public themeMode: ThemeMode = 'three';
+  // ?theme=N pins one theme for every wave (to look at them one by one)
+  private themeForce: number | null = null;
   private profile: QualityProfile = qualityProfile('high');
   private sunUv = new THREE.Vector2();
   public quality: Quality = 'high';
@@ -770,6 +775,9 @@ export class GameEngine {
     this.reset();
     const first = this.atmosMode === 'random' ? Math.floor(Math.random() * ATMOSPHERES.length) : 0;
     if (first !== this.world.atmIndex) this.world.setAtmosphere(first, true);
+    const pin = parseInt(new URLSearchParams(location.search).get('theme') ?? '', 10);
+    this.themeForce = Number.isFinite(pin) ? Math.min(THEMES.length - 1, Math.max(0, pin)) : null;
+    this.world.setTheme(this.themeForce ?? 0, true);
     this.paused = false;
     this.state = 'play';
     this.runOpen = true;
@@ -949,6 +957,11 @@ export class GameEngine {
     if (atmIdx !== this.world.atmIndex) {
       this.world.setAtmosphere(atmIdx);
       sub += ` · ${ATMOSPHERES[atmIdx].name}`;
+    }
+    const themeIdx = this.themeForce ?? themeForWave(this.wave, this.themeMode);
+    if (themeIdx !== this.world.themeIndex) {
+      this.world.setTheme(themeIdx);
+      sub += ` · ${THEMES[themeIdx].glyph} ${THEMES[themeIdx].name}`;
     }
     this.callbacks.onWaveMod?.(mod ? { id: mod.id, name: mod.name, glyph: mod.glyph, desc: mod.desc } : null);
     this.callbacks.onWaveChange(this.wave, mod ? `Onda ${this.wave} · ${mod.name}` : `Onda ${this.wave}`, sub);
