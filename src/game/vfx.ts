@@ -502,3 +502,114 @@ export class Afterimages {
     this.ghosts = [];
   }
 }
+
+// ---------------------------------------------------------------------------
+// Weapon effects for the fighters: a glow along a blade, and arcs of lightning.
+// Both live on the weapon model (blade along its local +Z) and cost nothing while
+// invisible; `update` is called each frame by the owner.
+// ---------------------------------------------------------------------------
+export interface WeaponFx {
+  update(t: number): void;
+  dispose(): void;
+}
+
+/** A sheath of light around the blade, with a bright core. `color` is HDR so it blooms. */
+export function makeBladeGlow(weapon: THREE.Object3D, color: THREE.Color, base: number, tip: number): WeaponFx {
+  const len = tip - base;
+  const mk = (w: number, c: THREE.Color, op: number) =>
+    new THREE.Mesh(
+      new THREE.BoxGeometry(w, w, len),
+      new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: op, depthWrite: false, blending: THREE.AdditiveBlending, fog: false })
+    );
+  const halo = mk(0.09, color, 0.42);
+  const core = mk(0.03, new THREE.Color(1, 1, 1).lerp(color, 0.25).multiplyScalar(1.4), 0.9);
+  const g = new THREE.Group();
+  g.add(halo, core);
+  g.position.z = (base + tip) / 2;
+  g.renderOrder = 15;
+  weapon.add(g);
+  return {
+    update(t) {
+      const k = 0.85 + Math.sin(t * 17) * 0.1 + Math.sin(t * 41) * 0.05;
+      halo.scale.set(k, k, 1);
+      (halo.material as THREE.MeshBasicMaterial).opacity = 0.34 + 0.12 * k;
+    },
+    dispose() {
+      weapon.remove(g);
+      for (const m of [halo, core]) {
+        m.geometry.dispose();
+        (m.material as THREE.Material).dispose();
+      }
+    }
+  };
+}
+
+/** Crackling lightning along the blade: a few jagged arcs that re-roll many times a second. */
+export function makeLightning(weapon: THREE.Object3D, color: THREE.Color, base: number, tip: number): WeaponFx {
+  const ARCS = 3;
+  const PTS = 7;
+  const pos = new Float32Array(ARCS * (PTS - 1) * 2 * 3);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const line = new THREE.LineSegments(
+    g,
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.95, depthWrite: false, blending: THREE.AdditiveBlending, fog: false })
+  );
+  line.frustumCulled = false;
+  line.renderOrder = 15;
+  weapon.add(line);
+  // a soft violet halo so the arcs read from afar
+  const halo = new THREE.Mesh(
+    new THREE.BoxGeometry(0.1, 0.1, tip - base),
+    new THREE.MeshBasicMaterial({ color: color.clone().multiplyScalar(0.5), transparent: true, opacity: 0.3, depthWrite: false, blending: THREE.AdditiveBlending, fog: false })
+  );
+  halo.position.z = (base + tip) / 2;
+  halo.renderOrder = 15;
+  weapon.add(halo);
+  let next = 0;
+  const roll = () => {
+    let o = 0;
+    for (let a = 0; a < ARCS; a++) {
+      const z0 = base + Math.random() * (tip - base) * 0.3;
+      const z1 = tip + Math.random() * 0.25; // some arcs leap past the tip
+      const amp = 0.05 + Math.random() * 0.1;
+      let px = 0;
+      let py = 0;
+      let pz = z0;
+      for (let i = 1; i < PTS; i++) {
+        const f = i / (PTS - 1);
+        const w = Math.sin(f * Math.PI) * amp * 2.2;
+        const nx = (Math.random() - 0.5) * w;
+        const ny = (Math.random() - 0.5) * w;
+        const nz = z0 + (z1 - z0) * f;
+        pos[o++] = px;
+        pos[o++] = py;
+        pos[o++] = pz;
+        pos[o++] = nx;
+        pos[o++] = ny;
+        pos[o++] = nz;
+        px = nx;
+        py = ny;
+        pz = nz;
+      }
+    }
+    g.attributes.position.needsUpdate = true;
+  };
+  roll();
+  return {
+    update(t) {
+      if (t >= next) {
+        next = t + 0.05 + Math.random() * 0.04;
+        roll();
+      }
+      (halo.material as THREE.MeshBasicMaterial).opacity = 0.22 + 0.16 * Math.random();
+    },
+    dispose() {
+      weapon.remove(line, halo);
+      g.dispose();
+      (line.material as THREE.Material).dispose();
+      halo.geometry.dispose();
+      (halo.material as THREE.Material).dispose();
+    }
+  };
+}

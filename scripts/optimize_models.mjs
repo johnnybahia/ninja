@@ -70,4 +70,6 @@ const files = [
   ...fs.readdirSync(BUILD).map((f) => path.join(BUILD, f)),
   ...fs.readdirSync(path.join(BUILD, 'weapons')).map((f) => path.join(BUILD, 'weapons', f))
 ].filter((f) => f.endsWith('.raw.glb'));
-for (const f of files) await optimize(io, f);
+// node scripts/optimize_models.mjs [name ...]: only those models (all of them by default)
+const only = process.argv.slice(2);
+for (const f of files) if (!only.length || only.some((n) => path.basename(f).startsWith(n + '.'))) await optimize(io, f);

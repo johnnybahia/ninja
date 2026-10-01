@@ -103,7 +103,9 @@ export interface RigInstance {
   sizeScale?: number;
 }
 
-export type EnemyVariant = 'brute' | 'monk' | 'trovao' | 'sombrio'; // samurai kinds, and the Oni's boss-wave forms
+// samurai kinds (the Brutamontes, the Samurai do Bō = 'monk', the Shinobi, the Lutador do Raio and
+// the Samurai das Duas Espadas = 'nito') and the Oni's boss-wave forms
+export type EnemyVariant = 'brute' | 'monk' | 'shinobi' | 'raio' | 'nito' | 'trovao' | 'sombrio';
 
 export interface EnemyInstance {
   type: 'samurai' | 'archer' | 'boss';
@@ -165,7 +167,9 @@ export interface EnemyInstance {
   // blade-accurate strikes (mocap enemies): the held weapon and its cutting extent, and
   // the window in which the weapon (or a kicking foot) can actually reach the player
   weapon?: THREE.Object3D;
+  weaponL?: THREE.Object3D; // the second sword of the Samurai das Duas Espadas
   bladeKey?: string;
+  fx?: { update(t: number): void; dispose(): void }[]; // glow / lightning on the weapon
   blade?: {
     st: EnemyStrike;
     t: number;
@@ -174,6 +178,9 @@ export interface EnemyInstance {
     limb?: 'foot';
     prev: { a: THREE.Vector3; b: THREE.Vector3 };
     prevOk: boolean;
+    // the second sword's previous segment (two-sword samurai)
+    prevL: { a: THREE.Vector3; b: THREE.Vector3 };
+    prevLOk: boolean;
   };
   trail?: BladeTrail;
   elite?: boolean;
@@ -197,6 +204,10 @@ export interface EnemyInstance {
   // a samurai with its own way of fighting: the heavy Brutamontes or the long-reach Monge
   variant?: EnemyVariant;
   // wave goals: the captain to hunt, and a routed enemy running away before it vanishes
+  // the fighters' abilities: blink / star-throw cooldowns, and the time left in a throw
+  abilT?: number;
+  starCd?: number;
+  castT?: number;
   // boss forms: the ability clock, the Sombrio's time out of sight, a forced perilous strike
   bossT?: number;
   vanishT?: number;
@@ -220,6 +231,7 @@ export interface EnemyStrike {
   reach: number;
   dmg: number;
   side: number;
+  limb?: 'foot'; // a kick: the foot is the weapon
 }
 
 export interface ProjectileInstance {

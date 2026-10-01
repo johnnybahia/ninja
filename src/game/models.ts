@@ -15,8 +15,15 @@ const CHARACTER_FILES = {
   ronin: `${M}ronin.glb`,
   archer: `${M}archer.glb`,
   samurai2: `${M}samurai2.glb`,
-  giant: `${M}giant.glb`
+  giant: `${M}giant.glb`,
+  // the four fighters that join the waves later (loaded in the background once a run
+  // starts, see LAZY_CHARACTERS - a wave only draws them when they are ready)
+  shinobi: `${M}shinobi.glb`,
+  raio: `${M}raio.glb`,
+  nito: `${M}nito.glb`,
+  bonin: `${M}bonin.glb`
 };
+export const LAZY_CHARACTERS: CharacterModel[] = ['shinobi', 'raio', 'nito', 'bonin'];
 export type CharacterModel = keyof typeof CHARACTER_FILES;
 
 // Weapon id (as makeWeapon() knows them) -> file. Every file is pre-normalized to the
@@ -162,5 +169,6 @@ export function cloneWeaponModel(id: string): THREE.Group | null {
 }
 
 export function preloadModels(): Promise<unknown> {
-  return Promise.allSettled([...(Object.keys(CHARACTER_FILES) as CharacterModel[]).map(loadCharacter), loadWeapons()]);
+  const eager = (Object.keys(CHARACTER_FILES) as CharacterModel[]).filter((id) => !LAZY_CHARACTERS.includes(id));
+  return Promise.allSettled([...eager.map(loadCharacter), loadWeapons()]);
 }
