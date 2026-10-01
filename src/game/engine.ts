@@ -595,6 +595,14 @@ export class GameEngine {
     this.world = new World(this.renderer, this.scene);
     this.sun = this.world.sun;
     this.solids = this.world.solids;
+    // scenery that answers a blow: dust, a spark flash and camera shake come from here
+    this.world.props.fx = {
+      dust: (x, z, n, spd, dx = 0, dz = 0) => this.puff(x, z, n, spd, dx, dz),
+      flash: (x, y, z, size) => this.impacts.spawn(this.tmpV.set(x, y, z), IMPACT_NORMAL, size, 0.1),
+      shake: (a) => {
+        this.shake = Math.max(this.shake, a);
+      }
+    };
   }
 
   private initPlayer() {
@@ -798,6 +806,7 @@ export class GameEngine {
     this.dust.clear();
     this.ghosts.clear();
 
+    this.world.props.reset();
     this.cardLv = {};
     this.cardOffer = null;
     this.picksPending = 0;
@@ -1401,6 +1410,7 @@ export class GameEngine {
       this.hitEnemy(e, Math.round(dmg * (0.5 + 0.5 * falloff)), dx / d, dz / d, kb, true);
     }
     this.emitParticles(x, y + 0.4, z, 26, 0xffb04a, 6, 3, 5, 0.55);
+    this.world.props.explode(x, y, z, radius, 10);
     this.spawnBloodRing(x, y, z, radius, 0xffa030, 0.4);
     this.shake = Math.max(this.shake, 0.4);
     sfx.boom();
@@ -2203,6 +2213,8 @@ export class GameEngine {
       }
       this.sweepEnemies(win, prev, cur, a);
       if (this.act !== a) return;
+      // the same blade also touches the scenery: sparks off stone, bark chips, a cut bamboo
+      this.world.props.sweep(prev, cur, { power: a.kind === 'special' ? 3 : win.heavy ? 2 : 1, edged: w.id !== 'bo' && w.id !== 'karate', token: win, radius: this.bladeRadius });
       if (sh.t > win.t1) a.windows.splice(i, 1);
     }
     this.bladePrev.a.copy(cur.a);
@@ -2652,6 +2664,8 @@ export class GameEngine {
     }
     if (TUNE.hitDebug > 0.5) this.enemyBlades.push({ a: cur.a.clone(), b: cur.b.clone() });
     this.enemyTrail(e, cur, b.limb === 'foot', b.prevOk ? b.prev.b : null, dt);
+    // enemy swings hit the scenery too (the Oni's great sword shatters lanterns)
+    this.world.props.sweep(b.prevOk ? b.prev : null, cur, { power: e.type === 'boss' ? 4 : 1.5, edged: b.limb !== 'foot', token: b, radius: 0.08 });
     const P = this.player;
     if (!b.hit && this.state === 'play' && !this.cine) {
       const radius = 0.45 + 0.15 + (b.limb === 'foot' ? 0.2 : 0.06);

@@ -8,6 +8,7 @@ import { Garden } from './garden';
 import { Lobe, coniferGeometry, foliageCards, foliageMaterial, makeRng, rockGeometry, sweep } from './shapes';
 import { applySurface, initSurfaces, neutralize } from './surfaces';
 import { detectQuality } from './postfx';
+import { PropSystem, Seg } from './props';
 
 export type Solid = { x: number; z: number; r: number; h: number };
 
@@ -75,6 +76,41 @@ function addWind(mat: THREE.Material, o: { instanced?: boolean; amp: number; bas
       );
   };
   mat.customProgramCacheKey = () => 'wind-' + o.key;
+}
+
+// A hit tree's crown sways: the foliage carries a per-tree index (`aTree`) and the game
+// writes a decaying amplitude into `shake[tree]` (see props.ts).
+function addShake(mat: THREE.Material, shake: Float32Array) {
+  const prevCompile = mat.onBeforeCompile;
+  const prevKey = mat.customProgramCacheKey;
+  const uniform = { value: shake };
+  mat.onBeforeCompile = (shader, renderer) => {
+    prevCompile.call(mat, shader, renderer);
+    shader.uniforms.uTreeShake = uniform;
+    shader.vertexShader =
+      'attribute float aTree;\nuniform float uTreeShake[32];\n' +
+      shader.vertexShader.replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+        float shk = uTreeShake[int(aTree + 0.5)];
+        float shH = clamp((position.y - 1.8) / 3.0, 0.0, 1.0);
+        transformed.x += sin(uWindTime * 17.0 + position.y * 3.1 + aTree) * shk * shH;
+        transformed.z += cos(uWindTime * 13.0 + position.x * 2.7) * shk * 0.7 * shH;`
+      );
+  };
+  mat.customProgramCacheKey = () => prevKey.call(mat) + '-shake';
+}
+
+// A chain of capsules along a curve: the collision body of a trunk or branch
+function chainSegs(curve: THREE.Curve<THREE.Vector3>, radius: (t: number) => number, n: number, limb = false): Seg[] {
+  const out: Seg[] = [];
+  let prev = curve.getPointAt(0);
+  for (let i = 1; i <= n; i++) {
+    const pt = curve.getPointAt(i / n);
+    out.push({ a: prev, b: pt, r: radius((i - 0.5) / n) + 0.02, limb });
+    prev = pt;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -431,6 +467,8 @@ interface Mote {
 
 export class World {
   solids: Solid[] = [];
+  /** reactive scenery: blades, fists and blasts make props answer (see props.ts) */
+  props!: PropSystem;
   sun: THREE.DirectionalLight;
   private scene: THREE.Scene;
   private root = new THREE.Group();
@@ -509,13 +547,14 @@ export class World {
     this.root.add(mFar, mNear);
     this.mountains.push({ mesh: mFar, far: true }, { mesh: mNear, far: false });
 
+    this.props = new PropSystem(this.root);
     const batch = new Batcher();
 
     this.buildGround();
     this.buildTemple(batch);
     this.buildTorii(batch);
     this.buildTrees(batch);
-    this.buildLanterns(batch);
+    this.buildLanterns();
     this.buildRocks(batch);
     this.buildDistantForest();
     this.buildBanners(batch);
@@ -525,6 +564,7 @@ export class World {
     this.garden = new Garden(this.root, atm, WIND_TIME, (x, z, pad) => this.isFree(x, z, pad));
     this.updateEnv();
     this.solids.push(...this.garden.solids);
+    this.registerBamboo();
     this.shojiMat = this.root.userData.shoji as THREE.MeshBasicMaterial;
     this.buildMist();
     this.grass = this.buildGrass();
@@ -543,7 +583,24 @@ export class World {
   }
 
   private addSolid(x: number, z: number, r: number, h: number) {
-    this.solids.push({ x, z, r, h });
+    const so = { x, z, r, h };
+    this.solids.push(so);
+    return so;
+  }
+
+  // every bamboo stalk is a prop of its own
+  private registerBamboo() {
+    const B = this.garden.bamboo;
+    if (!B) return;
+    const base = new THREE.Vector3();
+    const top = new THREE.Vector3();
+    const sc = new THREE.Vector3();
+    const q = new THREE.Quaternion();
+    for (const st of B.stalks) {
+      st.matrix.decompose(base, q, sc);
+      top.set(0, 7, 0).applyMatrix4(st.matrix);
+      this.props.addStalk(base, top, { mesh: B.mesh, idx: st.idx, h: sc.y, leaves: B.leaves, leafStart: st.leafStart, leafCount: st.leafCount, map: B.map });
+    }
   }
 
   private buildGround() {
@@ -596,7 +653,7 @@ export class World {
     for (const side of [-1, 1]) {
       b.add(box(4.6, 0.1, 0.12), WM.woodDark, at(mtx(side * 5.2, railY, 4.95)));
       b.add(box(4.6, 0.08, 0.1), WM.woodDark, at(mtx(side * 5.2, railY - 0.35, 4.95)));
-      for (let k = 0; k < 5; k++) b.add(box(0.12, 0.8, 0.12), WM.woodDark, at(mtx(side * (3.0 + k * 1.1), 1.95, 4.95)));
+      for (let k = 0; k < 5; k++) this.addPost(side * (3.0 + k * 1.1), -29 + 4.95);
     }
     // pillars: red with black bases
     const pg = new THREE.CylinderGeometry(0.3, 0.33, 4.6, 24);
@@ -605,6 +662,7 @@ export class World {
       for (const z of [4.3, -4.3]) {
         b.add(pg, WM.torii, at(mtx(x, 3.88, z)));
         b.add(baseG, WM.dark, at(mtx(x, 1.75, z)));
+        if (z > 0) this.props.addPillar(x, -29 + z, 1.58, 6.18, 0.33, true);
       }
     }
     // walls: back & sides in dark wood, front shoji panels glowing from inside
@@ -645,6 +703,17 @@ export class World {
     this.emberSources.push(new THREE.Vector3(-3.2, 5, -24.3), new THREE.Vector3(3.2, 5, -24.3));
   }
 
+  // A thin veranda post, separate from the merged temple so it can snap
+  private postGeo = new THREE.BoxGeometry(0.12, 0.8, 0.12);
+  private addPost(x: number, z: number) {
+    const m = new THREE.Mesh(this.postGeo, WM.woodDark);
+    m.position.set(x, 1.95, z);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    this.root.add(m);
+    this.props.addThin({ pole: m, H: 0.8, base: new THREE.Vector3(x, 1.55, z), topGeo: (len) => new THREE.BoxGeometry(0.12, len, 0.12), dark: true }, 3, 0.07);
+  }
+
   private buildTorii(b: Batcher) {
     const T = new THREE.Matrix4().makeTranslation(0, 0, 17);
     const at = (m: THREE.Matrix4) => T.clone().multiply(m);
@@ -654,6 +723,7 @@ export class World {
       b.add(pil, WM.torii, at(mtx(x, 3.1, 0)));
       b.add(foot, WM.dark, at(mtx(x, 0.25, 0)));
       this.addSolid(x, 17, 0.55, 7);
+      this.props.addPillar(x, 17, 0.3, 6.2, 0.32, true);
     }
     b.add(curvedBeam(10.4, 0.42, 0.85, 0.55), WM.dark, at(mtx(0, 6.55, 0)));
     b.add(curvedBeam(9.4, 0.36, 0.6, 0.35), WM.torii, at(mtx(0, 6.12, 0)));
@@ -671,6 +741,7 @@ export class World {
     const pinkTint = () => new THREE.Color().setHSL(0.95 + R(-0.02, 0.02), R(0.1, 0.35), R(0.78, 0.95));
     const pineTint = () => new THREE.Color().setHSL(0.3 + R(-0.03, 0.04), R(0.2, 0.4), R(0.42, 0.62));
 
+    let treeIdx = 0;
     for (let i = 0; i < 28; i++) {
       const a = (i / 28) * TAU + R(0, 0.14);
       const r = 30 + R(0, 8);
@@ -680,6 +751,14 @@ export class World {
       if (z > 13 && Math.abs(x) < 7) continue;
       const s = 0.85 + R(0, 0.45);
       const ry = R(0, TAU);
+      const ti = treeIdx++;
+      const trunkSegs: Seg[] = [];
+      const limbSegs: Seg[] = [];
+      let crown = { x: x, y: 4, z: z, r: 1.6 * s, pink: true };
+      const tag = (g: THREE.BufferGeometry) => {
+        g.setAttribute('aTree', new THREE.Float32BufferAttribute(new Float32Array(g.attributes.position.count).fill(ti), 1));
+        return g;
+      };
       const base = new THREE.Vector3(x, -0.1, z);
       if (rng() < 0.45) {
         // sakura: short leaning trunk, a crown of curving limbs, blossom clouds
@@ -687,7 +766,10 @@ export class World {
         const h = R(2.0, 2.6) * s;
         const top = base.clone().add(lean).setY(h);
         const trunk = [base, base.clone().lerp(top, 0.45).add(new THREE.Vector3(R(-0.2, 0.2), 0, R(-0.2, 0.2))), top];
-        b.add(sweep(trunk, (t) => 0.26 * s * (1 - 0.45 * t) * (1 + 0.9 * Math.exp(-t * 9)), 12, 12).geo, WM.trunk, IDENT);
+        const sRad = (t: number) => 0.26 * s * (1 - 0.45 * t) * (1 + 0.9 * Math.exp(-t * 9));
+        const sTr = sweep(trunk, sRad, 12, 12);
+        b.add(sTr.geo, WM.trunk, IDENT);
+        trunkSegs.push(...chainSegs(sTr.curve, sRad, 8));
         const lobes: Lobe[] = [{ c: top.clone().addScaledVector(up, 1.0 * s), r: 1.25 * s }];
         const nb = 4 + Math.floor(rng() * 2);
         for (let k = 0; k < nb; k++) {
@@ -698,11 +780,15 @@ export class World {
           const p0 = top.clone().addScaledVector(up, -0.35 * s);
           const p1 = p0.clone().addScaledVector(dir, len * 0.45).addScaledVector(up, rise * 0.65);
           const p2 = p0.clone().addScaledVector(dir, len).addScaledVector(up, rise);
-          b.add(sweep([p0, p1, p2], (t) => 0.13 * s * (1 - 0.75 * t), 8, 10).geo, WM.trunk, IDENT);
+          const lRad = (t: number) => 0.13 * s * (1 - 0.75 * t);
+          const lm = sweep([p0, p1, p2], lRad, 8, 10);
+          b.add(lm.geo, WM.trunk, IDENT);
+          limbSegs.push(...chainSegs(lm.curve, lRad, 3, true));
           lobes.push({ c: p2.clone().addScaledVector(up, 0.3 * s), r: R(1.0, 1.35) * s }, { c: p1.clone().addScaledVector(up, 0.55 * s), r: R(0.75, 1.0) * s });
         }
         const canopy = lobes.reduce((acc, l) => acc.add(l.c), new THREE.Vector3()).divideScalar(lobes.length);
-        sakuraCards.push(foliageCards(lobes, canopy, 15, [1.0, 1.45], pinkTint, rng));
+        sakuraCards.push(tag(foliageCards(lobes, canopy, 15, [1.0, 1.45], pinkTint, rng)));
+        crown = { x: canopy.x, y: canopy.y, z: canopy.z, r: 1.7 * s, pink: true };
       } else {
         // kuromatsu: S-curved trunk with cloud-pruned needle pads on low sweeping limbs
         const h = R(4.2, 5.4) * s;
@@ -713,8 +799,10 @@ export class World {
           base.clone().add(new THREE.Vector3(-bend.x * 0.3, h * 0.66, -bend.z * 0.3)),
           base.clone().add(new THREE.Vector3(bend.x * 0.4, h, bend.z * 0.4))
         ];
-        const tr = sweep(trunk, (t) => 0.3 * s * (1 - 0.62 * t) * (1 + 0.7 * Math.exp(-t * 10)), 12, 18);
+        const pRad = (t: number) => 0.3 * s * (1 - 0.62 * t) * (1 + 0.7 * Math.exp(-t * 10));
+        const tr = sweep(trunk, pRad, 12, 18);
         b.add(tr.geo, WM.trunk, IDENT);
+        trunkSegs.push(...chainSegs(tr.curve, pRad, 10));
         const pads: Lobe[] = [{ c: trunk[3].clone().addScaledVector(up, 0.3 * s), r: 0.95 * s, flat: 0.45 }];
         for (let k = 0; k < 4; k++) {
           const t = 0.42 + k * 0.15;
@@ -725,14 +813,19 @@ export class World {
             const len = (2.0 - k * 0.32) * s * R(0.8, 1.1);
             const p1 = at.clone().addScaledVector(dir, len * 0.5).addScaledVector(up, -0.15 * s);
             const p2 = at.clone().addScaledVector(dir, len).addScaledVector(up, 0.25 * s);
-            b.add(sweep([at, p1, p2], (tt) => 0.1 * s * (1 - 0.7 * tt), 7, 8).geo, WM.trunk, IDENT);
+            const bRad = (tt: number) => 0.1 * s * (1 - 0.7 * tt);
+            const bm = sweep([at, p1, p2], bRad, 7, 8);
+            b.add(bm.geo, WM.trunk, IDENT);
+            limbSegs.push(...chainSegs(bm.curve, bRad, 3, true));
             pads.push({ c: p2.clone().addScaledVector(up, 0.2 * s), r: (1.35 - k * 0.17) * s, flat: 0.38 });
           }
         }
         const canopy = pads.reduce((acc, l) => acc.add(l.c), new THREE.Vector3()).divideScalar(pads.length);
-        pineCards.push(foliageCards(pads, canopy, 30, [1.0, 1.45], pineTint, rng, 0.7));
+        pineCards.push(tag(foliageCards(pads, canopy, 30, [1.0, 1.45], pineTint, rng, 0.7)));
+        crown = { x: canopy.x, y: canopy.y, z: canopy.z, r: 2.0 * s, pink: false };
       }
       this.addSolid(x, z, 0.7, 9);
+      this.props.addTree(ti, trunkSegs, limbSegs, crown);
     }
 
     const base = `${import.meta.env.BASE_URL}tex/`;
@@ -742,6 +835,8 @@ export class World {
     const pineMat = foliageMaterial(`${base}pine_card.webp`, () => pineMesh);
     addWind(sakuraMat, { amp: 0.12, base: 2.4, span: 3.5, key: 'sakura-card' });
     addWind(pineMat, { amp: 0.07, base: 2.0, span: 5, key: 'pine-card' });
+    addShake(sakuraMat, this.props.treeShake);
+    addShake(pineMat, this.props.treeShake);
     const mk = (parts: THREE.BufferGeometry[], mat: THREE.Material) => {
       const g = mergeGeometries(parts, false)!;
       parts.forEach((p) => p.dispose());
@@ -756,13 +851,18 @@ export class World {
     pineMesh = mk(pineCards, pineMat);
   }
 
-  private buildLanterns(b: Batcher) {
+  // Each lantern is its own little set of meshes (base, pillar, head) so the scenery system
+  // can shatter the top and leave a stump; the head's parts are merged by material so a
+  // lantern still costs only a handful of draw calls.
+  private buildLanterns() {
     const pts = [
       [-3.4, -6], [3.4, -6],
       [-3.4, -14], [3.4, -14],
       [-4, 12], [4, 12],
       [-9, 0], [9, 0]
     ];
+    // warm light pools around the plaza lanterns (only lit on higher quality)
+    const lit = new Set(['-9,0', '9,0', '-4,12', '4,12']);
     const baseG = new THREE.CylinderGeometry(0.42, 0.5, 0.3, 16);
     const pillarG = new THREE.CylinderGeometry(0.16, 0.2, 0.85, 16);
     const shelfG = new THREE.CylinderGeometry(0.48, 0.4, 0.16, 6);
@@ -770,23 +870,50 @@ export class World {
     const frameG = new THREE.BoxGeometry(0.08, 0.5, 0.08);
     const roofG = new THREE.ConeGeometry(0.7, 0.38, 6);
     const jewelG = new THREE.SphereGeometry(0.1, 14, 10);
+    const merge = (parts: [THREE.BufferGeometry, THREE.Matrix4][]) => {
+      const gs = parts.map(([g, m]) => g.clone().applyMatrix4(m));
+      const out = mergeGeometries(gs, false)!;
+      gs.forEach((g) => g.dispose());
+      return out;
+    };
+    const stoneHeadG = merge([[shelfG, mtx(0, 1.22, 0)], [roofG, mtx(0, 1.94, 0, 0, Math.PI / 6, 0)], [jewelG, mtx(0, 2.2, 0)]]);
+    const framesG = merge([[-1, -1], [1, -1], [-1, 1], [1, 1]].map(([fx, fz]): [THREE.BufferGeometry, THREE.Matrix4] => [frameG, mtx(fx * 0.24, 1.52, fz * 0.24)]));
+    const mk = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number, shadow = true) => {
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(x, y, z);
+      m.castShadow = shadow;
+      m.receiveShadow = true;
+      this.root.add(m);
+      return m;
+    };
     for (const [lx, lz] of pts) {
-      b.add(baseG, WM.stone, mtx(lx, 0.15, lz));
-      b.add(pillarG, WM.stone, mtx(lx, 0.72, lz));
-      b.add(shelfG, WM.stone, mtx(lx, 1.22, lz));
-      b.add(boxG, MAT.glow, mtx(lx, 1.52, lz));
-      for (const [fx, fz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) b.add(frameG, WM.stoneDark, mtx(lx + fx * 0.24, 1.52, lz + fz * 0.24));
-      b.add(roofG, WM.stone, mtx(lx, 1.94, lz, 0, Math.PI / 6, 0, 1, 1, 1));
-      b.add(jewelG, WM.stone, mtx(lx, 2.2, lz));
-      this.addSolid(lx, lz, 0.5, 2.3);
-      this.emberSources.push(new THREE.Vector3(lx, 1.5, lz));
-    }
-    // warm light pools around the two plaza lanterns (only lit on higher quality)
-    for (const [lx, lz] of [[-9, 0], [9, 0], [-4, 12], [4, 12]]) {
-      const l = new THREE.PointLight(0xff9a48, 5, 10, 1.6);
-      l.position.set(lx, 1.6, lz);
-      this.root.add(l);
-      this.lanternLights.push(l);
+      mk(baseG, WM.stone, lx, 0.15, lz);
+      const pillar = mk(pillarG, WM.stone, lx, 0.72, lz);
+      const head = [mk(stoneHeadG, WM.stone, lx, 0, lz), mk(framesG, WM.stoneDark, lx, 0, lz), mk(boxG, MAT.glow, lx, 1.52, lz, false)];
+      const solid = this.addSolid(lx, lz, 0.5, 2.3);
+      const ember = new THREE.Vector3(lx, 1.5, lz);
+      this.emberSources.push(ember);
+      let light: THREE.PointLight | undefined;
+      if (lit.has(`${lx},${lz}`)) {
+        light = new THREE.PointLight(0xff9a48, 5, 10, 1.6);
+        light.position.set(lx, 1.6, lz);
+        this.root.add(light);
+        this.lanternLights.push(light);
+      }
+      this.props.addLantern(lx, lz, {
+        head,
+        pillar,
+        light,
+        solid,
+        // a broken lantern gives off no embers; they return with the restart
+        onBreak: () => {
+          const i = this.emberSources.indexOf(ember);
+          if (i >= 0) this.emberSources.splice(i, 1);
+        },
+        onRestore: () => {
+          if (!this.emberSources.includes(ember)) this.emberSources.push(ember);
+        }
+      });
     }
   }
 
@@ -801,6 +928,7 @@ export class World {
       b.add(rockGeometry(i * 7 + 3, 3), WM.rock, mtx(rx, s * 0.22, rz, 0, rand(0, TAU), 0, s * 1.3, s * 0.85, s * 1.1));
       b.add(rockGeometry(i * 7 + 5, 2, 0.28), WM.rock, mtx(rx + s * 1.15, s * 0.1, rz + s * 0.45, 0, rand(0, TAU), 0, s * 0.5, s * 0.4, s * 0.45));
       this.addSolid(rx, rz, s * 0.95, s * 1.5);
+      this.props.addRock(rx, rz, s);
     });
   }
 
@@ -851,16 +979,25 @@ export class World {
     const poleG = new THREE.CylinderGeometry(0.06, 0.08, 5.6, 8);
     const barG = new THREE.CylinderGeometry(0.04, 0.04, 1.15, 6).rotateZ(Math.PI / 2);
     for (const [bx, bz, ry] of pts) {
-      const base = new THREE.Matrix4().compose(new THREE.Vector3(bx, 0, bz), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), ry), new THREE.Vector3(1, 1, 1));
-      b.add(poleG, WM.woodDark, base.clone().multiply(mtx(0, 2.8, 0)));
-      b.add(barG, WM.woodDark, base.clone().multiply(mtx(0.55, 5.2, 0)));
+      // pole and cross bar are separate meshes: a cut pole drops its top, bar and cloth together
+      const pole = new THREE.Mesh(poleG, WM.woodDark);
+      pole.position.set(bx, 2.8, bz);
+      pole.castShadow = true;
+      pole.receiveShadow = true;
+      const bar = new THREE.Mesh(barG, WM.woodDark);
+      bar.position.set(bx + 0.55 * Math.cos(ry), 5.2, bz - 0.55 * Math.sin(ry));
+      bar.rotation.y = ry;
+      bar.castShadow = true;
+      bar.receiveShadow = true;
+      this.root.add(pole, bar);
       const c = new THREE.Mesh(clothG, cloth);
       c.position.set(bx, 3.45, bz);
       c.rotation.y = ry;
       c.translateX(0.04);
       c.castShadow = true;
       this.root.add(c);
-      this.addSolid(bx, bz, 0.3, 5.5);
+      const solid = this.addSolid(bx, bz, 0.3, 5.5);
+      this.props.addThin({ pole, H: 5.6, base: new THREE.Vector3(bx, 0, bz), topGeo: (len) => new THREE.CylinderGeometry(0.06, 0.07, len, 8), extras: [bar, c], solid, dark: true }, 2, 0.08);
     }
   }
 
@@ -1126,6 +1263,7 @@ export class World {
   }
 
   setQuality(p: QualityProfile) {
+    this.props.setQuality(p.grassDensity >= 1 ? 1 : p.grassDensity > 0 ? 0.6 : 0.35);
     this.grass.visible = p.grassDensity > 0;
     this.grass.count = Math.floor(this.grassMax * Math.max(0, p.grassDensity));
     const wantShadow = p.grassDensity >= 1;
@@ -1160,6 +1298,7 @@ export class World {
       }
       if (done) this.atmBlending = false;
     }
+    this.props.update(dt);
     this.fogScaleCur += (this.fogScale - this.fogScaleCur) * Math.min(1, dt * 1.2);
     if (Math.abs(this.fogScaleCur - 1) > 0.002 || this.fogScale !== 1) {
       const fog = this.scene.fog as THREE.Fog;
