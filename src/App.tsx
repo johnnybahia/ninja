@@ -249,6 +249,8 @@ export default function App() {
   // Banks a finished (or abandoned) run's Honra into the saved progress
   const bank = useCallback((summary: RunSummary, prevBest: number): RunResult => {
     const m0 = metaRef.current;
+    // a practice run (?wave=N) shows its summary but saves nothing
+    if (engineRef.current?.practice) return { summary, before: m0.honor, after: m0.honor, prevBest, prevBestWave: m0.bestWave, missions: [], streak: null };
     const out = bankRun(m0, summary, localDate());
     metaRef.current = out.meta;
     setMeta(out.meta);
@@ -309,7 +311,7 @@ export default function App() {
       onWaveMod: (m) => setWaveMod(m),
       onGameOver: (finalScore, _wave, _level, _kills, _combo, summary) => {
         const prevBest = bestScoreRef.current;
-        if (finalScore > prevBest) {
+        if (finalScore > prevBest && !engineRef.current?.practice) {
           bestScoreRef.current = finalScore;
           setBestScore(finalScore);
           try {
