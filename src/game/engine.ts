@@ -4286,6 +4286,139 @@ export class GameEngine {
     this.applyCineCamera(dt, lookTarget);
   }
 
+  private nearSolids: { x: number; z: number; r: number; h: number }[] = [];
+  private steerOut = { x: 0, z: 0 };
+
+  // Obstacle-aware heading for walking enemies. They used to take the straight line to their
+  // goal and let collide() shove them off whatever stood in the way: dead ahead of a rock,
+  // trunk or pillar that cancels the move and they stood there. This probes headings around
+  // the wanted one and takes the nearest that stays clear for a few metres, keeping to one
+  // side so it doesn't flip every frame; updateEnemies' stall detector forces a sidestep
+  private steer(e: EnemyInstance, wx: number, wz: number, maxLen: number, dt: number) {
+    const out = this.steerOut;
+    out.x = wx;
+    out.z = wz;
+    const ln = Math.hypot(wx, wz);
+    if (ln < 1e-4) return out;
+    const ax = wx / ln;
+    const az = wz / ln;
+    const look = Math.min(2.4 + e.r * 1.6, maxLen);
+    const near = this.nearSolids;
+    near.length = 0;
+    for (const s of this.solids) {
+      const reach = s.r + e.r + look;
+      const ox = s.x - e.pos.x;
+      const oz = s.z - e.pos.z;
+      if (ox * ox + oz * oz < reach * reach) near.push(s);
+    }
+    if (!near.length) {
+      e.steerT = 0;
+      e.steerSide = 0;
+      return out;
+    }
+    // distance a heading runs before touching a blocker (capped at `look`); the margin only
+    // applies from outside, so a heading along the surface of what it touches counts as clear
+    const run = (dx: number, dz: number) => {
+      let t = look;
+      for (const s of near) {
+        const ox = s.x - e.pos.x;
+        const oz = s.z - e.pos.z;
+        const d2 = ox * ox + oz * oz;
+        const rr = Math.min(s.r + e.r + 0.3, Math.sqrt(d2) - 0.01);
+        const proj = ox * dx + oz * dz;
+        if (proj <= 0 || rr <= 0) continue;
+        const perp2 = d2 - proj * proj;
+        if (perp2 >= rr * rr) continue;
+        const hit = proj - Math.sqrt(rr * rr - perp2);
+        if (hit < t) t = hit;
+      }
+      return t;
+    };
+    const turn = (a: number) => {
+      const c = Math.cos(a);
+      const s = Math.sin(a);
+      return { x: ax * c + az * s, z: az * c - ax * s };
+    };
+    const STEP = Math.PI / 16;
+    const wasActive = (e.steerT ?? 0) > 0;
+    const pref = e.steerSide || e.circleDir;
+    let bx = ax;
+    let bz = az;
+    let side = 0;
+    if ((e.escapeT ?? 0) > 0) {
+      e.escapeT = (e.escapeT ?? 0) - dt;
+      for (const a of [4, 6, 2, 8]) {
+        const h = turn(a * STEP * pref);
+        if (run(h.x, h.z) > look * 0.5) {
+          bx = h.x;
+          bz = h.z;
+          side = pref;
+          break;
+        }
+      }
+    } else if (run(ax, az) < look) {
+      let found = false;
+      // committed to a side: try it first (up to 90 degrees) before the other one
+      const order: number[] = [];
+      if (wasActive && e.steerSide) {
+        for (let k = 1; k <= 8; k++) order.push(k * pref);
+        for (let k = 1; k <= 8; k++) order.push(-k * pref);
+      } else {
+        for (let k = 1; k <= 16; k++) order.push(k * pref, -k * pref);
+      }
+      for (const o of order) {
+        const h = turn(o * STEP);
+        if (run(h.x, h.z) >= look * 0.98) {
+          bx = h.x;
+          bz = h.z;
+          side = Math.sign(o);
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        // boxed in: clearest heading that doesn't stray far, favouring the side already taken
+        let best = -1;
+        for (let k = 1; k <= 12; k++) {
+          for (const sg of [pref, -pref]) {
+            const h = turn(sg * k * STEP);
+            const sc = run(h.x, h.z) / look - k * 0.03 + (sg === pref ? 0.12 : 0);
+            if (sc > best) {
+              best = sc;
+              bx = h.x;
+              bz = h.z;
+              side = sg;
+            }
+          }
+        }
+      }
+    }
+    if (side !== 0) {
+      e.steerSide = side;
+      e.steerT = 0.7;
+    } else if (wasActive) {
+      e.steerT = (e.steerT ?? 0) - dt;
+      if (e.steerT <= 0) e.steerSide = 0;
+    }
+    if ((e.steerT ?? 0) > 0) {
+      // ease between the straight line and the detour so the turn reads as walking around
+      let sx = wasActive ? e.sdx ?? ax : ax;
+      let sz = wasActive ? e.sdz ?? az : az;
+      const k = Math.min(1, dt * 10);
+      sx += (bx - sx) * k;
+      sz += (bz - sz) * k;
+      const sl = Math.hypot(sx, sz) || 1;
+      e.sdx = sx / sl;
+      e.sdz = sz / sl;
+      out.x = e.sdx * ln;
+      out.z = e.sdz * ln;
+    } else {
+      out.x = bx * ln;
+      out.z = bz * ln;
+    }
+    return out;
+  }
+
   private updateEnemies(gdt: number) {
     this.enemyBlades.length = 0;
     const tokensFree = this.maxTokens() - this.tokensInUse();
@@ -4588,11 +4721,31 @@ export class GameEngine {
         }
       }
 
+      if (spd > 0 && (e.dodgeT ?? 0) <= 0) {
+        // aimed at the player the path ends at the player; anything past them is no obstacle
+        const s = this.steer(e, mvx, mvz, mvx * nx + mvz * nz > 0.9 ? d : 99, dt);
+        mvx = s.x;
+        mvz = s.z;
+      }
+      const px0 = e.pos.x;
+      const pz0 = e.pos.z;
       e.pos.x += mvx * spd * dt;
       e.pos.z += mvz * spd * dt;
       e.pos.addScaledVector(e.kb, dt);
       e.kb.multiplyScalar(Math.exp(-6 * dt));
       this.collide(e.pos, e.r);
+      if (spd > 0.01 && (e.dodgeT ?? 0) <= 0) {
+        // pushing against something and getting nowhere: take the other side for a moment
+        if (Math.hypot(e.pos.x - px0, e.pos.z - pz0) < spd * dt * 0.25) {
+          e.stuckT = (e.stuckT ?? 0) + dt;
+          if (e.stuckT > 0.45) {
+            e.stuckT = 0;
+            e.steerSide = -(e.steerSide || e.circleDir);
+            e.steerT = 1.2;
+            e.escapeT = 0.9;
+          }
+        } else e.stuckT = Math.max(0, (e.stuckT ?? 0) - dt * 2);
+      }
 
       const moving = spd > 0 ? Math.min(1, spd / e.speed) : 0;
       e.moveAmt += (moving - e.moveAmt) * Math.min(1, dt * 8);

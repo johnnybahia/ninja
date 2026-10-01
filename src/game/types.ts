@@ -184,6 +184,14 @@ export interface EnemyInstance {
   dodgeT?: number;
   dodgeX?: number;
   dodgeZ?: number;
+  // obstacle steering: side taken around a blocker, time left on it, smoothed heading,
+  // and the stall detector that forces a sidestep when pushing against something
+  steerSide?: number;
+  steerT?: number;
+  sdx?: number;
+  sdz?: number;
+  stuckT?: number;
+  escapeT?: number;
   postureBar?: THREE.Mesh;
   danger?: THREE.Sprite;
   dbMark?: THREE.Sprite;
