@@ -434,6 +434,8 @@ export class GameEngine {
   public themeMode: ThemeMode = 'three';
   // ?theme=N pins one theme for every wave (to look at them one by one)
   private themeForce: number | null = null;
+  /** ?wave=N starts a practice run at wave N (to see the Oni or a theme right away): nothing is saved */
+  public practice = false;
   private profile: QualityProfile = qualityProfile('high');
   private sunUv = new THREE.Vector2();
   public quality: Quality = 'high';
@@ -782,6 +784,9 @@ export class GameEngine {
     this.state = 'play';
     this.runOpen = true;
     this.heritageT = this.metaBonus.startSpecial > 0 ? 6 : 0;
+    const from = parseInt(new URLSearchParams(location.search).get('wave') ?? '', 10);
+    this.practice = Number.isFinite(from) && from > 1;
+    if (this.practice) this.wave = Math.min(40, from) - 1;
     this.nextWave();
     if (!this.isRunning) {
       this.isRunning = true;
@@ -945,6 +950,8 @@ export class GameEngine {
         break;
       }
     });
+    // practice with &fury=1: the Oni comes in at half life, so its Fury (shockwaves) starts at once
+    if (this.practice && boss && new URLSearchParams(location.search).get('fury') === '1') for (const e of spawned) if (e.type === 'boss') e.hp = e.maxHp * 0.5;
     if (mod?.id === 'ferro') for (const e of spawned) e.maxPosture *= 1.6;
     if (mod?.id === 'elite') {
       const pool = spawned.filter((e) => e.type === 'samurai');
@@ -3086,7 +3093,7 @@ export class GameEngine {
   public takeRunSummary(): RunSummary | null {
     if (!this.runOpen) return null;
     this.runOpen = false;
-    return this.makeSummary();
+    return this.practice ? null : this.makeSummary();
   }
 
   // Grade of the wave just cleared: staying unhit matters most, then speed, finishers, parries
