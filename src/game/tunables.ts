@@ -36,6 +36,8 @@ export const TUNE = {
   blockPosture: 0.7,
   arrowDmg: 11,
   arrowLead: 0.5,
+  // glow around the characters' silhouettes (a rim light that helps them read in the dark)
+  rim: 0.55,
   camLeadAmount: 0.12,
   legSwingBase: 0.55,
   legSwingRun: 0.38,
@@ -70,6 +72,7 @@ export const TUNABLES: Tunable[] = [
   { key: 'enemyHpScale', label: 'Inimigo: vida extra por onda', min: 0, max: 0.4, step: 0.01 },
   { key: 'arrowDmg', label: 'Flecha: dano', min: 2, max: 30, step: 1 },
   { key: 'arrowLead', label: 'Flecha: tiros que antecipam seu movimento', min: 0, max: 1, step: 0.05 },
+  { key: 'rim', label: 'Brilho de contorno dos personagens (×, 0 = sem brilho)', min: 0, max: 1.5, step: 0.05 },
   { key: 'legSwingBase', label: 'Balanço da perna (andando)', min: 0.1, max: 1.2, step: 0.02 },
   { key: 'legSwingRun', label: 'Balanço extra da perna (correndo)', min: 0, max: 1.2, step: 0.02 },
   { key: 'kneeSwingBase', label: 'Flexão do joelho (andando)', min: 0.1, max: 1.2, step: 0.02 },

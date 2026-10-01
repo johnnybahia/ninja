@@ -1209,7 +1209,7 @@ export class GameEngine {
       const tpl = characterIfReady('giant');
       if (tpl) {
         // a coloured rim glow marks the form (the Trovão blue, the Sombrio violet)
-        const glow = variant ? new THREE.Color(BOSS_COLOR[variant]).multiplyScalar(0.55) : undefined;
+        const glow = variant ? new THREE.Color(BOSS_COLOR[variant]).multiplyScalar(0.5) : undefined;
         rig = createClipRig(tpl, { lod: true, kind: 'oni', height: GIANT_HEIGHT, grips: { right: GIANT_GRIP }, rim: glow });
         // the great sword is modelled at human scale - sized to the giant's hand
         const sword = makeWeapon('greatsword');
@@ -5669,7 +5669,8 @@ export class GameEngine {
   // Dark scenes lean on the characters' rim light to read their silhouettes
   private applyRimBoost(k: number) {
     const boost = (r: RigInstance) => {
-      if (r.rim && r.rimBase) r.rim.copy(r.rimBase).multiplyScalar(k);
+      // (night asks for more rim light to read silhouettes, but never as much as it used to)
+      if (r.rim && r.rimBase) r.rim.copy(r.rimBase).multiplyScalar(Math.min(k, 1.6) * TUNE.rim);
     };
     boost(this.player.rig);
     for (const e of this.enemies) boost(e.rig);

@@ -281,7 +281,7 @@ export function patchCharacter(mat: THREE.Material, flash: { value: number }, ri
         '#include <emissivemap_fragment>',
         `#include <emissivemap_fragment>
         float rimF = 1.0 - clamp(dot(normalize(normal), normalize(vViewPosition)), 0.0, 1.0);
-        totalEmissiveRadiance += uRim * pow(rimF, 2.8) + vec3(1.0, 0.88, 0.8) * uFlash * 0.75;`
+        totalEmissiveRadiance += uRim * pow(rimF, 3.6) + vec3(1.0, 0.88, 0.8) * uFlash * 0.75;`
       );
   };
   mat.customProgramCacheKey = () => 'char';
