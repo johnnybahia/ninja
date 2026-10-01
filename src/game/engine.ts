@@ -4632,7 +4632,12 @@ export class GameEngine {
           if (boss) sfx.boom();
           else sfx.swing();
           // furious Oni: the slam sends a shockwave along the ground - jump it
-          if (boss && e.fury && st.kind === 'smash') this.spawnShock(e.pos.x + Math.sin(e.yaw) * 3.3, e.pos.z + Math.cos(e.yaw) * 3.3);
+          if (boss && st.kind === 'smash') {
+            const ix = e.pos.x + Math.sin(e.yaw) * 3.3;
+            const iz = e.pos.z + Math.cos(e.yaw) * 3.3;
+            this.world.props.slam(ix, iz, e.fury ? 3.4 : 2.6);
+            if (e.fury) this.spawnShock(ix, iz);
+          }
           const live = e.blade;
           this.cancelStrike(e);
           if (live) e.blade = live;
@@ -4876,7 +4881,14 @@ export class GameEngine {
     const P = this.player;
     for (let i = this.shocks.length - 1; i >= 0; i--) {
       const s = this.shocks[i];
+      const r0 = s.r;
       s.r += 12 * dt;
+      this.world.props.shock(s.x, s.z, r0, s.r, s);
+      // a low rolling wall of dust rides the ring
+      for (let k = this.quality === 'low' ? 2 : 4; k > 0; k--) {
+        const a = rand(0, TAU);
+        this.puff(s.x + Math.sin(a) * s.r, s.z + Math.cos(a) * s.r, 1, 2.2, Math.sin(a), Math.cos(a));
+      }
       s.mesh.scale.setScalar(s.r);
       (s.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 0.9 * (1 - s.r / 11));
       const dx = P.pos.x - s.x;
