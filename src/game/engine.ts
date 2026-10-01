@@ -31,7 +31,7 @@ import { PostFX, NINJA_LOOK, Quality, QualitySetting, QualityProfile, qualityPro
 import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
 import { createClipRig, Grip, OneShot, PlayOptions } from './clipRig';
-import { loadCharacter, loadWeapons, preloadModels, characterIfReady, CharacterTemplate, LAZY_CHARACTERS, type CharacterModel } from './models';
+import { loadCharacter, loadWeapons, loadLazyWeapons, weaponsReady, preloadModels, characterIfReady, CharacterTemplate, LAZY_CHARACTERS, type CharacterModel } from './models';
 import { COMBOS, SPECIAL_MOVES, RUSH, ENEMY_STRIKES, BOSS_STRIKES, FINISHERS, FINISHER_CLIP_LEN, Finisher, ClipMove } from './moves';
 import { BladeSeg, makeSeg, sweepVsCapsule, BLADE_SEG, MAGNET_REACH, HURT_BOTTOM, HURT_TOP } from './combat';
 import { DebugDraw } from './debugdraw';
@@ -69,13 +69,18 @@ const VARIANT_HEIGHT: Partial<Record<EnemyVariant, number>> = { brute: 2.8, monk
 const V3 = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
 const VARIANT_GRIP: Partial<Record<EnemyVariant, { right: Grip; left?: Grip }>> = {
   shinobi: { right: { axis: V3(0.731, -0.225, -0.644), edge: V3(-0.645, 0.08, -0.76) } },
-  raio: { right: { axis: V3(-0.236, 0.157, 0.959), edge: V3(0.583, -0.767, 0.269) } },
+  // claws on the knuckles: +Z along the forearm, +Y on the back of the hand (from the skeleton's rest pose)
+  raio: { right: { axis: V3(0, 1, 0.003), edge: V3(-0.272, -0.003, 0.962) }, left: { axis: V3(0, 0.998, 0.057), edge: V3(-0.334, 0.054, -0.941) } },
   nito: { right: { axis: V3(0.658, -0.383, -0.648), edge: V3(-0.581, 0.288, -0.761) }, left: { axis: V3(-0.728, -0.084, 0.68), edge: V3(-0.042, 0.996, 0.079) } },
   monk: { right: { axis: V3(0.323, -0.167, -0.931), edge: V3(-0.946, -0.057, -0.318) } }
 };
+// the weapons each fighter wields (right hand, left hand) - fetched in the background
+const VARIANT_WEAPONS: Partial<Record<EnemyVariant, [string, string]>> = { nito: ['dsfire', 'dsmagic'], raio: ['claw_r', 'claw_l'] };
 const FIGHTER_NAME: Partial<Record<EnemyVariant, string>> = { shinobi: 'Shinobi', raio: 'Lutador do Raio', nito: 'Samurai das Duas Espadas', monk: 'Samurai do Bō' };
 const SHINOBI_LIGHT = new THREE.Color(0.5, 1.7, 3.2);
 const RAIO_LIGHT = new THREE.Color(1.7, 1.3, 3.4);
+const FIRE_LIGHT = new THREE.Color(2.2, 0.85, 0.25);
+const MAGIC_LIGHT = new THREE.Color(1.3, 0.7, 2.6);
 // the named fighters, the wave each one joins at, and in what order they take turns
 const FIGHTER_ORDER: EnemyVariant[] = ['nito', 'shinobi', 'raio'];
 const FIGHTER_MIN: Partial<Record<EnemyVariant, number>> = { nito: 4, shinobi: 5, raio: 6 };
@@ -829,6 +834,7 @@ export class GameEngine {
     this.world.setTheme(this.themeForce ?? 0, true);
     // the new fighters load in the background while the first waves are fought
     LAZY_CHARACTERS.forEach((id) => void loadCharacter(id).catch(() => undefined));
+    void loadLazyWeapons();
     this.paused = false;
     this.state = 'play';
     this.runOpen = true;
@@ -843,7 +849,7 @@ export class GameEngine {
         this.wave = Math.min(40, from) - 1;
         this.nextWave();
       };
-      Promise.race([Promise.allSettled(LAZY_CHARACTERS.map(loadCharacter)), new Promise((r) => setTimeout(r, 8000))]).then(go);
+      Promise.race([Promise.allSettled([...LAZY_CHARACTERS.map(loadCharacter), loadLazyWeapons()]), new Promise((r) => setTimeout(r, 8000))]).then(go);
     } else this.nextWave();
     if (!this.isRunning) {
       this.isRunning = true;
@@ -1080,9 +1086,9 @@ export class GameEngine {
     const HINTS: Partial<Record<EnemyVariant, [string, string]>> = {
       brute: ['Novo inimigo: Brutamontes', 'Pule a varrida e castigue a recuperação'],
       monk: ['Novo inimigo: Samurai do Bō', 'Ataca de longe: feche a distância com a esquiva'],
-      nito: ['Novo inimigo: Samurai das Duas Espadas', 'Duas lâminas por golpe: apare ou afaste-se'],
+      nito: ['Novo inimigo: Samurai das Duas Espadas', 'Espadas gêmeas de fogo e magia: apare ou afaste-se'],
       shinobi: ['Novo inimigo: Shinobi', 'Veloz: some e reaparece perto, atira estrelas'],
-      raio: ['Novo inimigo: Lutador do Raio', 'Combos relâmpago e teletransporte: esquive no ritmo']
+      raio: ['Novo inimigo: Lutador do Raio', 'Garras em combos relâmpago e teletransporte: esquive no ritmo']
     };
     let hintAt = 2.3;
     for (const v of ['brute', 'monk', 'nito', 'shinobi', 'raio'] as EnemyVariant[]) {
@@ -1112,7 +1118,8 @@ export class GameEngine {
   // A fighter can only appear once its model has finished loading (it loads in the background)
   private fighterReady(v: EnemyVariant) {
     const m = VARIANT_MODEL[v];
-    return !!m && !!characterIfReady(m);
+    const w = VARIANT_WEAPONS[v];
+    return !!m && !!characterIfReady(m) && (!w || weaponsReady(w));
   }
 
   // One spot on the ring around the arena (never on top of the player or a solid prop)
@@ -1218,6 +1225,7 @@ export class GameEngine {
     let weaponObj: THREE.Object3D | null = null;
     let weaponObjL: THREE.Object3D | null = null;
     let bladeKey = '';
+    let bladeKeyL = '';
     let hp = 60;
     let speed = 3.7;
     let r = 0.5;
@@ -1240,13 +1248,25 @@ export class GameEngine {
       else rig = buildCharacter('samurai');
       // the Samurai do Bō fights with a long staff, the Brutamontes with an oversized blade,
       // the Samurai das Duas Espadas with one in each hand
-      weaponObj = makeWeapon(variant === 'monk' ? 'bo' : 'ekatana');
-      bladeKey = variant === 'monk' ? 'bo' : 'ekatana';
-      if (variant === 'brute') weaponObj.scale.setScalar(1.45);
-      rig.hand.add(weaponObj);
-      if (variant === 'nito' && fm) {
-        weaponObjL = makeWeapon('ekatana');
+      // (the Lutador do Raio has claws on both fists, the Duas Espadas the Dancer's pair)
+      const own = fm && variant ? VARIANT_WEAPONS[variant] : undefined;
+      if (own && weaponsReady(own)) {
+        bladeKey = own[0];
+        bladeKeyL = own[1];
+        weaponObj = makeWeapon(own[0]);
+        weaponObjL = makeWeapon(own[1]);
+        rig.hand.add(weaponObj);
         rig.handL.add(weaponObjL);
+      } else {
+        weaponObj = makeWeapon(variant === 'monk' ? 'bo' : 'ekatana');
+        bladeKey = variant === 'monk' ? 'bo' : 'ekatana';
+        if (variant === 'brute') weaponObj.scale.setScalar(1.45);
+        rig.hand.add(weaponObj);
+        if (variant === 'nito' && fm) {
+          weaponObjL = makeWeapon('ekatana');
+          bladeKeyL = 'ekatana';
+          rig.handL.add(weaponObjL);
+        }
       }
       hp = 60 * hpMul;
       speed = 3.7;
@@ -1417,11 +1437,19 @@ export class GameEngine {
     if (rig.clip && weaponObj) {
       enemy.weapon = weaponObj;
       enemy.bladeKey = bladeKey;
-      if (weaponObjL) enemy.weaponL = weaponObjL;
+      if (weaponObjL) {
+        enemy.weaponL = weaponObjL;
+        enemy.bladeKeyL = bladeKeyL;
+      }
       // a sheath of light on the Shinobi's sword, arcs of lightning on the Lutador's
       const seg = BLADE_SEG[bladeKey];
       if (variant === 'shinobi' && seg && characterIfReady('shinobi')) enemy.fx = [makeBladeGlow(weaponObj, SHINOBI_LIGHT, seg.base, seg.tip)];
-      if (variant === 'raio' && seg && characterIfReady('raio')) enemy.fx = [makeLightning(weaponObj, RAIO_LIGHT, seg.base, seg.tip)];
+      const segL = BLADE_SEG[bladeKeyL];
+      if (variant === 'raio' && seg && segL && weaponObjL && bladeKey === 'claw_r') {
+        enemy.fx = [makeLightning(weaponObj, RAIO_LIGHT, seg.base, seg.tip), makeLightning(weaponObjL, RAIO_LIGHT, segL.base, segL.tip)];
+      } else if (variant === 'nito' && seg && segL && weaponObjL && bladeKey === 'dsfire') {
+        enemy.fx = [makeBladeGlow(weaponObj, FIRE_LIGHT, seg.base, seg.tip), makeBladeGlow(weaponObjL, MAGIC_LIGHT, segL.base, segL.tip)];
+      }
     }
 
     this.scene.add(rig.root);
@@ -2929,7 +2957,7 @@ export class GameEngine {
   // The left-hand sword's segment (only the Samurai das Duas Espadas has one)
   private readEnemySecondBlade(e: EnemyInstance, foot: boolean): BladeSeg | null {
     if (foot || !e.weaponL) return null;
-    const spec = BLADE_SEG.ekatana;
+    const spec = BLADE_SEG[e.bladeKeyL ?? 'ekatana'];
     const out = this.enemyBladeCurL;
     e.weaponL.localToWorld(out.a.set(0, 0, spec.base));
     e.weaponL.localToWorld(out.b.set(0, 0, spec.tip));
@@ -3772,15 +3800,16 @@ export class GameEngine {
         return { kind: 'slash', clip: 'eSwordSlash', hit: 0.7, from: 0.12, speed: 1.7 * sp, dmg: 9, reach: 2.4, perilous: false } as FS;
       }
       case 'raio': {
-        // karate with the sword in hand: jab, cross, sword cut... ending in a kick or a spin
+        // Wolverine-style: claw swipes in quick left-right chains, ending in a berserk spin
+        // (jump it) or a kick
         if (last) {
-          if (r < 0.4) return { kind: 'sweep', clip: 'spin', hit: 0.43, from: 0.1, speed: 1, dmg: 14, reach: 3.1, perilous: true } as FS;
-          return { kind: 'slash', clip: 'kick1', hit: 0.68, from: 0.15, speed: 1.7 * sp, dmg: 10, reach: 2.6, perilous: false, limb: 'foot' } as FS;
+          if (r < 0.45) return { kind: 'sweep', clip: 'spin', hit: 0.43, from: 0.1, speed: 1, dmg: 16, reach: 3.1, perilous: true } as FS;
+          return { kind: 'slash', clip: 'kick1', hit: 0.68, from: 0.15, speed: 1.7 * sp, dmg: 12, reach: 2.6, perilous: false, limb: 'foot' } as FS;
         }
         const step = e.t % 3;
-        if (step === 0) return { kind: 'slash', clip: 'jabR', hit: 0.25, speed: 1.6 * sp, dmg: 6, reach: 2.3, perilous: false } as FS;
-        if (step === 1) return { kind: 'slash', clip: 'cross', hit: 0.28, speed: 1.6 * sp, dmg: 8, reach: 2.4, perilous: false } as FS;
-        return { kind: 'slash', clip: 'attack', hit: 0.5, speed: 1.5 * sp, dmg: 10, reach: 2.6, perilous: false } as FS;
+        if (step === 0) return { kind: 'slash', clip: 'jabL', hit: 0.33, speed: 1.75 * sp, dmg: 9, reach: 2.5, perilous: false } as FS;
+        if (step === 1) return { kind: 'slash', clip: 'jabR', hit: 0.25, speed: 1.75 * sp, dmg: 9, reach: 2.5, perilous: false } as FS;
+        return { kind: 'slash', clip: 'cross', hit: 0.28, speed: 1.6 * sp, dmg: 12, reach: 2.6, perilous: false } as FS;
       }
       case 'monk': {
         // the staff's whirl now and then (jump it); the usual cuts and jabs otherwise

@@ -62,7 +62,24 @@ SPECS = {
     'arrow': dict(src='BOW AND ARROW/BLEND FILE/bow and arow.blend', zip='arco e flecha inimigo 1.zip', keep=['Cylinder.001'],
                   tip=(1, 0, 0), edge=(0, 1, 0), grip=0.0, length=1.0,
                   colors={'Material.003': (0.72, 0.72, 0.74, 0.9, 0.3), 'Material.004': (0.62, 0.48, 0.3, 0.0, 0.75)}),
+    # The Dancer's twin swords (one file): fire in the right hand, magic in the left. The
+    # flames card belongs to the fire sword but is left out of the blade axis/length.
+    'dsfire': dict(src='dancers swords dark souls espada dupla.glb', keep=['sword_fire'], axis=['dancersword_fire'], axis_len=True,
+                   tip=(0, 0, -1), edge='sagitta', grip=0.1, length=2.0),
+    'dsmagic': dict(src='dancers swords dark souls espada dupla.glb', keep=['sword_magic'], tip=(0, 0, -1), edge='sagitta', grip=0.1, length=2.0),
 }
+
+# Hand weapons (one source file, a mesh per hand; the file also holds crow talons, a caestus and
+# manikin claws - only the claws are used so far): +Z is the punch / claw direction, +Y the
+# back of the hand, the origin at the knuckles - the same convention as a held blade
+FIST_SRC = 'armas para usar com luta.glb'
+for _n, (_r, _l, _tip, _edge, _len, _grip) in {
+    'claw': ('Object_17', 'Object_19', (-1, 0, 0), (0, 0, 1), 0.8, 0.12),
+}.items():
+    # the pair sits side by side along source z: each back of hand faces outward
+    for _side, _obj, _sgn in (('r', _r, 1), ('l', _l, -1)):
+        _e = tuple(_sgn * c for c in _edge)
+        SPECS[f'{_n}_{_side}'] = dict(src=FIST_SRC, keep=[_obj + ' '], tip=_tip, edge=_e, grip=_grip, length=_len)
 
 # three.js (x, y, z) -> Blender (x, -z, y)
 C = Matrix(((1, 0, 0, 0), (0, 0, -1, 0), (0, 1, 0, 0), (0, 0, 0, 1)))

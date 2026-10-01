@@ -167,8 +167,9 @@ export interface EnemyInstance {
   // blade-accurate strikes (mocap enemies): the held weapon and its cutting extent, and
   // the window in which the weapon (or a kicking foot) can actually reach the player
   weapon?: THREE.Object3D;
-  weaponL?: THREE.Object3D; // the second sword of the Samurai das Duas Espadas
+  weaponL?: THREE.Object3D; // the second weapon: the left sword / claw (Duas Espadas, Lutador do Raio)
   bladeKey?: string;
+  bladeKeyL?: string;
   fx?: { update(t: number): void; dispose(): void }[]; // glow / lightning on the weapon
   blade?: {
     st: EnemyStrike;
