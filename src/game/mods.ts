@@ -30,3 +30,31 @@ export function pickWaveMod(wave: number, prev: ModId | null, rnd: () => number 
   const pool = WAVE_MODS.filter((m) => m.id !== prev);
   return pool[Math.floor(rnd() * pool.length)] ?? null;
 }
+
+// Wave goals: now and then a wave asks for something other than "kill them all". Never on
+// boss waves, and never together with a modifier - one twist per wave is enough.
+export type GoalId = 'duelo' | 'resistir' | 'capitao';
+
+export interface WaveGoal {
+  id: GoalId;
+  name: string;
+  glyph: string;
+  desc: string;
+  honor: number; // extra Honra for clearing the wave
+}
+
+export const WAVE_GOALS: WaveGoal[] = [
+  { id: 'duelo', name: 'Duelo', glyph: '決', desc: 'Um só mestre samurai: vença o duelo', honor: 16 },
+  { id: 'resistir', name: 'Resistir', glyph: '防', desc: 'Aguente até o amanhecer: os reforços não param', honor: 18 },
+  { id: 'capitao', name: 'Capitão', glyph: '将', desc: 'Derrote o capitão de aura vermelha: o bando foge', honor: 18 }
+];
+
+export const GOAL_MIN_WAVE = 3;
+export const GOAL_CHANCE = 0.6;
+
+/** The goal for `wave`, or null. Never the same one twice in a row. */
+export function pickWaveGoal(wave: number, prev: GoalId | null, rnd: () => number = Math.random): WaveGoal | null {
+  if (wave < GOAL_MIN_WAVE || wave % 4 === 0 || rnd() > GOAL_CHANCE) return null;
+  const pool = WAVE_GOALS.filter((g) => g.id !== prev);
+  return pool[Math.floor(rnd() * pool.length)] ?? null;
+}

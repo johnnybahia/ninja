@@ -90,7 +90,7 @@ export default function App() {
   const [showTemple, setShowTemple] = useState(false);
   const [runHonor, setRunHonor] = useState(0);
   const [cardOffer, setCardOffer] = useState<CardOffer[] | null>(null);
-  const [bossBar, setBossBar] = useState<{ hp: number; max: number; fury: boolean } | null>(null);
+  const [bossBar, setBossBar] = useState<{ hp: number; max: number; fury: boolean; name: string } | null>(null);
   const [waveMod, setWaveMod] = useState<{ id: string; name: string; glyph: string; desc: string } | null>(null);
   const [runResult, setRunResult] = useState<RunResult | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -676,7 +676,7 @@ export default function App() {
           {bossBar && (
             <div className="absolute left-1/2 -translate-x-1/2 top-[calc(var(--sat)+10px)] w-[min(38vw,380px)] pointer-events-none">
               <div className={`text-center font-serif text-xs font-extrabold tracking-[0.3em] drop-shadow mb-0.5 ${bossBar.fury ? 'text-[#ff5a3a]' : 'text-[var(--paper)]'}`}>
-                鬼 ONI{bossBar.fury ? ' · 怒' : ''}
+                {bossBar.name}{bossBar.fury ? ' · 怒' : ''}
               </div>
               <div className="relative h-2.5 rounded-sm bg-[rgba(10,8,14,0.75)] border border-[rgba(239,230,210,0.4)] overflow-hidden">
                 <div
