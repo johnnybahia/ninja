@@ -160,6 +160,12 @@ const STAMINA_REGEN = 30; // per second
 // Incoming hits at or below this (arrows, an archer's kick) only jolt the Rōnin - he keeps
 // moving and swinging; anything heavier knocks him out of what he was doing
 const LIGHT_HIT = 10;
+// Healing gourd: the clip runs fast (about a second in all); half the sip lands as the gourd
+// reaches the mouth, the rest near the end, and a press during a move waits this long for it
+const HEAL_SPEED = 1.8;
+const HEAL_FIRST_AT = 0.3;
+const HEAL_SECOND_LEFT = 0.25;
+const HEAL_BUFFER = 0.35;
 
 // Canvas sprites shared by every enemy: the perilous-attack kanji and the deathblow mark
 let dangerTex: THREE.CanvasTexture | null = null;
@@ -365,6 +371,8 @@ export class GameEngine {
     lastPostureSent: -1,
     heals: 3,
     healT: 0,
+    healDur: 0,
+    healHalf: false,
     healDone: false,
     dbReady: false
   };
@@ -539,6 +547,7 @@ export class GameEngine {
   // the game-over screen
   private act: PlayerAct | null = null;
   private actQueued = false;
+  private healBufT = 0;
   private deadT = -1;
   private rootTmp = new THREE.Vector2();
   private bladePrev = makeSeg();
@@ -942,6 +951,7 @@ export class GameEngine {
     this.player.lastPostureSent = -1;
     this.player.heals = this.healsPerWave();
     this.player.healT = 0;
+    this.healBufT = 0;
     this.player.dbReady = false;
     this.callbacks.onHealsChange?.(this.player.heals);
     this.callbacks.onDeathblowReady?.(false);
@@ -3684,22 +3694,43 @@ export class GameEngine {
 
   // Healing gourd: a short drink that leaves you open, three sips per wave
   public heal() {
-    if (this.state !== 'play' || this.player.heals <= 0 || this.player.healT > 0) return;
-    if (this.player.staggerT > 0 || this.cine || this.player.hp >= this.player.maxHp) return;
-    if (this.act && this.act.kind !== 'draw') return;
-    this.player.heals--;
-    this.player.healDone = false;
-    if (this.player.rig.clip) {
-      // a slow, committed drink (the "power up" clip's head-back moment)
-      const speed = 1.3;
-      this.player.healT = (2.1 - 0.3) / speed;
-      this.startAct('heal', 'powerUp', { from: 0.3, to: 2.1, speed, cancel: 99, end: 2.1, fadeIn: 0.15 });
+    const P = this.player;
+    if (this.state !== 'play' || P.heals <= 0 || P.healT > 0 || P.hp <= 0) return;
+    if (P.staggerT > 0 || this.cine || P.hp >= P.maxHp) return;
+    if (this.act && this.act.kind !== 'draw') {
+      // mid-move: the press waits for the recovery (same rule as a dodge), not lost
+      if (!this.freeToCancel()) {
+        this.healBufT = HEAL_BUFFER;
+        return;
+      }
+      this.cancelAct(0.1);
+    }
+    this.healBufT = 0;
+    P.heals--;
+    P.healHalf = false;
+    P.healDone = false;
+    if (P.rig.clip) {
+      // the "power up" clip's head-back moment, played fast
+      P.healDur = (2.1 - 0.3) / HEAL_SPEED;
+      P.healT = P.healDur;
+      this.startAct('heal', 'powerUp', { from: 0.3, to: 2.1, speed: HEAL_SPEED, cancel: 99, end: 2.1, fadeIn: 0.1 });
     } else {
-      this.player.healT = 0.85;
-      this.player.anim = { kind: 'drink', t: 0, dur: 0.85, side: 0 };
+      P.healDur = 0.85;
+      P.healT = P.healDur;
+      P.anim = { kind: 'drink', t: 0, dur: 0.85, side: 0 };
     }
     this.input.guardHeld = false;
-    this.callbacks.onHealsChange?.(this.player.heals);
+    this.callbacks.onHealsChange?.(P.heals);
+  }
+
+  // One half of the sip's healing
+  private healPart(amt: number, first: boolean) {
+    const P = this.player;
+    P.hp = Math.min(P.maxHp, P.hp + amt);
+    this.callbacks.onHpChange(P.hp, P.maxHp);
+    this.emitParticles(P.pos.x, P.pos.y + 1.2, P.pos.z, first ? 26 : 14, 0x7affb0, 3, 2.5, -1, 0.9);
+    this.spawnLabel(P.pos.x, P.pos.y + 2.4, P.pos.z, `+${amt}`, '#7affb0', 1.1);
+    if (first) sfx.heal();
   }
 
   private addPlayerPosture(v: number) {
@@ -4483,15 +4514,24 @@ export class GameEngine {
     if (this.gourd) this.gourd.visible = this.player.healT > 0;
     if (this.player.healT > 0) {
       this.player.healT -= dt;
-      if (!this.player.healDone && this.player.healT <= 0.35) {
-        this.player.healDone = true;
-        const amt = Math.round(this.player.maxHp * 0.45);
-        this.player.hp = Math.min(this.player.maxHp, this.player.hp + amt);
-        this.callbacks.onHpChange(this.player.hp, this.player.maxHp);
-        this.emitParticles(this.player.pos.x, this.player.pos.y + 1.2, this.player.pos.z, 26, 0x7affb0, 3, 2.5, -1, 0.9);
-        this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.4, this.player.pos.z, `+${amt}`, '#7affb0', 1.1);
-        sfx.heal();
+      const total = Math.round(this.player.maxHp * 0.45);
+      const firstAmt = Math.round(total / 2);
+      if (!this.player.healHalf && this.player.healDur - this.player.healT >= HEAL_FIRST_AT) {
+        this.player.healHalf = true;
+        this.healPart(firstAmt, true);
       }
+      if (!this.player.healDone && this.player.healT <= HEAL_SECOND_LEFT) {
+        this.player.healDone = true;
+        if (!this.player.healHalf) {
+          this.player.healHalf = true;
+          this.healPart(firstAmt, true);
+        }
+        this.healPart(total - firstAmt, false);
+      }
+    }
+    if (this.healBufT > 0) {
+      this.healBufT -= dt;
+      if (this.player.healT <= 0 && this.freeToCancel()) this.heal();
     }
     const dbReady = !!this.findDeathblowTarget();
     if (dbReady !== this.player.dbReady) {
