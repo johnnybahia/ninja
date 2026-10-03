@@ -119,6 +119,8 @@ export default function App() {
   const [cardOffer, setCardOffer] = useState<CardOffer[] | null>(null);
   const [bossBar, setBossBar] = useState<{ hp: number; max: number; fury: boolean; name: string } | null>(null);
   const [waveMod, setWaveMod] = useState<{ id: string; name: string; glyph: string; desc: string } | null>(null);
+  // shots being drawn or flying at the player from outside the view (marked at the screen edge)
+  const [threats, setThreats] = useState<{ a: number; u: number }[]>([]);
   const [runResult, setRunResult] = useState<RunResult | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [bestScore, setBestScore] = useState<number>(() => {
@@ -346,6 +348,7 @@ export default function App() {
       onCardOffer: (offer) => setCardOffer(offer),
       onBossChange: (b) => setBossBar(b),
       onWaveMod: (m) => setWaveMod(m),
+      onThreats: (t) => setThreats(t),
       onGameOver: (finalScore, wave, _level, _kills, _combo, summary) => {
         const prevBest = bestScoreRef.current;
         if (finalScore > prevBest && !engineRef.current?.practice) {
@@ -1206,6 +1209,21 @@ export default function App() {
               <span className="relative">{startingGame ? `Carregando… ${loadPct}%` : 'Entrar em combate'}</span>
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Off-screen shooters and shots in flight: a marker at the edge pointing at them */}
+      {gameState === 'play' && !cinematic && threats.length > 0 && (
+        <div className="fixed inset-0 z-[26] pointer-events-none" aria-hidden="true">
+          {threats.map((t, i) => (
+            <div
+              key={i}
+              className="absolute left-1/2 top-[46%] -ml-3 -mt-3 w-6 h-6 flex items-center justify-center"
+              style={{ transform: `rotate(${t.a}rad) translateY(calc(-1 * min(38vh, 36vw)))`, opacity: 0.55 + 0.4 * t.u }}
+            >
+              <span className={`block text-[#ff5a4a] text-2xl leading-none drop-shadow-[0_0_6px_rgba(255,60,40,0.9)] ${t.u >= 1 ? 'arcade-blink' : ''}`}>▲</span>
+            </div>
+          ))}
         </div>
       )}
 

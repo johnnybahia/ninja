@@ -256,6 +256,8 @@ export interface ProjectileInstance {
   aoeR?: number;
   kb?: number;
   noSolid?: boolean;
+  owner?: EnemyInstance; // who loosed it (a parried arrow goes back to them)
+  reflected?: boolean;
 }
 
 export interface GameSettings {

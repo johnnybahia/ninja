@@ -130,6 +130,11 @@ export const sfx = {
     tone(196, 184, 1.0, 'triangle', 0.1);
     noise(0.25, 0.3, 900);
   },
+  // Someone out of sight is drawing a bow: two quick rising chirps
+  warn: () => {
+    tone(880, 1180, 0.08, 'square', 0.06);
+    setTimeout(() => tone(1180, 1560, 0.09, 'square', 0.05), 80);
+  },
   // Perilous attack warning
   danger: () => {
     tone(740, 740, 0.35, 'square', 0.07);

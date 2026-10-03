@@ -33,7 +33,7 @@ import { buildCharacter } from './characters';
 import { createClipRig, Grip, OneShot, PlayOptions } from './clipRig';
 import { loadCharacter, loadWeapons, loadLazyWeapons, weaponsReady, preloadModels, characterIfReady, CharacterTemplate, LAZY_CHARACTERS, type CharacterModel } from './models';
 import { COMBOS, SPECIAL_MOVES, RUSH, ENEMY_STRIKES, BOSS_STRIKES, FINISHERS, FINISHER_CLIP_LEN, Finisher, ClipMove } from './moves';
-import { BladeSeg, makeSeg, sweepVsCapsule, BLADE_SEG, MAGNET_REACH, HURT_BOTTOM, HURT_TOP } from './combat';
+import { BladeSeg, makeSeg, segSegDist, sweepVsCapsule, BLADE_SEG, MAGNET_REACH, HURT_BOTTOM, HURT_TOP } from './combat';
 import { DebugDraw } from './debugdraw';
 import { animateCharacter, animateDeath } from './animation';
 import { TUNE } from './tunables';
@@ -179,6 +179,8 @@ const IMPACT_BLOCK = new THREE.Color(1.8, 1.5, 1.1);
 
 // Sekiro-style combat tuning
 const DEFLECT_WINDOW = 0.2;
+const CUT_MIN_SPEED = 5; // m/s: the tip must be moving at least this fast to cut a shot out of the air
+const SHOT_BACK_SPEED = 26;
 const GHOST_DASH = new THREE.Color(0x2a2464);
 const GHOST_PERFECT = new THREE.Color(0x6a4a18);
 const DUST_BASE = new THREE.Color(0.55, 0.5, 0.44); // seconds after pressing guard that an incoming strike is deflected
@@ -255,6 +257,8 @@ export interface GameEngineCallbacks {
   onHonorChange?: (honor: number) => void;
   onBossChange?: (boss: { hp: number; max: number; fury: boolean; name: string } | null) => void;
   onWaveMod?: (mod: { id: string; name: string; glyph: string; desc: string } | null) => void;
+  // shots being drawn or in flight toward the player from outside the view: angle from the camera's forward (rad, + = right)
+  onThreats?: (threats: { a: number; u: number }[]) => void;
 }
 
 // A committed move or reaction on the mocap rig. Times are clip seconds (see moves.ts).
@@ -467,6 +471,16 @@ export class GameEngine {
   public wave = 0;
   private waveTimer = 0;
   private clearedShown = false;
+  // defending against arrows and stars: the weapon's path this frame and last, warnings, zoom pacing
+  private cutPrev = makeSeg();
+  private cutCur = makeSeg();
+  private cutPrevOk = false;
+  private cutActive = false;
+  private cutV = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+  private warnedShooters = new Set<EnemyInstance>();
+  private lastThreatKey = '';
+  private threatT = 0;
+  private lastParryZoom = -99;
   // enemies of the wave waiting to step in, and how many of each kind may be in the fight
   // Conquista mode (see outposts.ts): the field has enemy posts; walking up to one wakes its
   // garrison, whose captain you defeat to take it. Each post is a "wave" for scaling and Honra.
@@ -3296,7 +3310,8 @@ export class GameEngine {
         pos: new THREE.Vector3(ox, oy, oz),
         vel: new THREE.Vector3((ax * c - az * sn) * speed, 0, (ax * sn + az * c) * speed),
         dmg,
-        life: 2
+        life: 2,
+        owner: e
       });
       sfx.arrow();
     };
@@ -4403,6 +4418,8 @@ export class GameEngine {
         this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'CONTRA-ATAQUE!', '#ffd166', 1.3);
         this.triggerSlowmo(0.35, 0.3);
       }
+      // a short push-in on the defences worth seeing: the wave's first, a thrust, the Oni, a captain
+      if (st.kind === 'thrust' || this.waveStat.deflects === 1 || e.type === 'boss' || e.captain) this.parryZoom(st.kind === 'thrust');
       e.staggerT = e.type === 'boss' ? 0.18 : 0.32;
       e.anim = { kind: 'erecoil', t: 0, dur: 0.32, side: 0 };
       this.enemyClip(e, 'hit1', { from: 0.1, to: 0.75, speed: 1.6 });
@@ -4713,7 +4730,8 @@ export class GameEngine {
       aoeR: o.aoeR,
       kb: o.kb,
       noSolid: o.noSolid,
-      grav: o.grav
+      grav: o.grav,
+      owner: o.owner
     };
     if (p.pierce) p.hit = new Set();
     this.projectiles.push(p);
@@ -5836,7 +5854,8 @@ export class GameEngine {
         pos: new THREE.Vector3(h.x, h.y, h.z),
         vel: new THREE.Vector3(Math.sin(a) * 17, 0, Math.cos(a) * 17),
         dmg: 7,
-        life: 1.8
+        life: 1.8,
+        owner: e
       });
     }
     this.emitParticles(h.x, h.y, h.z, 10, 0x5ad0ff, 5, 1.5, 14, 0.3);
@@ -6020,7 +6039,155 @@ export class GameEngine {
     }
   }
 
+  // Is the player's weapon cutting through the air right now (a swing with the blade moving fast)?
+  private stepCutBlade(dt: number): boolean {
+    const a = this.act;
+    const w = this.weapons[this.activeWeaponIdx];
+    this.cutActive = !!a && (a.kind === 'attack' || a.kind === 'special') && !!a.move && (a.move.eff ?? 'sword') === 'sword' && w?.kind === 'melee' && a.windows.length > 0 && !!this.player.rig.clip;
+    if (!this.cutActive) return false;
+    this.cutCur.a.copy(this.bladeCur.a);
+    this.cutCur.b.copy(this.bladeCur.b);
+    return this.cutPrevOk && this.cutCur.b.distanceTo(this.cutPrev.b) / Math.max(dt, 1e-3) >= CUT_MIN_SPEED;
+  }
+
+  // The blade's path since last frame against the shot's path this frame (a little generous,
+  // like every other hit test: TUNE.hitAssist)
+  private bladeCutsShot(p: ProjectileInstance, dt: number): boolean {
+    const [c, d, pa, pb] = this.cutV;
+    pa.set(p.pos.x - p.vel.x * dt, p.pos.y - p.vel.y * dt, p.pos.z - p.vel.z * dt);
+    pb.copy(p.pos);
+    const reach = 0.3 + 0.3 * TUNE.hitAssist;
+    for (const k of [0.25, 0.5, 0.75, 1]) {
+      c.lerpVectors(this.cutPrev.a, this.cutCur.a, k);
+      d.lerpVectors(this.cutPrev.b, this.cutCur.b, k);
+      if (segSegDist(c, d, pa, pb) < reach) return true;
+    }
+    return false;
+  }
+
+  // Does the shot come from inside the cone the player is facing?
+  private shotComesFromFront(p: ProjectileInstance): boolean {
+    if (TUNE.arrowDirectional <= 0.5) return true;
+    const vl = Math.hypot(p.vel.x, p.vel.z) || 1;
+    const dot = (-p.vel.x / vl) * Math.sin(this.player.yaw) + (-p.vel.z / vl) * Math.cos(this.player.yaw);
+    return dot >= Math.cos((TUNE.arrowCone * Math.PI) / 180);
+  }
+
+  // A shot is stopped by the weapon: cut out of the air by a swing, or parried with a timed
+  // guard. Seen coming (inside the cone) it goes back at whoever loosed it. true = it lives on.
+  private defendShot(p: ProjectileInstance, how: 'cut' | 'parry', front: boolean): boolean {
+    const P = this.player;
+    const mid = this.tmpV.copy(p.pos);
+    this.impacts.spawn(mid, IMPACT_DEFLECT, 1.4, 0.14);
+    this.emitParticles(mid.x, mid.y, mid.z, 16, 0xffb347, 7, 2, 16, 0.25);
+    sfx.clang();
+    this.waveStat.deflects++;
+    this.deflectsTotal++;
+    if (how === 'parry') this.playerDeflectAnim();
+    if (!(TUNE.arrowReflect > 0.5 && front)) {
+      this.spawnLabel(P.pos.x, P.pos.y + 2.5, P.pos.z, 'DESVIOU!', '#8fe0c8', 1);
+      return false;
+    }
+    const o = p.owner && !p.owner.dead && !p.owner.flee ? p.owner : null;
+    let dx = o ? o.pos.x - p.pos.x : -p.vel.x;
+    let dz = o ? o.pos.z - p.pos.z : -p.vel.z;
+    const dl = Math.hypot(dx, dz) || 1;
+    dx /= dl;
+    dz /= dl;
+    p.vel.set(dx * SHOT_BACK_SPEED, 0, dz * SHOT_BACK_SPEED);
+    p.friendly = true;
+    p.dmg = Math.round(p.dmg * 2.2);
+    p.life = 1.4;
+    p.hit = new Set();
+    p.reflected = true;
+    this.spawnLabel(P.pos.x, P.pos.y + 2.5, P.pos.z, 'REBATIDA!', '#ffd166', 1.3);
+    this.parryZoom(true);
+    return true;
+  }
+
+  // A short push-in on a defence: rare, brief and never a lock on the controls
+  private parryZoom(strong: boolean) {
+    if (!this.settings.cinematicCamera || TUNE.parryZoom < 0.5) return;
+    if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+    if (this.time - this.lastParryZoom < (strong ? 2.5 : 5)) return;
+    this.lastParryZoom = this.time;
+    this.punchT = 0;
+    this.punchDur = strong ? 0.5 : 0.38;
+  }
+
+  // While the guard is up the player turns toward an arrow or star coming from the side, so a defence
+  // isn't lost to which way the stick was last pushed (never one from behind: that one is on you)
+  private assistGuardFacing(dt: number) {
+    if (TUNE.arrowDirectional <= 0.5 || !this.guarding()) return;
+    const P = this.player;
+    let best: ProjectileInstance | null = null;
+    let bd = 16;
+    for (const p of this.projectiles) {
+      if (p.friendly || (p.type !== 'arrow' && p.type !== 'shuriken')) continue;
+      const dx = P.pos.x - p.pos.x;
+      const dz = P.pos.z - p.pos.z;
+      const d = Math.hypot(dx, dz);
+      if (d > bd || d < 0.5) continue;
+      if ((p.vel.x * dx + p.vel.z * dz) / (d * (Math.hypot(p.vel.x, p.vel.z) || 1)) < 0.8) continue;
+      best = p;
+      bd = d;
+    }
+    if (!best) return;
+    // a shot off to the side is pulled into the cone; one from behind is not (turn to meet it)
+    const want = Math.atan2(-best.vel.x, -best.vel.z);
+    const off = Math.abs(wrap(want - P.yaw));
+    if (off > ((TUNE.arrowCone * Math.PI) / 180) * 0.6 && off < 1.75) P.yaw = turnTo(P.yaw, want, Math.min(1, dt * 6));
+  }
+
+  // Warnings for what the player cannot see: an archer drawing its bow, a thrower casting, a
+  // shot already on its way - shown as markers at the screen edge by the UI, with a chirp
+  private stepThreats(dt: number) {
+    this.threatT -= dt;
+    if (this.threatT > 0) return;
+    this.threatT = 0.1;
+    const P = this.player.pos;
+    const fx = -Math.sin(this.camYaw);
+    const fz = -Math.cos(this.camYaw);
+    const rx = Math.cos(this.camYaw);
+    const rz = -Math.sin(this.camYaw);
+    const half = Math.atan(Math.tan((this.camera.fov * Math.PI) / 360) * this.camera.aspect) * 0.85;
+    const out: { a: number; u: number }[] = [];
+    const live = new Set<EnemyInstance>();
+    if (this.state === 'play' && !this.cine) {
+      const angleOf = (x: number, z: number) => Math.atan2((x - P.x) * rx + (z - P.z) * rz, (x - P.x) * fx + (z - P.z) * fz);
+      for (const e of this.enemies) {
+        if (e.dead || e.flee) continue;
+        const aiming = (e.type === 'archer' && ((!!e.bow && e.bow.phase !== 'release') || !!e.shotPending)) || (e.castT ?? 0) > 0;
+        if (!aiming) continue;
+        const a = angleOf(e.pos.x, e.pos.z);
+        if (Math.abs(a) <= half) continue;
+        live.add(e);
+        out.push({ a: Math.round(a * 20) / 20, u: 0.7 });
+        if (!this.warnedShooters.has(e)) {
+          this.warnedShooters.add(e);
+          sfx.warn();
+        }
+      }
+      for (const p of this.projectiles) {
+        if (p.friendly || (p.type !== 'arrow' && p.type !== 'shuriken')) continue;
+        const dx = P.x - p.pos.x;
+        const dz = P.z - p.pos.z;
+        const d = Math.hypot(dx, dz);
+        if (d > 18 || (p.vel.x * dx + p.vel.z * dz) / (d * (Math.hypot(p.vel.x, p.vel.z) || 1)) < 0.85) continue;
+        const a = angleOf(p.pos.x, p.pos.z);
+        if (Math.abs(a) > half) out.push({ a: Math.round(a * 20) / 20, u: 1 });
+      }
+    }
+    for (const e of this.warnedShooters) if (!live.has(e)) this.warnedShooters.delete(e);
+    const key = out.map((t) => `${t.a}:${t.u}`).join(',');
+    if (key !== this.lastThreatKey) {
+      this.lastThreatKey = key;
+      this.callbacks.onThreats?.(out);
+    }
+  }
+
   private updateProjectiles(dt: number) {
+    const swinging = this.stepCutBlade(dt);
     for (let i = this.projectiles.length - 1; i >= 0; i--) {
       const p = this.projectiles[i];
       p.life -= dt;
@@ -6066,21 +6233,34 @@ export class GameEngine {
           }
         }
       } else if (!dead && !p.friendly) {
-        if (Math.hypot(p.pos.x - this.player.pos.x, p.pos.z - this.player.pos.z) < 0.6) {
+        const ranged = TUNE.arrowDirectional > 0.5 && (p.type === 'arrow' || p.type === 'shuriken');
+        let handled = false;
+        // a weapon swung through its path cuts a shot out of the air (and, facing it, sends it back)
+        if (ranged && swinging && this.player.inv <= 0 && this.bladeCutsShot(p, dt)) {
+          handled = true;
+          if (!this.defendShot(p, 'cut', this.shotComesFromFront(p))) dead = true;
+        }
+        if (!handled && Math.hypot(p.pos.x - this.player.pos.x, p.pos.z - this.player.pos.z) < 0.6) {
           dead = true;
           const canAct = this.player.staggerT <= 0 && this.player.inv <= 0;
           const mid = this.tmpV.copy(p.pos);
-          if (canAct && this.time - this.player.guardPressT <= DEFLECT_WINDOW) {
-            this.impacts.spawn(mid, IMPACT_DEFLECT, 1.4, 0.14);
-            this.emitParticles(mid.x, mid.y, mid.z, 14, 0xffb347, 7, 2, 16, 0.25);
-            this.playerDeflectAnim();
-            sfx.clang();
-          } else if (canAct && this.guarding()) {
+          // only what is faced can be parried or blocked; from the side or behind it just hits
+          const front = !ranged || this.shotComesFromFront(p);
+          if (canAct && front && this.time - this.player.guardPressT <= DEFLECT_WINDOW) {
+            if (ranged) dead = !this.defendShot(p, 'parry', true);
+            else {
+              this.impacts.spawn(mid, IMPACT_DEFLECT, 1.4, 0.14);
+              this.emitParticles(mid.x, mid.y, mid.z, 14, 0xffb347, 7, 2, 16, 0.25);
+              this.playerDeflectAnim();
+              sfx.clang();
+            }
+          } else if (canAct && front && this.guarding()) {
             this.impacts.spawn(mid, IMPACT_BLOCK, 1, 0.1);
             this.addPlayerPosture(10);
             sfx.block();
           } else {
             const vl = Math.hypot(p.vel.x, p.vel.z) || 1;
+            if (canAct && ranged && !front && this.guarding()) this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'NAS COSTAS!', '#ff8a7a', 1.1);
             this.damagePlayer(p.dmg, p.vel.x / vl, p.vel.z / vl, true);
           }
         }
@@ -6093,6 +6273,12 @@ export class GameEngine {
         this.killProj(i);
       }
     }
+    // this frame's weapon path becomes the "last frame" of the next
+    if (this.cutActive) {
+      this.cutPrev.a.copy(this.cutCur.a);
+      this.cutPrev.b.copy(this.cutCur.b);
+      this.cutPrevOk = true;
+    } else this.cutPrevOk = false;
   }
 
   private updatePickups(dt: number) {
@@ -6227,6 +6413,8 @@ export class GameEngine {
     this.updateShocks(dt);
     this.updateBolts(dt);
     this.updateProjectiles(dt);
+    this.assistGuardFacing(dt);
+    this.stepThreats(dt);
     this.updatePickups(dt);
     this.updateScrolls(dt);
     this.updateReticle(dt);
