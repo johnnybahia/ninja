@@ -9,7 +9,7 @@
 
 /** Web App URL ending in /exec (see scripts/ranking/README.md). VITE_RANKING_URL overrides it
  *  (tests, another deployment). */
-export const RANKING_URL: string = (import.meta.env.VITE_RANKING_URL as string | undefined) || '';
+export const RANKING_URL: string = (import.meta.env.VITE_RANKING_URL as string | undefined) || 'https://script.google.com/macros/s/AKfycbxRDzMV6fB3-1n-MFWuxOMqoo7NWrDrIe6-zNTbDElbaz_AuBUtiNHwpNksWTo3jmdelQ/exec';
 
 export const rankingEnabled = () => RANKING_URL !== '';
 
