@@ -592,7 +592,7 @@ export class World {
   }
 
   // open ground: off the temple podium, the pond/grove and every solid prop
-  private isFree(x: number, z: number, pad: number) {
+  isFree(x: number, z: number, pad: number) {
     if (z < -21.5 && Math.abs(x) < 10) return false;
     if (Garden.blocked(x, z)) return false;
     return !this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r + pad);

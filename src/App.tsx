@@ -249,6 +249,16 @@ export default function App() {
     }
   });
   const themeRef = useRef(themeMode);
+  // how a run is played: waves in the middle of the arena, or Conquista (take the enemy posts)
+  const [gameMode, setGameMode] = useState<'waves' | 'conquest'>(() => {
+    try {
+      if (new URLSearchParams(location.search).get('mode') === 'conquista') return 'conquest';
+      return localStorage.getItem('kage_mode_v1') === 'conquest' ? 'conquest' : 'waves';
+    } catch {
+      return 'waves';
+    }
+  });
+  const [runMode, setRunMode] = useState<'waves' | 'conquest'>('waves');
   const [sensitivity, setSensitivity] = useState(1.0);
   const [autoCamera, setAutoCamera] = useState(true);
   const [autoTurnStick, setAutoTurnStick] = useState(true);
@@ -348,7 +358,7 @@ export default function App() {
         setRunResult(bank(summary, prevBest));
         setGameState('over');
         setRunBoard(null);
-        if (rankActiveRef.current && !engineRef.current?.practice) {
+        if (rankActiveRef.current && !engineRef.current?.practice && engineRef.current?.mode === 'waves') {
           // best-effort and off the game's path: the table shows "atualizando" until it arrives
           const before = loadPlayer();
           const base = { score: finalScore, wave, isBest: finalScore > (before?.sent ?? 0), name: before?.name ?? '' };
@@ -422,6 +432,8 @@ export default function App() {
       }
       eng.loadout = slots;
       eng.metaBonus = bonusesFor(metaRef.current);
+      eng.mode = gameMode;
+      setRunMode(gameMode);
       setRunResult(null);
       setCardOffer(null);
       setBossBar(null);
@@ -1162,6 +1174,29 @@ export default function App() {
               );
             })()}
 
+            <div className="mb-3">
+              <div className="flex rounded-md border border-[rgba(239,230,210,0.3)] overflow-hidden text-sm font-bold" role="group" aria-label="Modo de jogo">
+                {(['waves', 'conquest'] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => {
+                      setGameMode(m);
+                      try {
+                        localStorage.setItem('kage_mode_v1', m);
+                      } catch {}
+                    }}
+                    aria-pressed={gameMode === m}
+                    className={`flex-1 py-2 cursor-pointer transition-colors ${gameMode === m ? 'bg-[var(--ember)] text-[var(--ink)]' : 'text-[var(--paper)]/80'}`}
+                  >
+                    {m === 'waves' ? 'Ondas' : '旗 Conquista'}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[11px] text-[var(--paper)]/70 mt-1.5 text-center leading-snug">
+                {gameMode === 'waves' ? 'Inimigos chegam em ondas até você cair. Vale para o ranking.' : 'Tome os 3 postos inimigos espalhados pelo campo: derrote o capitão de cada guarnição. Não conta para o ranking.'}
+              </p>
+            </div>
+
             <button
               onClick={handleStartGame}
               disabled={startingGame}
@@ -1188,7 +1223,8 @@ export default function App() {
           onTemple={() => setShowTemple(true)}
           onArsenal={() => openArsenal(charId)}
           board={runBoard}
-          onJoin={rankOn && !rankActive ? () => setNameMode(player ? 'confirm' : 'new') : undefined}
+          mode={runMode}
+          onJoin={rankOn && !rankActive && runMode === 'waves' ? () => setNameMode(player ? 'confirm' : 'new') : undefined}
           onRanking={rankOn && rankActive ? () => setShowRanking(true) : undefined}
         />
       )}

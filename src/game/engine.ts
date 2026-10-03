@@ -39,7 +39,8 @@ import { animateCharacter, animateDeath } from './animation';
 import { TUNE } from './tunables';
 import { cardById, describeOffer, drawCards, CardOffer } from './cards';
 import { HONOR, NO_BONUS, MetaBonus, RunSummary } from './meta';
-import { pickWaveGoal, pickWaveMod, WaveMod, type GoalId } from './mods';
+import { pickWaveGoal, pickWaveMod, WAVE_GOALS, WaveMod, type GoalId } from './mods';
+import { Outpost, pickPostSpots } from './outposts';
 
 // Enemy samurai reuse the Rōnin's mesh, armour darkened toward blued steel
 const ENEMY_TINT = new THREE.Color(0.42, 0.46, 0.62);
@@ -78,6 +79,12 @@ const VARIANT_GRIP: Partial<Record<EnemyVariant, { right: Grip; left?: Grip }>> 
 const VARIANT_WEAPONS: Partial<Record<EnemyVariant, [string, string]>> = { nito: ['dsfire', 'dsmagic'], raio: ['claw_r', 'claw_l'] };
 // A wave doesn't pour in all at once: only so many enemies are in the fight at a time and the rest
 // wait at the edge of the arena, stepping in a moment after someone falls (the fight stays readable)
+// Conquista: a post wakes up when the player comes this close; each post has its own garrison
+const POST_ACTIVATE = 20;
+const GARRISONS = ['infantry', 'archers', 'elite'] as const;
+type Garrison = (typeof GARRISONS)[number];
+const GARRISON_NAME: Record<Garrison, string> = { infantry: 'infantaria', archers: 'arqueiros', elite: 'guarda de elite' };
+const ARROWS = ['↑', '↗', '→', '↘', '↓', '↙', '←', '↖'];
 const REINFORCE_GAP = 1.4; // seconds after a fall before the next one steps in
 const REINFORCE_SPACING = 0.6; // between two that step in back to back
 const RESIST_MAX = 5; // most enemies in the field at once on a Resistir wave
@@ -451,6 +458,14 @@ export class GameEngine {
   private waveTimer = 0;
   private clearedShown = false;
   // enemies of the wave waiting to step in, and how many of each kind may be in the fight
+  // Conquista mode (see outposts.ts): the field has enemy posts; walking up to one wakes its
+  // garrison, whose captain you defeat to take it. Each post is a "wave" for scaling and Honra.
+  public mode: 'waves' | 'conquest' = 'waves';
+  private posts: Outpost[] = [];
+  private postSolids: { x: number; z: number; r: number; h: number }[] = [];
+  private conq = { round: 1, active: -1, taken: 0, hudT: 0, hudText: '', bossKills0: 0, routed: false };
+  private spawnOrigin: { x: number; z: number } | null = null;
+  private garrison: Garrison = 'infantry';
   private waveQueue: { type: 'samurai' | 'archer'; variant?: EnemyVariant }[] = [];
   private waveCap: { melee: number; archer: number } | null = null;
   private reinforceT = 0;
@@ -879,7 +894,8 @@ export class GameEngine {
         this.nextWave();
       };
       Promise.race([Promise.allSettled([...LAZY_CHARACTERS.map(loadCharacter), loadLazyWeapons()]), new Promise((r) => setTimeout(r, 8000))]).then(go);
-    } else this.nextWave();
+    } else if (this.mode === 'conquest') this.setupConquest();
+    else this.nextWave();
     if (!this.isRunning) {
       this.isRunning = true;
       this.clock.start();
@@ -912,6 +928,7 @@ export class GameEngine {
     this.ghosts.clear();
 
     this.world.props.reset();
+    this.clearConquest();
     this.cardLv = {};
     this.cardOffer = null;
     this.picksPending = 0;
@@ -1017,11 +1034,13 @@ export class GameEngine {
     this.player.tookDamage = false;
 
     const boss = this.wave % 4 === 0;
-    const mod = pickWaveMod(this.wave, this.prevMod);
+    // a post of the Conquista mode: the captain's goal on every ordinary one, no wave challenges
+    const conq = this.mode === 'conquest' && this.conq.active >= 0;
+    const mod = conq ? null : pickWaveMod(this.wave, this.prevMod);
     this.waveMod = mod;
     if (mod) this.prevMod = mod.id;
-    const goalDef = !boss && !mod ? pickWaveGoal(this.wave, this.prevGoal) : null;
-    if (goalDef) this.prevGoal = goalDef.id;
+    const goalDef = conq ? (boss ? null : WAVE_GOALS.find((g) => g.id === 'capitao')!) : !boss && !mod ? pickWaveGoal(this.wave, this.prevGoal) : null;
+    if (goalDef && !conq) this.prevGoal = goalDef.id;
     let nS = Math.min(9, 2 + this.wave);
     let nA = Math.min(4, Math.floor(this.wave / 2));
     if (goalDef?.id === 'duelo') {
@@ -1033,6 +1052,14 @@ export class GameEngine {
     } else if (goalDef?.id === 'capitao') {
       nS = Math.min(7, 3 + Math.floor(this.wave / 2));
       nA = Math.min(3, Math.floor(this.wave / 3));
+    }
+    if (conq && !boss) {
+      // each post has its own kind of garrison
+      if (this.garrison === 'infantry') nA = Math.min(nA, 1);
+      else if (this.garrison === 'archers') {
+        nA = Math.min(5, nA + 2);
+        nS = Math.max(2, nS - 2);
+      } else nS = Math.max(2, nS - 1);
     }
     if (mod?.id === 'flechas') {
       nA = Math.min(7, nA + 3);
@@ -1047,16 +1074,16 @@ export class GameEngine {
     // boss waves or goal waves, which are busy enough)
     let nBrute = 0;
     let nMonk = 0;
-    if (!boss && !goalDef) {
+    if (!boss && (!goalDef || conq)) {
       if (this.wave >= 3) nBrute = Math.min(2, 1 + Math.floor((this.wave - 3) / 5), Math.max(0, nS - 2));
       if (this.wave >= 3) nMonk = Math.min(3, Math.floor(this.wave / 3), Math.max(0, nS - nBrute - 1));
     }
     // the named fighters (see roster below) join from wave 4: one a wave, two from wave 9,
     // taking turns so the same one doesn't come twice running
     const fighters: EnemyVariant[] = [];
-    if (!boss && !goalDef && this.wave >= 4) {
+    if (!boss && (!goalDef || conq) && this.wave >= 4) {
       const pool = FIGHTER_ORDER.filter((v) => this.wave >= FIGHTER_MIN[v]! && this.fighterReady(v));
-      for (let k = 0; k < (this.wave >= 9 ? 2 : 1) && pool.length; k++) {
+      for (let k = 0; k < (this.wave >= 9 || (conq && this.garrison === 'elite') ? 2 : 1) && pool.length; k++) {
         fighters.push(pool.splice(this.fighterTurn++ % pool.length, 1)[0]);
         if (nS - nBrute - nMonk - fighters.length < 1) fighters.pop();
       }
@@ -1105,7 +1132,7 @@ export class GameEngine {
     this.prevActive = now.filter((it) => it.type !== 'boss').length;
     const spawned: EnemyInstance[] = [];
     now.forEach((it) => {
-      const e = this.spawnRing(it.type, near, it.variant);
+      const e = this.spawnOrigin ? this.spawnAtPost(it.type, it.variant) : this.spawnRing(it.type, near, it.variant);
       if (e) spawned.push(e);
     });
     for (const e of spawned) if (e.type === 'boss' && e.variant) e.aura = this.makeAura(BOSS_COLOR[e.variant], 3.0);
@@ -1114,7 +1141,7 @@ export class GameEngine {
       let captain: EnemyInstance | undefined;
       if (goalDef.id === 'duelo' && spawned[0]) this.makeDuelist(spawned[0]);
       if (goalDef.id === 'capitao') {
-        captain = spawned.find((e) => e.type === 'samurai');
+        captain = this.pickCaptain(spawned);
         if (captain) this.makeCaptain(captain);
       }
       const dur = goalDef.id === 'resistir' ? 28 + Math.min(14, this.wave * 1.2) : 0;
@@ -1146,7 +1173,9 @@ export class GameEngine {
       if (spawned.some((e) => e.variant === v) && this.hintVariant(v, hintAt)) hintAt += 2.3;
     }
     this.callbacks.onWaveMod?.(mod ? { id: mod.id, name: mod.name, glyph: mod.glyph, desc: mod.desc } : goalDef ? { id: goalDef.id, name: goalDef.name, glyph: goalDef.glyph, desc: goalDef.desc } : null);
-    this.callbacks.onWaveChange(this.wave, mod ? `Onda ${this.wave} · ${mod.name}` : goalDef ? `Onda ${this.wave} · ${goalDef.name}` : `Onda ${this.wave}`, sub);
+    const label = conq ? `Posto ${this.wave}` : `Onda ${this.wave}`;
+    if (conq) sub = `${GARRISON_NAME[this.garrison][0].toUpperCase()}${GARRISON_NAME[this.garrison].slice(1)} · ${boss ? sub : goalDef ? goalDef.desc : sub}`;
+    this.callbacks.onWaveChange(this.wave, mod ? `${label} · ${mod.name}` : goalDef ? `${label} · ${goalDef.name}` : label, sub);
     sfx.wave();
   }
 
@@ -1227,7 +1256,7 @@ export class GameEngine {
     const idx = this.pickQueued(melee, archers);
     if (idx < 0) return;
     const [it] = this.waveQueue.splice(idx, 1);
-    const e = this.spawnAhead(it.type, it.variant);
+    const e = this.spawnOrigin ? this.spawnAtPost(it.type, it.variant) : this.spawnAhead(it.type, it.variant);
     if (!e) {
       this.waveQueue.unshift(it);
       return;
@@ -1236,6 +1265,160 @@ export class GameEngine {
     if (it.variant) this.hintVariant(it.variant, 0.6);
     this.prevActive = act + 1;
     this.reinforceT = REINFORCE_SPACING;
+  }
+
+
+  // ---------------------------------------------------------------------------
+  // Conquista: enemy posts across the field, each with a garrison and a captain
+  // ---------------------------------------------------------------------------
+  private setupConquest() {
+    this.clearConquest();
+    const spots = pickPostSpots((x, z, pad) => this.world.isFree(x, z, pad), 3);
+    for (const sp of spots) {
+      const post = new Outpost(sp.x, sp.z);
+      this.scene.add(post.group);
+      for (const so of post.solids) {
+        this.solids.push(so);
+        this.postSolids.push(so);
+      }
+      this.posts.push(post);
+    }
+    this.conq = { round: 1, active: -1, taken: 0, hudT: 0, hudText: '', bossKills0: 0, routed: false };
+    this.wave = 0;
+    this.callbacks.onWaveChange(0, 'Conquista', `Tome os ${this.posts.length} postos inimigos: derrote o capitão de cada um`);
+    this.updateConquestHud(0, true);
+  }
+
+  private clearConquest() {
+    for (const p of this.posts) p.dispose();
+    this.posts = [];
+    if (this.postSolids.length) {
+      const drop = new Set(this.postSolids);
+      for (let i = this.solids.length - 1; i >= 0; i--) if (drop.has(this.solids[i])) this.solids.splice(i, 1);
+      this.postSolids = [];
+    }
+    this.spawnOrigin = null;
+    this.conq = { round: 1, active: -1, taken: 0, hudT: 0, hudText: '', bossKills0: 0, routed: false };
+  }
+
+  private stepConquest(dt: number) {
+    for (const p of this.posts) p.update(this.time);
+    const c = this.conq;
+    if (c.active >= 0) {
+      // the Oni leads its post like a captain: when it falls the escort breaks and runs
+      if (!this.goal && !c.routed && this.bossKills > c.bossKills0) {
+        c.routed = true;
+        this.waveQueue = [];
+        this.routEnemies();
+      }
+      return;
+    }
+    const P = this.player.pos;
+    for (let i = 0; i < this.posts.length; i++) {
+      const p = this.posts[i];
+      const d = Math.hypot(p.x - P.x, p.z - P.z);
+      if (d > POST_ACTIVATE + 8) p.armed = true;
+      if (!p.captured && p.armed && d < POST_ACTIVATE) {
+        this.startOutpost(i);
+        return;
+      }
+    }
+    this.updateConquestHud(dt);
+  }
+
+  // The objective pill: how many posts are taken and which way the nearest one lies
+  private updateConquestHud(dt: number, force = false) {
+    const c = this.conq;
+    c.hudT -= dt;
+    if (c.hudT > 0 && !force) return;
+    c.hudT = 0.3;
+    const P = this.player.pos;
+    let best: Outpost | null = null;
+    let bd = Infinity;
+    for (const p of this.posts) {
+      if (p.captured) continue;
+      const d = Math.hypot(p.x - P.x, p.z - P.z);
+      if (d < bd) {
+        bd = d;
+        best = p;
+      }
+    }
+    if (!best) return;
+    const fx = -Math.sin(this.camYaw);
+    const fz = -Math.cos(this.camYaw);
+    const rx = Math.cos(this.camYaw);
+    const rz = -Math.sin(this.camYaw);
+    const dx = best.x - P.x;
+    const dz = best.z - P.z;
+    const ang = Math.atan2(dx * rx + dz * rz, dx * fx + dz * fz);
+    const arrow = ARROWS[((Math.round(ang / (Math.PI / 4)) % 8) + 8) % 8];
+    const text = `Conquista ${c.taken}/${this.posts.length} · ${arrow} ${Math.round(bd / 2) * 2} m`;
+    if (text === c.hudText) return;
+    c.hudText = text;
+    this.callbacks.onWaveMod?.({ id: 'conquista', name: text, glyph: '旗', desc: 'Vá até um posto inimigo e derrote o capitão da guarnição' });
+  }
+
+  private startOutpost(i: number) {
+    const p = this.posts[i];
+    this.conq.active = i;
+    this.conq.routed = false;
+    this.conq.bossKills0 = this.bossKills;
+    this.spawnOrigin = { x: p.x, z: p.z };
+    this.garrison = GARRISONS[i % GARRISONS.length];
+    this.nextWave();
+    this.spawnLabel(p.x, 3.6, p.z, 'POSTO INIMIGO!', '#ff8a7a', 1.5);
+  }
+
+  private captureOutpost() {
+    const c = this.conq;
+    const p = this.posts[c.active];
+    c.active = -1;
+    this.spawnOrigin = null;
+    this.waveQueue = [];
+    c.taken++;
+    if (p) {
+      p.setCaptured(true);
+      this.emitParticles(p.x, 1.5, p.z, 44, 0x4fd6a8, 6, 3, -1, 1.2);
+      this.spawnLabel(p.x, 3.6, p.z, 'POSTO TOMADO!', '#8fe0c8', 1.6);
+    }
+    // the taken post pays in life and Honra
+    this.player.hp = Math.min(this.player.maxHp, this.player.hp + Math.round(this.player.maxHp * 0.3));
+    this.callbacks.onHpChange(this.player.hp, this.player.maxHp);
+    this.addHonor('mod', 8);
+    sfx.wave();
+    if (c.taken >= this.posts.length) {
+      c.round++;
+      c.taken = 0;
+      this.posts.forEach((q) => {
+        q.setCaptured(false);
+        q.armed = false;
+      });
+      this.callbacks.onWaveChange(this.wave, `Território conquistado · Rodada ${c.round}`, 'Reforços retomam os postos: tome todos de novo, mais fortes');
+    } else {
+      this.callbacks.onWaveChange(this.wave, `Posto tomado · ${c.taken}/${this.posts.length}`, 'Siga para o próximo posto');
+    }
+    this.updateConquestHud(0, true);
+  }
+
+  // The garrison forms up inside the post's ring
+  private spawnAtPost(type: 'samurai' | 'archer' | 'boss', variant?: EnemyVariant): EnemyInstance | null {
+    const o = this.spawnOrigin;
+    if (!o) return null;
+    for (let k = 0; k < 30; k++) {
+      const a = Math.random() * TAU;
+      const r = type === 'boss' ? rand(1.5, 3.5) : rand(2.5, 5.5);
+      const x = o.x + Math.sin(a) * r;
+      const z = o.z + Math.cos(a) * r;
+      if (Math.hypot(x, z) > R_ARENA - 2) continue;
+      if (this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r + (type === 'boss' ? 1.5 : 0.8))) continue;
+      return this.spawnEnemy(type, x, z, variant);
+    }
+    return this.spawnRing(type, true, variant);
+  }
+
+  // Who leads a garrison: a named fighter if there is one, else the brute, else any samurai
+  private pickCaptain(list: EnemyInstance[]): EnemyInstance | undefined {
+    return list.find((e) => e.variant === 'nito' || e.variant === 'shinobi' || e.variant === 'raio') ?? list.find((e) => e.variant === 'brute') ?? list.find((e) => e.type === 'samurai');
   }
 
   // Elite samurai: tougher and harder-hitting, marked with a golden ground ring and a gold
@@ -5901,6 +6084,25 @@ export class GameEngine {
     this.mmCtx.arc(o[0], o[1], R_ARENA * s, 0, TAU);
     this.mmCtx.stroke();
 
+    // Conquista posts: a diamond (red while hostile, jade once taken); a far one rides the rim
+    for (const post of this.posts) {
+      let q = toS(post.x, post.z);
+      const off = Math.hypot(q[0] - c, q[1] - c);
+      const lim = c - 12;
+      if (off > lim) q = [c + ((q[0] - c) / off) * lim, c + ((q[1] - c) / off) * lim];
+      this.mmCtx.fillStyle = post.captured ? '#4fd6a8' : '#ff5a4a';
+      this.mmCtx.strokeStyle = 'rgba(239,230,210,.85)';
+      this.mmCtx.lineWidth = 1.5;
+      this.mmCtx.beginPath();
+      this.mmCtx.moveTo(q[0], q[1] - 7);
+      this.mmCtx.lineTo(q[0] + 6, q[1]);
+      this.mmCtx.lineTo(q[0], q[1] + 7);
+      this.mmCtx.lineTo(q[0] - 6, q[1]);
+      this.mmCtx.closePath();
+      this.mmCtx.fill();
+      this.mmCtx.stroke();
+    }
+
     for (const e of this.enemies) {
       if (e.dead) continue;
       const q = toS(e.pos.x, e.pos.z);
@@ -5949,10 +6151,13 @@ export class GameEngine {
     this.updateReticle(dt);
     this.stepGoal(dt);
     this.stepReinforcements(dt);
+    if (this.mode === 'conquest') this.stepConquest(dt);
 
     const alive = this.waveQueue.length > 0 || this.enemies.some((e) => !e.dead);
     // a Resistir wave is not over while the clock runs, even with the field empty
-    if (!alive && this.wave > 0 && !(this.goal && !this.goal.done && this.goal.id === 'resistir')) {
+    // (Conquista: between posts there is nobody to beat, so nothing is "cleared" until a post is woken)
+    const betweenPosts = this.mode === 'conquest' && this.conq.active < 0;
+    if (!alive && this.wave > 0 && !betweenPosts && !(this.goal && !this.goal.done && this.goal.id === 'resistir')) {
       if (!this.clearedShown) {
         this.clearedShown = true;
         const rank = this.waveRank();
@@ -5970,14 +6175,15 @@ export class GameEngine {
         gain = Math.round(gain);
         this.player.score += 100 * this.wave;
         this.callbacks.onScoreChange(this.player.score);
-        this.callbacks.onWaveChange(this.wave, `Onda limpa · Nota ${rank}`, `+${100 * this.wave} pontos · +${gain} 誉`);
+        this.callbacks.onWaveChange(this.wave, `${this.mode === 'conquest' ? 'Posto tomado' : 'Onda limpa'} · Nota ${rank}`, `+${100 * this.wave} pontos · +${gain} 誉`);
         this.player.hp = Math.min(this.player.maxHp, this.player.hp + 20);
         this.callbacks.onHpChange(this.player.hp, this.player.maxHp);
       }
       this.waveTimer += dt;
       if (this.waveTimer > 2.5) {
         this.waveTimer = 0;
-        this.nextWave();
+        if (this.mode === 'conquest') this.captureOutpost();
+        else this.nextWave();
       }
     }
   }
