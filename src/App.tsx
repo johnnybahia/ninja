@@ -16,6 +16,7 @@ import { ensureDaily, localDate } from './game/missions';
 import { Missions } from './ui/Missions';
 import { PlayerName, type NameMode } from './ui/PlayerName';
 import { Ranking } from './ui/Ranking';
+import { ModePicker, modeNote, type GameMode } from './ui/ModePicker';
 import type { RunBoard } from './ui/RunSummary';
 import { confirmedThisSession, confirmSession, fetchRanking, flushPending, loadPlayer, rankingEnabled, savePlayer, submitScore, type Player } from './game/ranking';
 import type { CardOffer } from './game/cards';
@@ -252,7 +253,7 @@ export default function App() {
   });
   const themeRef = useRef(themeMode);
   // how a run is played: waves in the middle of the arena, or Conquista (take the enemy posts)
-  const [gameMode, setGameMode] = useState<'waves' | 'conquest'>(() => {
+  const [gameMode, setGameMode] = useState<GameMode>(() => {
     try {
       if (new URLSearchParams(location.search).get('mode') === 'conquista') return 'conquest';
       return localStorage.getItem('kage_mode_v1') === 'conquest' ? 'conquest' : 'waves';
@@ -260,7 +261,22 @@ export default function App() {
       return 'waves';
     }
   });
-  const [runMode, setRunMode] = useState<'waves' | 'conquest'>('waves');
+  const [runMode, setRunMode] = useState<GameMode>('waves');
+  const chooseMode = (m: GameMode) => {
+    setGameMode(m);
+    try {
+      localStorage.setItem('kage_mode_v1', m);
+    } catch {}
+  };
+  // ?wave=N is a practice run: nothing in it counts for the ranking
+  const [practiceUrl] = useState(() => {
+    try {
+      const n = parseInt(new URLSearchParams(location.search).get('wave') ?? '', 10);
+      return Number.isFinite(n) && n > 1;
+    } catch {
+      return false;
+    }
+  });
   const [sensitivity, setSensitivity] = useState(1.0);
   const [autoCamera, setAutoCamera] = useState(true);
   const [autoTurnStick, setAutoTurnStick] = useState(true);
@@ -418,8 +434,9 @@ export default function App() {
     } catch {}
   }, [sensitivity, autoCamera, autoTurnStick, cineCam]);
 
-  const handleStartGame = async () => {
+  const handleStartGame = async (modeOverride?: GameMode) => {
     initAudio();
+    const mode = modeOverride ?? gameMode;
     const eng = engineRef.current;
     if (eng) {
       // Almost always already resolved by the time the player reaches this button (the
@@ -435,8 +452,8 @@ export default function App() {
       }
       eng.loadout = slots;
       eng.metaBonus = bonusesFor(metaRef.current);
-      eng.mode = gameMode;
-      setRunMode(gameMode);
+      eng.mode = mode;
+      setRunMode(mode);
       setRunResult(null);
       setCardOffer(null);
       setBossBar(null);
@@ -1177,36 +1194,26 @@ export default function App() {
               );
             })()}
 
-            <div className="mb-3">
-              <div className="flex rounded-md border border-[rgba(239,230,210,0.3)] overflow-hidden text-sm font-bold" role="group" aria-label="Modo de jogo">
-                {(['waves', 'conquest'] as const).map((m) => (
-                  <button
-                    key={m}
-                    onClick={() => {
-                      setGameMode(m);
-                      try {
-                        localStorage.setItem('kage_mode_v1', m);
-                      } catch {}
-                    }}
-                    aria-pressed={gameMode === m}
-                    className={`flex-1 py-2 cursor-pointer transition-colors ${gameMode === m ? 'bg-[var(--ember)] text-[var(--ink)]' : 'text-[var(--paper)]/80'}`}
-                  >
-                    {m === 'waves' ? 'Ondas' : '旗 Conquista'}
-                  </button>
-                ))}
-              </div>
-              <p className="text-[11px] text-[var(--paper)]/70 mt-1.5 text-center leading-snug">
-                {gameMode === 'waves' ? 'Inimigos chegam em ondas até você cair. Vale para o ranking.' : 'Tome os 3 postos inimigos espalhados pelo campo: derrote o capitão de cada guarnição. Não conta para o ranking.'}
-              </p>
-            </div>
+            <ModePicker
+              mode={gameMode}
+              onChange={chooseMode}
+              status={{ rankOn, rankActive, practice: practiceUrl }}
+              player={player}
+              onJoin={() => setNameMode(player ? 'confirm' : 'new')}
+            />
 
             <button
-              onClick={handleStartGame}
+              onClick={() => void handleStartGame()}
               disabled={startingGame}
               className="go-btn relative overflow-hidden w-full font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] py-3.5 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer disabled:opacity-60 disabled:cursor-wait"
             >
               {startingGame && <span className="absolute inset-y-0 left-0 bg-white/20 transition-[width] duration-200" style={{ width: `${loadPct}%` }} />}
               <span className="relative">{startingGame ? `Carregando… ${loadPct}%` : 'Entrar em combate'}</span>
+              {!startingGame && (
+                <span className="relative block font-sans text-[11px] font-bold opacity-85 leading-tight">
+                  {gameMode === 'waves' ? 'Ondas' : 'Conquista'} · {modeNote(gameMode, { rankOn, rankActive, practice: practiceUrl }).text}
+                </span>
+              )}
             </button>
           </div>
         </div>
@@ -1236,7 +1243,7 @@ export default function App() {
           meta={meta}
           starting={startingGame}
           loadPct={loadPct}
-          onAgain={handleStartGame}
+          onAgain={() => void handleStartGame()}
           onBuy={buy}
           onTemple={() => setShowTemple(true)}
           onArsenal={() => openArsenal(charId)}
@@ -1244,6 +1251,15 @@ export default function App() {
           mode={runMode}
           onJoin={rankOn && !rankActive && runMode === 'waves' ? () => setNameMode(player ? 'confirm' : 'new') : undefined}
           onRanking={rankOn && rankActive ? () => setShowRanking(true) : undefined}
+          onPlayRanked={
+            rankOn && runMode === 'conquest'
+              ? () => {
+                  chooseMode('waves');
+                  if (rankActive) void handleStartGame('waves');
+                  else setNameMode(player ? 'confirm' : 'new');
+                }
+              : undefined
+          }
         />
       )}
 

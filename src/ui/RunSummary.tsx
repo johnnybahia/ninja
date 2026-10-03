@@ -45,7 +45,8 @@ export function RunSummary({
   board,
   mode = 'waves',
   onJoin,
-  onRanking
+  onRanking,
+  onPlayRanked
 }: {
   result: RunResult;
   meta: MetaSave;
@@ -59,6 +60,7 @@ export function RunSummary({
   mode?: 'waves' | 'conquest';
   onJoin?: () => void; // ranking on but the player hasn't joined this session
   onRanking?: () => void;
+  onPlayRanked?: () => void; // a Conquista run doesn't rank: offers a ranked Ondas run instead
 }) {
   const s = result.summary;
   const newRecord = s.score > result.prevBest;
@@ -131,6 +133,16 @@ export function RunSummary({
                 </button>
               </div>
             )}
+          </section>
+        )}
+
+        {onPlayRanked && (
+          <section className="mb-4 rounded-lg border border-[rgba(239,230,210,0.25)] bg-[rgba(10,8,18,0.85)] px-3 py-3 text-center">
+            <div className="font-serif text-xs tracking-[0.35em] text-[var(--paper)]/60">頂 RANKING 頂</div>
+            <p className="text-xs text-[var(--paper)]/80 mt-1.5">Esta partida de Conquista não conta para o ranking. Só o modo Ondas é ranqueado.</p>
+            <button onClick={onPlayRanked} className="mt-2 text-xs font-extrabold bg-[var(--torii)] border border-[var(--torii)] text-[var(--paper)] px-4 py-1.5 rounded-md active:scale-95 transition-all cursor-pointer">
+              Jogar Ondas (ranqueado)
+            </button>
           </section>
         )}
 
@@ -253,7 +265,7 @@ export function RunSummary({
               </button>
             )}
             <button onClick={onArsenal} className="flex items-center gap-1.5 font-bold text-sm border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-5 py-2 rounded-md active:scale-95 transition-all cursor-pointer">
-              <Swords className="w-4 h-4 text-[var(--ember)]" /> Trocar armas
+              <Swords className="w-4 h-4 text-[var(--ember)]" /> Armas e modo
             </button>
           </div>
         </div>
