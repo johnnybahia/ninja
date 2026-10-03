@@ -16,7 +16,7 @@ import { ensureDaily, localDate } from './game/missions';
 import { Missions } from './ui/Missions';
 import { PlayerName, type NameMode } from './ui/PlayerName';
 import { Ranking } from './ui/Ranking';
-import { ModePicker, modeNote, type GameMode } from './ui/ModePicker';
+import { ModeChip, ModeScreen, modeNote, type GameMode } from './ui/ModePicker';
 import type { RunBoard } from './ui/RunSummary';
 import { confirmedThisSession, confirmSession, fetchRanking, flushPending, loadPlayer, rankingEnabled, savePlayer, submitScore, type Player } from './game/ranking';
 import type { CardOffer } from './game/cards';
@@ -252,23 +252,9 @@ export default function App() {
     }
   });
   const themeRef = useRef(themeMode);
-  // how a run is played: waves in the middle of the arena, or Conquista (take the enemy posts)
-  const [gameMode, setGameMode] = useState<GameMode>(() => {
-    try {
-      if (new URLSearchParams(location.search).get('mode') === 'conquista') return 'conquest';
-      return localStorage.getItem('kage_mode_v1') === 'conquest' ? 'conquest' : 'waves';
-    } catch {
-      return 'waves';
-    }
-  });
-  const [runMode, setRunMode] = useState<GameMode>('waves');
-  const chooseMode = (m: GameMode) => {
-    setGameMode(m);
-    try {
-      localStorage.setItem('kage_mode_v1', m);
-    } catch {}
-  };
-  // ?wave=N is a practice run: nothing in it counts for the ranking
+  // how a run is played: waves in the middle of the arena, or Conquista (take the enemy posts).
+  // Chosen once per session on its own screen (null: not chosen yet); a link with ?mode= or ?wave=
+  // (practice) counts as the choice.
   const [practiceUrl] = useState(() => {
     try {
       const n = parseInt(new URLSearchParams(location.search).get('wave') ?? '', 10);
@@ -277,6 +263,25 @@ export default function App() {
       return false;
     }
   });
+  const [gameMode, setGameMode] = useState<GameMode | null>(() => {
+    try {
+      if (new URLSearchParams(location.search).get('mode') === 'conquista') return 'conquest';
+      if (practiceUrl) return 'waves';
+      const s = sessionStorage.getItem('kage_mode_s');
+      return s === 'conquest' || s === 'waves' ? s : null;
+    } catch {
+      return null;
+    }
+  });
+  const [choosingMode, setChoosingMode] = useState(false); // the choice screen reopened on request
+  const [runMode, setRunMode] = useState<GameMode>('waves');
+  const chooseMode = (m: GameMode) => {
+    setGameMode(m);
+    setChoosingMode(false);
+    try {
+      sessionStorage.setItem('kage_mode_s', m);
+    } catch {}
+  };
   const [sensitivity, setSensitivity] = useState(1.0);
   const [autoCamera, setAutoCamera] = useState(true);
   const [autoTurnStick, setAutoTurnStick] = useState(true);
@@ -436,7 +441,7 @@ export default function App() {
 
   const handleStartGame = async (modeOverride?: GameMode) => {
     initAudio();
-    const mode = modeOverride ?? gameMode;
+    const mode = modeOverride ?? gameMode ?? 'waves';
     const eng = engineRef.current;
     if (eng) {
       // Almost always already resolved by the time the player reaches this button (the
@@ -1024,6 +1029,10 @@ export default function App() {
               )}
             </div>
 
+            <div className="mb-4 flex justify-center">
+              <ModeChip mode={gameMode ?? 'waves'} status={{ rankOn, rankActive, practice: practiceUrl }} onChange={() => setChoosingMode(true)} />
+            </div>
+
             <Missions meta={meta} today={localDate()} />
 
             {/* Kage is hidden for now (kept in code, not deleted, in case it comes back) -
@@ -1194,13 +1203,9 @@ export default function App() {
               );
             })()}
 
-            <ModePicker
-              mode={gameMode}
-              onChange={chooseMode}
-              status={{ rankOn, rankActive, practice: practiceUrl }}
-              player={player}
-              onJoin={() => setNameMode(player ? 'confirm' : 'new')}
-            />
+            <div className="mb-3 flex justify-center">
+              <ModeChip mode={gameMode ?? 'waves'} status={{ rankOn, rankActive, practice: practiceUrl }} onChange={() => setChoosingMode(true)} />
+            </div>
 
             <button
               onClick={() => void handleStartGame()}
@@ -1211,7 +1216,7 @@ export default function App() {
               <span className="relative">{startingGame ? `Carregando… ${loadPct}%` : 'Entrar em combate'}</span>
               {!startingGame && (
                 <span className="relative block font-sans text-[11px] font-bold opacity-85 leading-tight">
-                  {gameMode === 'waves' ? 'Ondas' : 'Conquista'} · {modeNote(gameMode, { rankOn, rankActive, practice: practiceUrl }).text}
+                  {(gameMode ?? 'waves') === 'waves' ? 'Ondas' : 'Conquista'} · {modeNote(gameMode ?? 'waves', { rankOn, rankActive, practice: practiceUrl }).text}
                 </span>
               )}
             </button>
@@ -1251,6 +1256,7 @@ export default function App() {
           mode={runMode}
           onJoin={rankOn && !rankActive && runMode === 'waves' ? () => setNameMode(player ? 'confirm' : 'new') : undefined}
           onRanking={rankOn && rankActive ? () => setShowRanking(true) : undefined}
+          onChangeMode={() => setChoosingMode(true)}
           onPlayRanked={
             rankOn && runMode === 'conquest'
               ? () => {
@@ -1260,6 +1266,19 @@ export default function App() {
                 }
               : undefined
           }
+        />
+      )}
+
+      {/* How to play: once per session, and again on request */}
+      {(gameMode === null || choosingMode) && gameState !== 'play' && (
+        <ModeScreen
+          mode={gameMode}
+          status={{ rankOn, rankActive, practice: practiceUrl }}
+          player={player}
+          onPick={chooseMode}
+          onClose={gameMode !== null ? () => setChoosingMode(false) : undefined}
+          onJoin={() => setNameMode(player ? 'confirm' : 'new')}
+          onRename={() => setNameMode('rename')}
         />
       )}
 

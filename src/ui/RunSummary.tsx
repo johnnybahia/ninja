@@ -46,7 +46,8 @@ export function RunSummary({
   mode = 'waves',
   onJoin,
   onRanking,
-  onPlayRanked
+  onPlayRanked,
+  onChangeMode
 }: {
   result: RunResult;
   meta: MetaSave;
@@ -60,6 +61,7 @@ export function RunSummary({
   mode?: 'waves' | 'conquest';
   onJoin?: () => void; // ranking on but the player hasn't joined this session
   onRanking?: () => void;
+  onChangeMode?: () => void;
   onPlayRanked?: () => void; // a Conquista run doesn't rank: offers a ranked Ondas run instead
 }) {
   const s = result.summary;
@@ -255,17 +257,22 @@ export function RunSummary({
             {starting && <span className="absolute inset-y-0 left-0 bg-white/20 transition-[width] duration-200" style={{ width: `${loadPct}%` }} />}
             <span className={`relative ${starting ? '' : 'arcade-blink'}`}>{starting ? `Carregando… ${loadPct}%` : board ? 'TOQUE PARA JOGAR DE NOVO' : 'Jogar de novo'}</span>
           </button>
-          <div className="flex gap-2">
-            <button onClick={onTemple} className="flex items-center gap-1.5 font-bold text-sm border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-5 py-2 rounded-md active:scale-95 transition-all cursor-pointer">
+          <div className="flex flex-wrap justify-center gap-2">
+            <button onClick={onTemple} className="flex items-center gap-1.5 font-bold text-sm border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-4 py-2 rounded-md whitespace-nowrap active:scale-95 transition-all cursor-pointer">
               <span className="font-serif text-[var(--ember)]">誉</span> Templo
             </button>
             {onRanking && (
-              <button onClick={onRanking} className="flex items-center gap-1.5 font-bold text-sm border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-5 py-2 rounded-md active:scale-95 transition-all cursor-pointer">
+              <button onClick={onRanking} className="flex items-center gap-1.5 font-bold text-sm border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-4 py-2 rounded-md whitespace-nowrap active:scale-95 transition-all cursor-pointer">
                 <span className="font-serif text-[var(--ember)]">頂</span> Ranking
               </button>
             )}
-            <button onClick={onArsenal} className="flex items-center gap-1.5 font-bold text-sm border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-5 py-2 rounded-md active:scale-95 transition-all cursor-pointer">
-              <Swords className="w-4 h-4 text-[var(--ember)]" /> Armas e modo
+            {onChangeMode && (
+              <button onClick={onChangeMode} className="flex items-center gap-1.5 font-bold text-sm border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-4 py-2 rounded-md whitespace-nowrap active:scale-95 transition-all cursor-pointer">
+                <span className="font-serif text-[var(--ember)]">波</span> Trocar de modo
+              </button>
+            )}
+            <button onClick={onArsenal} className="flex items-center gap-1.5 font-bold text-sm border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-4 py-2 rounded-md whitespace-nowrap active:scale-95 transition-all cursor-pointer">
+              <Swords className="w-4 h-4 text-[var(--ember)]" /> Trocar armas
             </button>
           </div>
         </div>

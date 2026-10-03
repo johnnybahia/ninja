@@ -47,20 +47,21 @@ export function ModePicker({
   onChange,
   status,
   player,
-  onJoin
+  onJoin,
+  none = false
 }: {
   mode: GameMode;
   onChange: (m: GameMode) => void;
   status: RankStatus;
   player: Player | null;
   onJoin: () => void; // opens the name screen
+  none?: boolean; // nothing chosen yet: no card is marked
 }) {
   return (
-    <div className="mb-4 text-left">
-      <div className="font-serif text-xs tracking-[0.3em] text-[var(--paper)]/60 text-center mb-2">ESCOLHA O MODO DE JOGO</div>
+    <div className="text-left">
       <div className="grid sm:grid-cols-2 gap-2" role="radiogroup" aria-label="Modo de jogo">
         {MODES.map((m) => {
-          const on = mode === m.id;
+          const on = !none && mode === m.id;
           const note = modeNote(m.id, status);
           const needsJoin = m.id === 'waves' && status.rankOn && !status.practice && !status.rankActive;
           return (
@@ -122,5 +123,75 @@ export function ModePicker({
         })}
       </div>
     </div>
+  );
+}
+
+// The "how do you want to play" step: shown once per session (nothing preselected), and again
+// whenever the player asks to change the mode. Picking a card is the whole interaction.
+export function ModeScreen({
+  mode,
+  status,
+  player,
+  onPick,
+  onClose,
+  onJoin,
+  onRename
+}: {
+  mode: GameMode | null;
+  status: RankStatus;
+  player: Player | null;
+  onPick: (m: GameMode) => void;
+  onClose?: () => void; // only when there already is a mode to go back to
+  onJoin: () => void;
+  onRename: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[40] flex flex-col items-center bg-[var(--ink)] overflow-y-auto px-4 py-5">
+      <div className="w-full max-w-2xl my-auto">
+        <div className="text-center mb-4">
+          <div className="font-serif text-5xl font-bold text-[var(--torii)] leading-none">影</div>
+          <h2 className="font-serif text-2xl font-extrabold text-[var(--paper)] mt-1">Como você quer jogar?</h2>
+          {status.rankOn && (
+            <div className="text-xs text-[var(--paper)]/70 mt-1">
+              {status.rankActive && player ? (
+                <>
+                  Jogando como <b className="text-[var(--paper)]">{player.name}</b> ·{' '}
+                  <button onClick={onRename} className="underline cursor-pointer font-bold">
+                    Mudar nome
+                  </button>
+                </>
+              ) : (
+                'Sem nome no ranking'
+              )}
+            </div>
+          )}
+        </div>
+        <ModePicker mode={mode as GameMode} onChange={onPick} status={status} player={player} onJoin={onJoin} none={mode === null} />
+        {onClose && (
+          <div className="text-center mt-3">
+            <button onClick={onClose} className="text-xs font-bold text-[var(--paper)]/70 underline cursor-pointer">
+              Voltar
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** The mode in play, with a way to change it (menu and arsenal). */
+export function ModeChip({ mode, status, onChange }: { mode: GameMode; status: RankStatus; onChange: () => void }) {
+  const note = modeNote(mode, status);
+  return (
+    <button
+      onClick={onChange}
+      className="inline-flex items-center gap-2 text-xs font-bold border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-4 py-1.5 rounded-full active:scale-95 transition-all cursor-pointer"
+    >
+      <span className="font-serif text-base text-[var(--ember)] leading-none">{mode === 'waves' ? '波' : '旗'}</span>
+      <span>
+        {mode === 'waves' ? 'Ondas' : 'Conquista'} · <span className={note.ranked ? 'text-[var(--jade)]' : 'text-[var(--paper)]/70'}>{note.text}</span>
+      </span>
+      <span className="underline text-[var(--ember)]">Trocar</span>
+    </button>
   );
 }
