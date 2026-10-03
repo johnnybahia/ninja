@@ -10,6 +10,7 @@ export interface PostSpot {
 }
 
 const HOSTILE = new THREE.Color(0xd8343a);
+const CASTLE = new THREE.Color(0xe0a030);
 const TAKEN = new THREE.Color(0x4fd6a8);
 const POST_RADIUS = 6.6;
 
@@ -72,6 +73,9 @@ export class Outpost {
   readonly solids: { x: number; z: number; r: number; h: number }[];
   captured = false;
   armed = true; // a post retaken after a round only wakes once the player has walked away from it
+  readonly castle: boolean; // the last post of a round: golden, and asleep until the others are taken
+  locked = false; // the castle before the others are taken: dim, and it does not wake
+  private hostile: THREE.Color;
   private banner: THREE.Mesh;
   private bannerMat: THREE.MeshBasicMaterial;
   private bannerRest: Float32Array;
@@ -83,10 +87,13 @@ export class Outpost {
   private texTaken: THREE.CanvasTexture;
   private owned: { dispose(): void }[] = [];
 
-  constructor(x: number, z: number) {
+  constructor(x: number, z: number, opts: { glyph?: string; castle?: boolean } = {}) {
     this.x = x;
     this.z = z;
+    this.castle = !!opts.castle;
+    this.hostile = this.castle ? CASTLE : HOSTILE;
     this.group.position.set(x, 0, z);
+    if (this.castle) this.group.scale.setScalar(1.3);
     const wood = new THREE.MeshStandardMaterial({ color: 0x3b2a1e, roughness: 0.9 });
     this.owned.push(wood);
 
@@ -101,7 +108,7 @@ export class Outpost {
     this.group.add(pole, bar);
     this.owned.push(poleGeo, barGeo);
 
-    this.texHostile = bannerTexture('将', HOSTILE);
+    this.texHostile = bannerTexture(opts.glyph ?? (this.castle ? '城' : '将'), this.hostile);
     this.texTaken = bannerTexture('勝', TAKEN);
     this.bannerMat = new THREE.MeshBasicMaterial({ map: this.texHostile, side: THREE.DoubleSide });
     const bgeo = new THREE.PlaneGeometry(2.3, 1.6, 8, 2);
@@ -109,7 +116,7 @@ export class Outpost {
     this.banner = new THREE.Mesh(bgeo, this.bannerMat);
     this.banner.position.set(1.3, 4.8, 0);
     this.group.add(this.banner);
-    this.owned.push(bgeo, this.bannerMat, this.texHostile, this.texTaken);
+    this.owned.push(bgeo, this.bannerMat);
 
     // palisade: a ring of slanted stakes (one draw call)
     const stakeGeo = new THREE.ConeGeometry(0.1, 1.9, 5);
@@ -144,11 +151,11 @@ export class Outpost {
 
     // the ground ring and a faint disc inside it
     const ringGeo = new THREE.RingGeometry(POST_RADIUS - 0.3, POST_RADIUS, 72).rotateX(-Math.PI / 2);
-    this.ringMat = new THREE.MeshBasicMaterial({ color: HOSTILE.clone().multiplyScalar(1.4), transparent: true, opacity: 0.6, depthWrite: false, blending: THREE.AdditiveBlending, fog: false });
+    this.ringMat = new THREE.MeshBasicMaterial({ color: this.hostile.clone().multiplyScalar(1.4), transparent: true, opacity: 0.6, depthWrite: false, blending: THREE.AdditiveBlending, fog: false });
     this.ring = new THREE.Mesh(ringGeo, this.ringMat);
     this.ring.position.y = 0.07;
     const discGeo = new THREE.CircleGeometry(POST_RADIUS - 0.3, 48).rotateX(-Math.PI / 2);
-    this.discMat = new THREE.MeshBasicMaterial({ color: HOSTILE.clone().multiplyScalar(1.2), transparent: true, opacity: 0.07, depthWrite: false, blending: THREE.AdditiveBlending, fog: false });
+    this.discMat = new THREE.MeshBasicMaterial({ color: this.hostile.clone().multiplyScalar(1.2), transparent: true, opacity: 0.07, depthWrite: false, blending: THREE.AdditiveBlending, fog: false });
     const disc = new THREE.Mesh(discGeo, this.discMat);
     disc.position.y = 0.05;
     this.group.add(this.ring, disc);
@@ -165,7 +172,7 @@ export class Outpost {
     this.captured = c;
     this.bannerMat.map = c ? this.texTaken : this.texHostile;
     this.bannerMat.needsUpdate = true;
-    const col = (c ? TAKEN : HOSTILE).clone();
+    const col = (c ? TAKEN : this.hostile).clone();
     this.ringMat.color.copy(col).multiplyScalar(1.4);
     this.discMat.color.copy(col).multiplyScalar(1.2);
     this.ringMat.opacity = c ? 0.35 : 0.6;
@@ -184,11 +191,23 @@ export class Outpost {
       const s = 0.85 + Math.sin(t * 11 + i * 2) * 0.15 + Math.sin(t * 17 + i) * 0.08;
       f.scale.set(s, 0.9 + s * 0.25, s);
     });
-    this.ringMat.opacity = (this.captured ? 0.3 : 0.5) + Math.sin(t * 2.2) * 0.1;
+    this.ringMat.opacity = this.locked ? 0.1 : (this.captured ? 0.3 : 0.5) + Math.sin(t * 2.2) * 0.1;
+  }
+
+  /** What the banner says while the post is hostile (its kind: garrison, powder, drum, duel). */
+  setGlyph(glyph: string) {
+    this.texHostile.dispose();
+    this.texHostile = bannerTexture(glyph, this.hostile);
+    if (!this.captured) {
+      this.bannerMat.map = this.texHostile;
+      this.bannerMat.needsUpdate = true;
+    }
   }
 
   dispose() {
     this.group.removeFromParent();
+    this.texHostile.dispose();
+    this.texTaken.dispose();
     for (const o of this.owned) o.dispose();
   }
 }

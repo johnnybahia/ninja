@@ -135,6 +135,12 @@ export const sfx = {
     tone(880, 1180, 0.08, 'square', 0.06);
     setTimeout(() => tone(1180, 1560, 0.09, 'square', 0.05), 80);
   },
+  // A war drum beat: low and round, with a rumble
+  drum: () => {
+    tone(112, 58, 0.42, 'sine', 0.42);
+    noise(0.14, 0.3, 380, 'lowpass');
+    setTimeout(() => tone(96, 52, 0.36, 'sine', 0.3), 170);
+  },
   // The instant before a parry-able blow lands: a short high tick, the cue to press guard
   tell: () => {
     tone(1560, 1900, 0.05, 'triangle', 0.05);
