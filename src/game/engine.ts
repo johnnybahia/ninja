@@ -33,13 +33,14 @@ import { buildCharacter } from './characters';
 import { createClipRig, Grip, OneShot, PlayOptions } from './clipRig';
 import { loadCharacter, loadWeapons, loadLazyWeapons, weaponsReady, preloadModels, characterIfReady, CharacterTemplate, LAZY_CHARACTERS, type CharacterModel } from './models';
 import { COMBOS, SPECIAL_MOVES, RUSH, ENEMY_STRIKES, BOSS_STRIKES, FINISHERS, FINISHER_CLIP_LEN, Finisher, ClipMove } from './moves';
-import { BladeSeg, makeSeg, sweepVsCapsule, BLADE_SEG, MAGNET_REACH, HURT_BOTTOM, HURT_TOP } from './combat';
+import { BladeSeg, makeSeg, segSegDist, sweepVsCapsule, BLADE_SEG, MAGNET_REACH, HURT_BOTTOM, HURT_TOP } from './combat';
 import { DebugDraw } from './debugdraw';
 import { animateCharacter, animateDeath } from './animation';
 import { TUNE } from './tunables';
 import { cardById, describeOffer, drawCards, CardOffer } from './cards';
 import { HONOR, NO_BONUS, MetaBonus, RunSummary } from './meta';
-import { pickWaveGoal, pickWaveMod, WaveMod, type GoalId } from './mods';
+import { pickWaveGoal, pickWaveMod, WAVE_GOALS, WaveMod, type GoalId } from './mods';
+import { Outpost, pickPostSpots } from './outposts';
 
 // Enemy samurai reuse the Rōnin's mesh, armour darkened toward blued steel
 const ENEMY_TINT = new THREE.Color(0.42, 0.46, 0.62);
@@ -76,6 +77,34 @@ const VARIANT_GRIP: Partial<Record<EnemyVariant, { right: Grip; left?: Grip }>> 
 };
 // the weapons each fighter wields (right hand, left hand) - fetched in the background
 const VARIANT_WEAPONS: Partial<Record<EnemyVariant, [string, string]>> = { nito: ['dsfire', 'dsmagic'], raio: ['claw_r', 'claw_l'] };
+// A wave doesn't pour in all at once: only so many enemies are in the fight at a time and the rest
+// wait at the edge of the arena, stepping in a moment after someone falls (the fight stays readable)
+// Conquista: a post wakes up when the player comes this close; each post has its own garrison
+const POST_ACTIVATE = 20;
+// Foot soldiers (ashigaru): plenty of them, each falls to one blow and hits lightly. They need no
+// attack token, only a couple swing at once, so a crowd of them is a battlefield, not a wall.
+const ASHIGARU_TINT = new THREE.Color(0.6, 0.55, 0.46);
+const FODDER_SWINGERS = 2;
+const FODDER_DAMAGE = 0.3;
+// patrols on the road between posts
+const PATROL_FIRST = 9;
+const PATROL_EVERY: [number, number] = [16, 26];
+const PATROL_CLEAR = 22; // no patrol while the player is this close to a post that is still hostile
+const isFodder = (e: { variant?: EnemyVariant }) => e.variant === 'ashigaru';
+const GARRISONS = ['infantry', 'archers', 'elite'] as const;
+type Garrison = (typeof GARRISONS)[number];
+const GARRISON_NAME: Record<Garrison, string> = { infantry: 'infantaria', archers: 'arqueiros', elite: 'guarda de elite' };
+const ARROWS = ['↑', '↗', '→', '↘', '↓', '↙', '←', '↖'];
+const REINFORCE_GAP = 1.4; // seconds after a fall before the next one steps in
+const REINFORCE_SPACING = 0.6; // between two that step in back to back
+const RESIST_MAX = 5; // most enemies in the field at once on a Resistir wave
+const HINTS: Partial<Record<EnemyVariant, [string, string]>> = {
+  brute: ['Novo inimigo: Brutamontes', 'Pule a varrida e castigue a recuperação'],
+  monk: ['Novo inimigo: Samurai do Bō', 'Ataca de longe: feche a distância com a esquiva'],
+  nito: ['Novo inimigo: Samurai das Duas Espadas', 'Espadas gêmeas de fogo e magia: apare ou afaste-se'],
+  shinobi: ['Novo inimigo: Shinobi', 'Veloz: some e reaparece perto, atira estrelas'],
+  raio: ['Novo inimigo: Lutador do Raio', 'Garras em combos relâmpago e teletransporte: esquive no ritmo']
+};
 const FIGHTER_NAME: Partial<Record<EnemyVariant, string>> = { shinobi: 'Shinobi', raio: 'Lutador do Raio', nito: 'Samurai das Duas Espadas', monk: 'Samurai do Bō' };
 const SHINOBI_LIGHT = new THREE.Color(0.5, 1.7, 3.2);
 const RAIO_LIGHT = new THREE.Color(1.7, 1.3, 3.4);
@@ -150,6 +179,10 @@ const IMPACT_BLOCK = new THREE.Color(1.8, 1.5, 1.1);
 
 // Sekiro-style combat tuning
 const DEFLECT_WINDOW = 0.2;
+const CUT_MIN_SPEED = 5; // m/s: the tip must be moving at least this fast to cut a shot out of the air
+const SHOT_BACK_SPEED = 26;
+const PERFECT_PARRY = 0.09; // a guard pressed this close to the blow is a perfect parry
+const CLASH_POSE_TIME = 0.2; // how long the weapon is held where the blades met
 const GHOST_DASH = new THREE.Color(0x2a2464);
 const GHOST_PERFECT = new THREE.Color(0x6a4a18);
 const DUST_BASE = new THREE.Color(0.55, 0.5, 0.44); // seconds after pressing guard that an incoming strike is deflected
@@ -226,6 +259,8 @@ export interface GameEngineCallbacks {
   onHonorChange?: (honor: number) => void;
   onBossChange?: (boss: { hp: number; max: number; fury: boolean; name: string } | null) => void;
   onWaveMod?: (mod: { id: string; name: string; glyph: string; desc: string } | null) => void;
+  // shots being drawn or in flight toward the player from outside the view: angle from the camera's forward (rad, + = right)
+  onThreats?: (threats: { a: number; u: number }[]) => void;
 }
 
 // A committed move or reaction on the mocap rig. Times are clip seconds (see moves.ts).
@@ -255,6 +290,9 @@ interface HitWindow {
   weapon: WeaponDef;
   hits: Set<EnemyInstance>;
   began: boolean;
+  wide: number; // extra contact radius (a broad shove)
+  ring: number; // whirl: anyone this close is caught when the window is half through
+  ringDone: boolean;
 }
 
 // Where a blow really landed: the contact point and the direction the blade was travelling
@@ -435,6 +473,36 @@ export class GameEngine {
   public wave = 0;
   private waveTimer = 0;
   private clearedShown = false;
+  // defending against arrows and stars: the weapon's path this frame and last, warnings, zoom pacing
+  private cutPrev = makeSeg();
+  private cutCur = makeSeg();
+  private cutPrevOk = false;
+  private cutActive = false;
+  private cutV = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+  private warnedShooters = new Set<EnemyInstance>();
+  private lastThreatKey = '';
+  private threatT = 0;
+  private lastParryZoom = -99;
+  // the weapon held where the blades met for a moment after a parry, and the fight camera's lean
+  private clash: { mesh: THREE.Object3D; q: THREE.Quaternion; t: number } | null = null;
+  private clashSeg = makeSeg();
+  private clashObj = new THREE.Object3D();
+  private clashQ = new THREE.Quaternion();
+  private fightLead = new THREE.Vector3();
+  private camExtra = 0;
+  // enemies of the wave waiting to step in, and how many of each kind may be in the fight
+  // Conquista mode (see outposts.ts): the field has enemy posts; walking up to one wakes its
+  // garrison, whose captain you defeat to take it. Each post is a "wave" for scaling and Honra.
+  public mode: 'waves' | 'conquest' = 'waves';
+  private posts: Outpost[] = [];
+  private postSolids: { x: number; z: number; r: number; h: number }[] = [];
+  private conq = { round: 1, active: -1, taken: 0, hudT: 0, hudText: '', bossKills0: 0, routed: false, patrolT: PATROL_FIRST };
+  private spawnOrigin: { x: number; z: number } | null = null;
+  private garrison: Garrison = 'infantry';
+  private waveQueue: { type: 'samurai' | 'archer'; variant?: EnemyVariant }[] = [];
+  private waveCap: { melee: number; archer: number; fodder: number } | null = null;
+  private reinforceT = 0;
+  private prevActive = 0;
 
   // Run progression: level-up cards, Honra (meta currency) and the per-wave grade
   public metaBonus: MetaBonus = NO_BONUS;
@@ -464,7 +532,7 @@ export class GameEngine {
   private bestRank = 0;
   private bolts: { x: number; z: number; t: number; ring: THREE.Mesh; pillar: THREE.Mesh; struck: boolean; visual?: boolean }[] = [];
   private shocks: { x: number; z: number; r: number; mesh: THREE.Mesh; hit: boolean }[] = [];
-  private waveStat = { t0: 0, enemies: 0, finishers: 0, deflects: 0 };
+  private waveStat = { t0: 0, enemies: 0, queued: 0, finishers: 0, deflects: 0 };
   private lastBossKey = -1;
   private lastHardDef = -99;
   private timers: { at: number; fn: () => void }[] = [];
@@ -859,7 +927,8 @@ export class GameEngine {
         this.nextWave();
       };
       Promise.race([Promise.allSettled([...LAZY_CHARACTERS.map(loadCharacter), loadLazyWeapons()]), new Promise((r) => setTimeout(r, 8000))]).then(go);
-    } else this.nextWave();
+    } else if (this.mode === 'conquest') this.setupConquest();
+    else this.nextWave();
     if (!this.isRunning) {
       this.isRunning = true;
       this.clock.start();
@@ -892,6 +961,8 @@ export class GameEngine {
     this.ghosts.clear();
 
     this.world.props.reset();
+    this.endClash();
+    this.clearConquest();
     this.cardLv = {};
     this.cardOffer = null;
     this.picksPending = 0;
@@ -997,11 +1068,13 @@ export class GameEngine {
     this.player.tookDamage = false;
 
     const boss = this.wave % 4 === 0;
-    const mod = pickWaveMod(this.wave, this.prevMod);
+    // a post of the Conquista mode: the captain's goal on every ordinary one, no wave challenges
+    const conq = this.mode === 'conquest' && this.conq.active >= 0;
+    const mod = conq ? null : pickWaveMod(this.wave, this.prevMod);
     this.waveMod = mod;
     if (mod) this.prevMod = mod.id;
-    const goalDef = !boss && !mod ? pickWaveGoal(this.wave, this.prevGoal) : null;
-    if (goalDef) this.prevGoal = goalDef.id;
+    const goalDef = conq ? (boss ? null : WAVE_GOALS.find((g) => g.id === 'capitao')!) : !boss && !mod ? pickWaveGoal(this.wave, this.prevGoal) : null;
+    if (goalDef && !conq) this.prevGoal = goalDef.id;
     let nS = Math.min(9, 2 + this.wave);
     let nA = Math.min(4, Math.floor(this.wave / 2));
     if (goalDef?.id === 'duelo') {
@@ -1013,6 +1086,14 @@ export class GameEngine {
     } else if (goalDef?.id === 'capitao') {
       nS = Math.min(7, 3 + Math.floor(this.wave / 2));
       nA = Math.min(3, Math.floor(this.wave / 3));
+    }
+    if (conq && !boss) {
+      // each post has its own kind of garrison
+      if (this.garrison === 'infantry') nA = Math.min(nA, 1);
+      else if (this.garrison === 'archers') {
+        nA = Math.min(5, nA + 2);
+        nS = Math.max(2, nS - 2);
+      } else nS = Math.max(2, nS - 1);
     }
     if (mod?.id === 'flechas') {
       nA = Math.min(7, nA + 3);
@@ -1027,16 +1108,16 @@ export class GameEngine {
     // boss waves or goal waves, which are busy enough)
     let nBrute = 0;
     let nMonk = 0;
-    if (!boss && !goalDef) {
+    if (!boss && (!goalDef || conq)) {
       if (this.wave >= 3) nBrute = Math.min(2, 1 + Math.floor((this.wave - 3) / 5), Math.max(0, nS - 2));
       if (this.wave >= 3) nMonk = Math.min(3, Math.floor(this.wave / 3), Math.max(0, nS - nBrute - 1));
     }
     // the named fighters (see roster below) join from wave 4: one a wave, two from wave 9,
     // taking turns so the same one doesn't come twice running
     const fighters: EnemyVariant[] = [];
-    if (!boss && !goalDef && this.wave >= 4) {
+    if (!boss && (!goalDef || conq) && this.wave >= 4) {
       const pool = FIGHTER_ORDER.filter((v) => this.wave >= FIGHTER_MIN[v]! && this.fighterReady(v));
-      for (let k = 0; k < (this.wave >= 9 ? 2 : 1) && pool.length; k++) {
+      for (let k = 0; k < (this.wave >= 9 || (conq && this.garrison === 'elite') ? 2 : 1) && pool.length; k++) {
         fighters.push(pool.splice(this.fighterTurn++ % pool.length, 1)[0]);
         if (nS - nBrute - nMonk - fighters.length < 1) fighters.pop();
       }
@@ -1053,11 +1134,52 @@ export class GameEngine {
     for (let i = 0; i < nMonk; i++) list.push({ type: 'samurai', variant: this.fighterReady('monk') ? 'monk' : undefined });
     for (const v of fighters) list.push({ type: 'samurai', variant: v });
     for (let i = 0; i < nA; i++) list.push({ type: 'archer' });
+    // a post's foot soldiers: plenty, each worth little (the garrison of infantry has the most)
+    if (conq) {
+      const nAshi = Math.round(Math.min(10, 3 + this.conq.round * 2) * (boss ? 0.5 : this.garrison === 'infantry' ? 1 : 0.6));
+      for (let i = 0; i < nAshi; i++) list.push({ type: 'samurai', variant: 'ashigaru' });
+    }
     if (boss) list.push({ type: 'boss', variant: bossFormFor(this.wave) });
 
+    // only so many at a time: a mix goes in now (a plain face or two, one of the special ones, an
+    // archer) and the rest steps in as the fight thins out
+    const cap = this.capsFor(boss, goalDef?.id, mod?.id);
+    this.waveCap = cap;
+    this.waveQueue = [];
+    let now = list;
+    if (cap) {
+      const plain = list.filter((it) => it.type === 'samurai' && !it.variant);
+      const special = list.filter((it) => it.type === 'samurai' && it.variant && !isFodder(it));
+      const fodder = list.filter((it) => isFodder(it));
+      const archers = list.filter((it) => it.type === 'archer');
+      const first: typeof list = list.filter((it) => it.type === 'boss');
+      const sp = special.shift();
+      if (sp) first.push(sp);
+      const meleeIn = () => first.filter((it) => it.type === 'samurai').length;
+      while (meleeIn() < cap.melee && plain.length) first.push(plain.shift()!);
+      while (meleeIn() < cap.melee && special.length) first.push(special.shift()!);
+      while (first.filter((it) => it.type === 'archer').length < cap.archer && archers.length) first.push(archers.shift()!);
+      while (first.filter((it) => isFodder(it)).length < cap.fodder && fodder.length) first.push(fodder.shift()!);
+      // the rest, plain and special faces alternating, a couple of foot soldiers after each
+      const rest: typeof list = [];
+      const melee: typeof list = [];
+      while (plain.length || special.length) {
+        if (special.length) melee.push(special.shift()!);
+        if (plain.length) melee.push(plain.shift()!);
+      }
+      for (const m of melee) {
+        rest.push(m);
+        for (let k = 0; k < 2 && fodder.length; k++) rest.push(fodder.shift()!);
+      }
+      rest.push(...fodder, ...archers);
+      now = first;
+      this.waveQueue = rest.filter((it): it is { type: 'samurai' | 'archer'; variant?: EnemyVariant } => it.type !== 'boss');
+    }
+    this.reinforceT = REINFORCE_GAP;
+    this.prevActive = now.filter((it) => it.type !== 'boss').length;
     const spawned: EnemyInstance[] = [];
-    list.forEach((it) => {
-      const e = this.spawnRing(it.type, near, it.variant);
+    now.forEach((it) => {
+      const e = this.spawnOrigin ? this.spawnAtPost(it.type, it.variant) : this.spawnRing(it.type, near, it.variant);
       if (e) spawned.push(e);
     });
     for (const e of spawned) if (e.type === 'boss' && e.variant) e.aura = this.makeAura(BOSS_COLOR[e.variant], 3.0);
@@ -1066,7 +1188,7 @@ export class GameEngine {
       let captain: EnemyInstance | undefined;
       if (goalDef.id === 'duelo' && spawned[0]) this.makeDuelist(spawned[0]);
       if (goalDef.id === 'capitao') {
-        captain = spawned.find((e) => e.type === 'samurai');
+        captain = this.pickCaptain(spawned);
         if (captain) this.makeCaptain(captain);
       }
       const dur = goalDef.id === 'resistir' ? 28 + Math.min(14, this.wave * 1.2) : 0;
@@ -1080,7 +1202,7 @@ export class GameEngine {
       for (let n = 1 + Math.floor(this.wave / 6); n > 0 && pool.length; n--) this.makeElite(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
     }
 
-    this.waveStat = { t0: this.time, enemies: list.length, finishers: 0, deflects: 0 };
+    this.waveStat = { t0: this.time, enemies: list.filter((it) => !isFodder(it)).length, queued: this.waveQueue.filter((it) => !isFodder(it)).length, finishers: 0, deflects: 0 };
     let sub = boss ? BOSS_HINT[bossFormFor(this.wave) ?? 'oni'] : mod ? mod.desc : goalDef ? (duelist ? `Duelo contra ${FIGHTER_NAME[duelist]}` : goalDef.desc) : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
     const atmIdx = atmosphereForWave(this.wave, this.atmosMode, this.world.atmIndex);
     if (atmIdx !== this.world.atmIndex) {
@@ -1093,25 +1215,302 @@ export class GameEngine {
       sub += ` · ${THEMES[themeIdx].glyph} ${THEMES[themeIdx].name}`;
     }
     // the first time a new kind of samurai shows up, a hint on how to beat it
-    const HINTS: Partial<Record<EnemyVariant, [string, string]>> = {
-      brute: ['Novo inimigo: Brutamontes', 'Pule a varrida e castigue a recuperação'],
-      monk: ['Novo inimigo: Samurai do Bō', 'Ataca de longe: feche a distância com a esquiva'],
-      nito: ['Novo inimigo: Samurai das Duas Espadas', 'Espadas gêmeas de fogo e magia: apare ou afaste-se'],
-      shinobi: ['Novo inimigo: Shinobi', 'Veloz: some e reaparece perto, atira estrelas'],
-      raio: ['Novo inimigo: Lutador do Raio', 'Garras em combos relâmpago e teletransporte: esquive no ritmo']
-    };
     let hintAt = 2.3;
     for (const v of ['brute', 'monk', 'nito', 'shinobi', 'raio'] as EnemyVariant[]) {
-      if (!this.seenVariants.has(v) && spawned.some((e) => e.variant === v)) {
-        this.seenVariants.add(v);
-        const wv = this.wave;
-        this.timers.push({ at: this.time + hintAt, fn: () => this.state === 'play' && this.wave === wv && this.callbacks.onWaveChange(wv, HINTS[v]![0], HINTS[v]![1]) });
-        hintAt += 2.3;
-      }
+      if (spawned.some((e) => e.variant === v) && this.hintVariant(v, hintAt)) hintAt += 2.3;
     }
     this.callbacks.onWaveMod?.(mod ? { id: mod.id, name: mod.name, glyph: mod.glyph, desc: mod.desc } : goalDef ? { id: goalDef.id, name: goalDef.name, glyph: goalDef.glyph, desc: goalDef.desc } : null);
-    this.callbacks.onWaveChange(this.wave, mod ? `Onda ${this.wave} · ${mod.name}` : goalDef ? `Onda ${this.wave} · ${goalDef.name}` : `Onda ${this.wave}`, sub);
+    const label = conq ? `Posto ${this.wave}` : `Onda ${this.wave}`;
+    if (conq) sub = `${GARRISON_NAME[this.garrison][0].toUpperCase()}${GARRISON_NAME[this.garrison].slice(1)} · ${boss ? sub : goalDef ? goalDef.desc : sub}`;
+    this.callbacks.onWaveChange(this.wave, mod ? `${label} · ${mod.name}` : goalDef ? `${label} · ${goalDef.name}` : label, sub);
     sfx.wave();
+  }
+
+  // The first time a kind of samurai shows up, a hint on how to beat it (true if one was shown)
+  private hintVariant(v: EnemyVariant, delay: number): boolean {
+    const h = HINTS[v];
+    if (!h || this.seenVariants.has(v)) return false;
+    this.seenVariants.add(v);
+    const wv = this.wave;
+    this.timers.push({ at: this.time + delay, fn: () => this.state === 'play' && this.wave === wv && this.callbacks.onWaveChange(wv, h[0], h[1]) });
+    return true;
+  }
+
+  // How many may be in the fight at once. Duels and Resistir (which streams its own
+  // reinforcements) are left alone; the Oni's escorts are fewer, the captain's band one more.
+  private capsFor(boss: boolean, goalId?: string, modId?: string): { melee: number; archer: number; fodder: number } | null {
+    if (goalId === 'duelo' || goalId === 'resistir') return null;
+    const w = this.wave;
+    let melee = w <= 2 ? 2 : w <= 5 ? 3 : 4;
+    let archer = w <= 5 ? 1 : 2;
+    let fodder = w <= 3 ? 4 : 6;
+    if (boss) {
+      melee = Math.max(2, melee - 1);
+      archer = 1;
+      fodder = 4;
+    }
+    if (goalId === 'capitao') melee += 1;
+    if (modId === 'flechas') archer = 4;
+    return { melee, archer, fodder };
+  }
+
+  // A new face steps in from ahead of the camera (so it is seen coming, not met in the back),
+  // else from anywhere on the ring
+  private spawnAhead(type: 'samurai' | 'archer', variant?: EnemyVariant): EnemyInstance | null {
+    const pt = this.aheadPoint();
+    return pt ? this.spawnEnemy(type, pt.x, pt.z, variant) : this.spawnRing(type, true, variant);
+  }
+
+  // An open spot 15-23 m away in the half of the field the camera looks at
+  private aheadPoint(): { x: number; z: number } | null {
+    const P = this.player.pos;
+    const fa = Math.atan2(-Math.sin(this.camYaw), -Math.cos(this.camYaw));
+    for (let k = 0; k < 24; k++) {
+      const a = fa + rand(-1.25, 1.25);
+      const r = rand(15, 23);
+      const x = P.x + Math.sin(a) * r;
+      const z = P.z + Math.cos(a) * r;
+      if (Math.hypot(x, z) > 35) continue;
+      if (this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r + 0.8)) continue;
+      return { x, z };
+    }
+    return null;
+  }
+
+  // Which of the waiting ones steps in: one whose kind isn't already in the fight, if the
+  // numbers allow it (-1: no room yet)
+  private pickQueued(melee: number, archers: number, fodder: number): number {
+    const cap = this.waveCap;
+    if (!cap) return -1;
+    const live = new Set<string>();
+    for (const e of this.enemies) if (!e.dead && e.type === 'samurai' && !isFodder(e)) live.add(e.variant ?? 'plain');
+    let first = -1;
+    for (let i = 0; i < this.waveQueue.length; i++) {
+      const it = this.waveQueue[i];
+      if (isFodder(it)) {
+        if (fodder >= cap.fodder) continue;
+        if (first < 0) first = i;
+        continue;
+      }
+      if (it.type === 'samurai' ? melee >= cap.melee : archers >= cap.archer) continue;
+      if (first < 0) first = i;
+      if (it.type === 'archer' || !live.has(it.variant ?? 'plain')) return i;
+    }
+    return first;
+  }
+
+  private stepReinforcements(dt: number) {
+    if (!this.waveQueue.length) return;
+    let melee = 0;
+    let archers = 0;
+    let fodder = 0;
+    for (const e of this.enemies) {
+      if (e.dead) continue;
+      if (isFodder(e)) fodder++;
+      else if (e.type === 'samurai') melee++;
+      else if (e.type === 'archer') archers++;
+    }
+    const act = melee + archers + fodder;
+    const idx = this.pickQueued(melee, archers, fodder);
+    // a foot soldier steps in almost at once; a face of note takes its moment
+    if (act < this.prevActive) this.reinforceT = Math.max(this.reinforceT, idx >= 0 && isFodder(this.waveQueue[idx]) ? 0.5 : REINFORCE_GAP);
+    this.prevActive = act;
+    this.reinforceT -= dt;
+    if (this.reinforceT > 0) return;
+    if (idx < 0) return;
+    const [it] = this.waveQueue.splice(idx, 1);
+    const e = this.spawnOrigin ? this.spawnAtPost(it.type, it.variant) : this.spawnAhead(it.type, it.variant);
+    if (!e) {
+      this.waveQueue.unshift(it);
+      return;
+    }
+    if (this.waveMod?.id === 'ferro') e.maxPosture *= 1.6;
+    if (it.variant) this.hintVariant(it.variant, 0.6);
+    this.prevActive = act + 1;
+    this.reinforceT = isFodder(it) ? 0.25 : REINFORCE_SPACING;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Conquista: enemy posts across the field, each with a garrison and a captain
+  // ---------------------------------------------------------------------------
+  private setupConquest() {
+    this.clearConquest();
+    const spots = pickPostSpots((x, z, pad) => this.world.isFree(x, z, pad), 3);
+    for (const sp of spots) {
+      const post = new Outpost(sp.x, sp.z);
+      this.scene.add(post.group);
+      for (const so of post.solids) {
+        this.solids.push(so);
+        this.postSolids.push(so);
+      }
+      this.posts.push(post);
+    }
+    this.conq = { round: 1, active: -1, taken: 0, hudT: 0, hudText: '', bossKills0: 0, routed: false, patrolT: PATROL_FIRST };
+    this.wave = 0;
+    this.callbacks.onWaveChange(0, 'Conquista', `Tome os ${this.posts.length} postos inimigos: derrote o capitão de cada um`);
+    this.updateConquestHud(0, true);
+  }
+
+  private clearConquest() {
+    for (const p of this.posts) p.dispose();
+    this.posts = [];
+    if (this.postSolids.length) {
+      const drop = new Set(this.postSolids);
+      for (let i = this.solids.length - 1; i >= 0; i--) if (drop.has(this.solids[i])) this.solids.splice(i, 1);
+      this.postSolids = [];
+    }
+    this.spawnOrigin = null;
+    this.conq = { round: 1, active: -1, taken: 0, hudT: 0, hudText: '', bossKills0: 0, routed: false, patrolT: PATROL_FIRST };
+  }
+
+  private stepConquest(dt: number) {
+    for (const p of this.posts) p.update(this.time);
+    const c = this.conq;
+    if (c.active >= 0) {
+      // the Oni leads its post like a captain: when it falls the escort breaks and runs
+      if (!this.goal && !c.routed && this.bossKills > c.bossKills0) {
+        c.routed = true;
+        this.waveQueue = [];
+        this.routEnemies();
+      }
+      return;
+    }
+    const P = this.player.pos;
+    for (let i = 0; i < this.posts.length; i++) {
+      const p = this.posts[i];
+      const d = Math.hypot(p.x - P.x, p.z - P.z);
+      if (d > POST_ACTIVATE + 8) p.armed = true;
+      if (!p.captured && p.armed && d < POST_ACTIVATE) {
+        this.startOutpost(i);
+        return;
+      }
+    }
+    this.stepPatrols(dt);
+    this.updateConquestHud(dt);
+  }
+
+  // The objective pill: how many posts are taken and which way the nearest one lies
+  private updateConquestHud(dt: number, force = false) {
+    const c = this.conq;
+    c.hudT -= dt;
+    if (c.hudT > 0 && !force) return;
+    c.hudT = 0.3;
+    const P = this.player.pos;
+    let best: Outpost | null = null;
+    let bd = Infinity;
+    for (const p of this.posts) {
+      if (p.captured) continue;
+      const d = Math.hypot(p.x - P.x, p.z - P.z);
+      if (d < bd) {
+        bd = d;
+        best = p;
+      }
+    }
+    if (!best) return;
+    const fx = -Math.sin(this.camYaw);
+    const fz = -Math.cos(this.camYaw);
+    const rx = Math.cos(this.camYaw);
+    const rz = -Math.sin(this.camYaw);
+    const dx = best.x - P.x;
+    const dz = best.z - P.z;
+    const ang = Math.atan2(dx * rx + dz * rz, dx * fx + dz * fz);
+    const arrow = ARROWS[((Math.round(ang / (Math.PI / 4)) % 8) + 8) % 8];
+    const text = `Conquista ${c.taken}/${this.posts.length} · ${arrow} ${Math.round(bd / 2) * 2} m`;
+    if (text === c.hudText) return;
+    c.hudText = text;
+    this.callbacks.onWaveMod?.({ id: 'conquista', name: text, glyph: '旗', desc: 'Vá até um posto inimigo e derrote o capitão da guarnição' });
+  }
+
+  private startOutpost(i: number) {
+    const p = this.posts[i];
+    this.conq.active = i;
+    this.conq.routed = false;
+    this.conq.bossKills0 = this.bossKills;
+    // a patrol still on the road breaks off: the post is the fight now
+    this.routEnemies((e) => !!e.patrol);
+    this.spawnOrigin = { x: p.x, z: p.z };
+    this.garrison = GARRISONS[i % GARRISONS.length];
+    this.nextWave();
+    this.spawnLabel(p.x, 3.6, p.z, 'POSTO INIMIGO!', '#ff8a7a', 1.5);
+  }
+
+  private captureOutpost() {
+    const c = this.conq;
+    const p = this.posts[c.active];
+    c.active = -1;
+    this.spawnOrigin = null;
+    this.waveQueue = [];
+    c.taken++;
+    if (p) {
+      p.setCaptured(true);
+      this.emitParticles(p.x, 1.5, p.z, 44, 0x4fd6a8, 6, 3, -1, 1.2);
+      this.spawnLabel(p.x, 3.6, p.z, 'POSTO TOMADO!', '#8fe0c8', 1.6);
+    }
+    // the taken post pays in life and Honra
+    this.player.hp = Math.min(this.player.maxHp, this.player.hp + Math.round(this.player.maxHp * 0.3));
+    this.callbacks.onHpChange(this.player.hp, this.player.maxHp);
+    this.addHonor('mod', 8);
+    sfx.wave();
+    if (c.taken >= this.posts.length) {
+      c.round++;
+      c.taken = 0;
+      this.posts.forEach((q) => {
+        q.setCaptured(false);
+        q.armed = false;
+      });
+      this.callbacks.onWaveChange(this.wave, `Território conquistado · Rodada ${c.round}`, 'Reforços retomam os postos: tome todos de novo, mais fortes');
+    } else {
+      this.callbacks.onWaveChange(this.wave, `Posto tomado · ${c.taken}/${this.posts.length}`, 'Siga para o próximo posto');
+    }
+    this.updateConquestHud(0, true);
+  }
+
+  // The garrison forms up inside the post's ring
+  private spawnAtPost(type: 'samurai' | 'archer' | 'boss', variant?: EnemyVariant): EnemyInstance | null {
+    const o = this.spawnOrigin;
+    if (!o) return null;
+    for (let k = 0; k < 30; k++) {
+      const a = Math.random() * TAU;
+      const r = type === 'boss' ? rand(1.5, 3.5) : rand(2.5, 5.5);
+      const x = o.x + Math.sin(a) * r;
+      const z = o.z + Math.cos(a) * r;
+      if (Math.hypot(x, z) > R_ARENA - 2) continue;
+      if (this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r + (type === 'boss' ? 1.5 : 0.8))) continue;
+      return this.spawnEnemy(type, x, z, variant);
+    }
+    return this.spawnRing(type, true, variant);
+  }
+
+  // A patrol takes the road now and then while no post is awake: a few foot soldiers and a leader
+  // who has already seen the player. One at a time, never near a hostile post, gone when a post wakes.
+  private stepPatrols(dt: number) {
+    const c = this.conq;
+    c.patrolT -= dt;
+    if (c.patrolT > 0) return;
+    c.patrolT = rand(PATROL_EVERY[0], PATROL_EVERY[1]);
+    if (this.enemies.some((e) => !e.dead && e.patrol)) return;
+    const P = this.player.pos;
+    if (this.posts.some((p) => !p.captured && Math.hypot(p.x - P.x, p.z - P.z) < PATROL_CLEAR)) return;
+    const base = this.aheadPoint();
+    if (!base) return;
+    const lead: { type: 'samurai'; variant?: EnemyVariant } = { type: 'samurai' };
+    const fighters = FIGHTER_ORDER.filter((v) => this.wave >= FIGHTER_MIN[v]! && this.fighterReady(v));
+    if (c.round >= 2 && fighters.length && Math.random() < 0.5) lead.variant = fighters[Math.floor(Math.random() * fighters.length)];
+    else if (this.wave >= 3 && this.fighterReady('monk') && Math.random() < 0.4) lead.variant = 'monk';
+    const group: { type: 'samurai'; variant?: EnemyVariant }[] = [lead];
+    for (let i = 0; i < Math.min(6, 2 + c.round); i++) group.push({ type: 'samurai', variant: 'ashigaru' });
+    for (const it of group) {
+      const a = Math.random() * TAU;
+      const r = rand(0.5, 2.6);
+      const e = this.spawnEnemy(it.type, base.x + Math.sin(a) * r, base.z + Math.cos(a) * r, it.variant);
+      e.patrol = true;
+    }
+    this.spawnLabel(base.x, 3.2, base.z, 'RONDA INIMIGA!', '#ffb36a', 1.3);
+  }
+
+  // Who leads a garrison: a named fighter if there is one, else the brute, else any samurai
+  private pickCaptain(list: EnemyInstance[]): EnemyInstance | undefined {
+    return list.find((e) => e.variant === 'nito' || e.variant === 'shinobi' || e.variant === 'raio') ?? list.find((e) => e.variant === 'brute') ?? list.find((e) => e.type === 'samurai');
   }
 
   // Elite samurai: tougher and harder-hitting, marked with a golden ground ring and a gold
@@ -1166,9 +1565,9 @@ export class GameEngine {
   }
 
   // The enemies still standing turn and run, then vanish (no Honra, no drops)
-  private routEnemies() {
+  private routEnemies(only?: (e: EnemyInstance) => boolean) {
     for (const e of this.enemies) {
-      if (e.dead || e.flee) continue;
+      if (e.dead || e.flee || (only && !only(e))) continue;
       e.flee = true;
       e.fleeT = 0;
       e.token = false;
@@ -1195,11 +1594,13 @@ export class GameEngine {
       }
       const alive = this.enemies.reduce((n, e) => n + (e.dead ? 0 : 1), 0);
       g.next -= dt;
-      if (g.t < g.dur - 4 && (g.next <= 0 || alive === 0) && alive < 9) {
+      // never more than a handful in the field at once, however long the night
+      const room = RESIST_MAX - alive;
+      if (g.t < g.dur - 4 && (g.next <= 0 || alive === 0) && room > 0) {
         g.next = 7;
-        const n = 2 + (this.wave >= 6 ? 1 : 0);
+        const n = Math.min(2 + (this.wave >= 6 ? 1 : 0), room);
         for (let i = 0; i < n; i++) this.spawnRing('samurai', false);
-        if (this.wave >= 5 && Math.random() < 0.5) this.spawnRing('archer', false);
+        if (this.wave >= 5 && room - n > 0 && Math.random() < 0.5) this.spawnRing('archer', false);
         this.spawnLabel(this.player.pos.x, this.player.pos.y + 3.2, this.player.pos.z, 'REFORÇOS!', '#ffd166', 1.2);
         sfx.wave();
       }
@@ -1211,6 +1612,7 @@ export class GameEngine {
 
   private finishGoal(g: NonNullable<GameEngine['goal']>, text: string) {
     g.done = true;
+    this.waveQueue = [];
     this.routEnemies();
     this.callbacks.onWaveMod?.({ id: g.id, name: `${g.name} ✓`, glyph: g.glyph, desc: text });
     this.callbacks.onWaveChange(this.wave, text, '');
@@ -1248,8 +1650,8 @@ export class GameEngine {
       // per spawn, same clips and AI
       const tpl = characterIfReady('ronin');
       const tpl2 = characterIfReady('samurai2');
-      const vTint = variant === 'brute' ? BRUTE_TINT : undefined;
-      const vHeight = variant === 'brute' ? 2.8 : undefined;
+      const vTint = variant === 'brute' ? BRUTE_TINT : variant === 'ashigaru' ? ASHIGARU_TINT : undefined;
+      const vHeight = variant === 'brute' ? 2.8 : variant === 'ashigaru' ? 2.1 : undefined;
       // a fighter with a model of its own (when it has finished loading)
       const fm = variant && VARIANT_MODEL[variant] ? characterIfReady(VARIANT_MODEL[variant]!) : null;
       if (fm && variant) rig = createClipRig(fm, { lod: true, height: VARIANT_HEIGHT[variant], grips: VARIANT_GRIP[variant] });
@@ -1271,6 +1673,7 @@ export class GameEngine {
         weaponObj = makeWeapon(variant === 'monk' ? 'bo' : 'ekatana');
         bladeKey = variant === 'monk' ? 'bo' : 'ekatana';
         if (variant === 'brute') weaponObj.scale.setScalar(1.45);
+        else if (variant === 'ashigaru') weaponObj.scale.setScalar(0.85);
         rig.hand.add(weaponObj);
         if (variant === 'nito' && fm) {
           weaponObjL = makeWeapon('ekatana');
@@ -1285,6 +1688,11 @@ export class GameEngine {
         speed *= 0.62;
         r = 0.8;
         h = 3.0;
+      } else if (variant === 'ashigaru') {
+        // a single blow of any weapon brings one down (until the late waves, when two may)
+        hp = Math.min(24, 10 + this.wave * 0.6);
+        speed *= 0.95;
+        r = 0.45;
       } else if (variant === 'monk') {
         hp *= 0.85;
         speed *= 1.12;
@@ -2288,6 +2696,7 @@ export class GameEngine {
   ): PlayerAct | null {
     const ctl = this.player.rig.clip;
     if (!ctl) return null;
+    this.endClash();
     const shot = ctl.play(clip, { fadeIn: 0.1, fadeOut: 0.3, ...o });
     if (!shot) return null;
     const a: PlayerAct = {
@@ -2401,7 +2810,7 @@ export class GameEngine {
     if (sweepable) {
       // damage is decided by the weapon actually touching a body inside these spans
       for (const [t0, t1] of m.win ?? m.hit.map((h): [number, number] => [h - 0.08, h + 0.08])) {
-        act.windows.push({ t0, t1, dmg: m.dmg, kb: m.kb, heavy: !!m.heavy, weapon: w, hits: new Set(), began: false });
+        act.windows.push({ t0, t1, dmg: m.dmg, kb: m.kb, heavy: !!m.heavy, weapon: w, hits: new Set(), began: false, wide: m.wide ?? 0, ring: m.ring ?? 0, ringDone: false });
       }
       if (target && m.hit.length) {
         this.comboTarget = target;
@@ -2527,6 +2936,11 @@ export class GameEngine {
       }
       this.sweepEnemies(win, prev, cur, a);
       if (this.act !== a) return;
+      if (win.ring > 0 && !win.ringDone && sh.t >= (win.t0 + win.t1) / 2) {
+        win.ringDone = true;
+        this.ringHit(win, a);
+        if (this.act !== a) return;
+      }
       // the same blade also touches the scenery: sparks off stone, bark chips, a cut bamboo
       this.world.props.sweep(prev, cur, { power: a.kind === 'special' ? 3 : win.heavy ? 2 : 1, edged: w.id !== 'bo' && w.id !== 'karate', token: win, radius: this.bladeRadius });
       if (sh.t > win.t1) a.windows.splice(i, 1);
@@ -2537,40 +2951,57 @@ export class GameEngine {
   }
 
   private sweepEnemies(win: HitWindow, prev: BladeSeg | null, cur: BladeSeg, a: PlayerAct) {
-    const P = this.player;
     const inflate = 0.1 + 0.3 * TUNE.hitAssist + this.bladeRadius;
     for (const e of this.enemies) {
       if (e.dead || win.hits.has(e)) continue;
       const s = this.sizeOf(e);
-      if (!sweepVsCapsule(prev, cur, e.pos.x, e.pos.z, e.pos.y + HURT_BOTTOM * s, e.pos.y + HURT_TOP * s, e.r + inflate, this.hitPt, false, e.r)) continue;
-      win.hits.add(e);
-      const dx = e.pos.x - P.pos.x;
-      const dz = e.pos.z - P.pos.z;
-      const d = Math.hypot(dx, dz) || 0.001;
-      const nx = dx / d;
-      const nz = dz / d;
-      // knock along a mix of "away from the attacker" and the way the blade was travelling
-      let bx = prev ? cur.b.x - prev.b.x : 0;
-      let bz = prev ? cur.b.z - prev.b.z : 0;
-      const bl = Math.hypot(bx, bz);
-      if (bl > 1e-3) {
-        bx /= bl;
-        bz /= bl;
-      } else {
-        bx = nx;
-        bz = nz;
-      }
-      let kx = nx * 0.55 + bx * 0.45;
-      let kz = nz * 0.55 + bz * 0.45;
-      const kl = Math.hypot(kx, kz) || 1;
-      kx /= kl;
-      kz /= kl;
-      this.dbgHits.push({ p: this.hitPt.clone(), t: this.time });
-      // a wide swing can cut several enemies, the third onward for less
-      const mult = win.hits.size > 2 ? 0.7 : 1;
-      this.hitEnemy(e, win.dmg * mult, nx, nz, win.kb, win.heavy, { point: this.hitPt, dirX: kx, dirZ: kz });
+      if (!sweepVsCapsule(prev, cur, e.pos.x, e.pos.z, e.pos.y + HURT_BOTTOM * s, e.pos.y + HURT_TOP * s, e.r + inflate + win.wide, this.hitPt, false, e.r)) continue;
+      this.landSweepHit(e, win, prev, cur);
       if (this.act !== a) return;
     }
+  }
+
+  // A whirl catches everyone inside its ring that the staff's path didn't touch (it swings
+  // high and wide, so a body just inside its reach could slip between two frames)
+  private ringHit(win: HitWindow, a: PlayerAct) {
+    const P = this.player;
+    for (const e of this.enemies.slice()) {
+      if (e.dead || win.hits.has(e)) continue;
+      if (Math.hypot(e.pos.x - P.pos.x, e.pos.z - P.pos.z) - e.r > win.ring) continue;
+      this.hitPt.set(e.pos.x, e.pos.y + 1.2 * this.sizeOf(e), e.pos.z);
+      this.landSweepHit(e, win, null, null);
+      if (this.act !== a) return;
+    }
+  }
+
+  private landSweepHit(e: EnemyInstance, win: HitWindow, prev: BladeSeg | null, cur: BladeSeg | null) {
+    const P = this.player;
+    win.hits.add(e);
+    const dx = e.pos.x - P.pos.x;
+    const dz = e.pos.z - P.pos.z;
+    const d = Math.hypot(dx, dz) || 0.001;
+    const nx = dx / d;
+    const nz = dz / d;
+    // knock along a mix of "away from the attacker" and the way the blade was travelling
+    let bx = prev && cur ? cur.b.x - prev.b.x : 0;
+    let bz = prev && cur ? cur.b.z - prev.b.z : 0;
+    const bl = Math.hypot(bx, bz);
+    if (bl > 1e-3) {
+      bx /= bl;
+      bz /= bl;
+    } else {
+      bx = nx;
+      bz = nz;
+    }
+    let kx = nx * 0.55 + bx * 0.45;
+    let kz = nz * 0.55 + bz * 0.45;
+    const kl = Math.hypot(kx, kz) || 1;
+    kx /= kl;
+    kz /= kl;
+    this.dbgHits.push({ p: this.hitPt.clone(), t: this.time });
+    // a wide swing can cut several enemies, the third onward for less
+    const mult = win.hits.size > 2 ? 0.7 : 1;
+    this.hitEnemy(e, win.dmg * mult, nx, nz, win.kb, win.heavy, { point: this.hitPt, dirX: kx, dirZ: kz });
   }
 
   // Throwables leave the off hand (normal throw or the weapon's special volley)
@@ -2890,7 +3321,8 @@ export class GameEngine {
         pos: new THREE.Vector3(ox, oy, oz),
         vel: new THREE.Vector3((ax * c - az * sn) * speed, 0, (ax * sn + az * c) * speed),
         dmg,
-        life: 2
+        life: 2,
+        owner: e
       });
       sfx.arrow();
     };
@@ -3318,12 +3750,13 @@ export class GameEngine {
     this.cancelStrike(e);
 
     this.player.kills++;
+    const fodder = isFodder(e);
     if (e.type === 'boss') {
       this.addHonor('boss', HONOR.boss);
       this.bossKills++;
-    } else this.addHonor('kill', HONOR.kill[e.type] ?? 1);
+    } else this.addHonor('kill', fodder ? 0.2 : HONOR.kill[e.type] ?? 1);
     if (e.elite) this.addHonor('mod', HONOR.elite);
-    const pts = e.type === 'boss' ? 1200 : e.type === 'archer' ? 120 : 80;
+    const pts = e.type === 'boss' ? 1200 : e.type === 'archer' ? 120 : fodder ? 20 : 80;
     this.player.score += pts;
     this.callbacks.onScoreChange(this.player.score);
 
@@ -3335,15 +3768,17 @@ export class GameEngine {
     this.addXp(pts);
 
     // Erupção de sangue estelar ao eliminar o inimigo
-    this.emitBlood(e.pos.x, e.pos.y + 1.2, e.pos.z, 0, 0, e.type === 'boss' ? 65 : 42, true, true);
+    this.emitBlood(e.pos.x, e.pos.y + 1.2, e.pos.z, 0, 0, e.type === 'boss' ? 65 : fodder ? 18 : 42, true, true);
     {
       const a = rand(0, TAU);
       this.decals.spawn(e.pos.x, e.pos.z, Math.sin(a), Math.cos(a), e.type === 'boss' ? 2.6 : 1.8);
     }
-    this.emitParticles(e.pos.x, 1, e.pos.z, 28, 0x9a88c0, 5, 3, 4, 1);
+    this.emitParticles(e.pos.x, 1, e.pos.z, fodder ? 10 : 28, 0x9a88c0, 5, 3, 4, 1);
 
     // Bosses always drop a scroll; other kills roll against the loadout-proportional rate
-    if (e.type === 'boss' || e.elite || this.rollScroll()) this.dropScroll(e.pos.x, e.pos.z);
+    if (fodder) {
+      if (Math.random() < 0.04) this.dropPickup(e.pos.x, e.pos.z);
+    } else if (e.type === 'boss' || e.elite || this.rollScroll()) this.dropScroll(e.pos.x, e.pos.z);
     else if (Math.random() < 0.2) this.dropPickup(e.pos.x, e.pos.z);
   }
 
@@ -3420,7 +3855,8 @@ export class GameEngine {
     const w = this.waveStat;
     let pts = 0;
     if (!this.player.tookDamage) pts += 2;
-    if (this.time - w.t0 <= 12 + 10 * w.enemies) pts += 1;
+    // (each one that waits its turn adds the time it takes to step in and walk up)
+    if (this.time - w.t0 <= 12 + 10 * w.enemies + 6 * w.queued) pts += 1;
     if (w.finishers >= Math.ceil(w.enemies * 0.4)) pts += 1;
     if (w.deflects >= 3) pts += 1;
     return pts >= 5 ? 'S' : pts === 4 ? 'A' : pts === 3 ? 'B' : pts === 2 ? 'C' : 'D';
@@ -3863,7 +4299,7 @@ export class GameEngine {
     const brute = e.variant === 'brute';
     const monk = e.variant === 'monk';
     // the Brutamontes always ends a chain with a slow sweep to jump; the Monge jabs
-    const perilChance = boss ? (e.fury ? 0.45 : 0.35) : brute ? 1 : monk ? 0.3 : this.wave >= 2 ? 0.28 : 0.1;
+    const perilChance = boss ? (e.fury ? 0.45 : 0.35) : isFodder(e) ? 0 : brute ? 1 : monk ? 0.3 : this.wave >= 2 ? 0.28 : 0.1;
     let kind: StrikeKind = boss ? 'smash' : 'slash';
     let perilous = false;
     if (last && (e.forcePeril || Math.random() < perilChance)) {
@@ -3873,7 +4309,7 @@ export class GameEngine {
     }
     const windup = boss ? (kind === 'sweep' ? 0.85 : first ? 0.62 : 0.46) : perilous ? 0.64 : first ? 0.46 : 0.32;
     let reach = boss ? (kind === 'sweep' ? 4.6 : 3.9) : brute ? (kind === 'sweep' ? 3.7 : 3.0) : monk ? (kind === 'thrust' ? 4.3 : 3.3) : kind === 'thrust' ? 3.4 : kind === 'sweep' ? 2.8 : 2.3;
-    let dmg = Math.round((boss ? (kind === 'sweep' ? 22 : 24) : kind === 'thrust' ? 18 : kind === 'sweep' ? 15 : 12) * (e.elite ? 1.25 : 1) * (brute ? 1.7 : monk ? 0.85 : 1));
+    let dmg = Math.round((boss ? (kind === 'sweep' ? 22 : 24) : kind === 'thrust' ? 18 : kind === 'sweep' ? 15 : 12) * (e.elite ? 1.25 : 1) * (brute ? 1.7 : monk ? 0.85 : isFodder(e) ? FODDER_DAMAGE : 1));
     let wind = windup;
     // the named fighters use the Rōnin's own moves in their own style (see fighterStrike)
     const fs = e.rig.clip ? this.fighterStrike(e, first, last) : null;
@@ -3899,7 +4335,7 @@ export class GameEngine {
       // arrives when the damage does (combo follow-ups come a little quicker)
       const opts = ENEMY_STRIKES[kind];
       const pick = opts[Math.floor(Math.random() * opts.length)];
-      const speed = (perilous ? 0.95 : first ? 1.05 : 1.25) * (brute ? 0.72 : monk ? 1.15 : 1);
+      const speed = (perilous ? 0.95 : first ? 1.05 : 1.25) * (brute ? 0.72 : monk ? 1.15 : isFodder(e) ? 0.8 : 1);
       const from = pick.from ?? 0;
       wind = (pick.hit - from) / speed;
       this.enemyClip(e, pick.clip, { from, speed, fadeIn: 0.12, fadeOut: 0.3 });
@@ -3979,20 +4415,36 @@ export class GameEngine {
       this.waveStat.deflects++;
       this.deflectsTotal++;
       this.faceEnemy(e);
-      const mid = contact ? this.tmpV.copy(contact) : this.tmpV.set(this.player.pos.x - nx * 0.75, this.player.pos.y + 1.35, this.player.pos.z - nz * 0.75);
-      this.impacts.spawn(mid, IMPACT_DEFLECT, st.kind === 'thrust' ? 2.4 : 1.9, 0.16);
-      this.emitParticles(mid.x, mid.y, mid.z, 26, 0xffb347, 9, 2.2, 18, 0.32);
-      this.hitstop = 0.075;
-      this.lastHS = performance.now();
-      this.shake = Math.max(this.shake, 0.2);
-      this.fovKick = Math.min(this.fovKick, -3);
+      // a perfect parry (guard pressed right on the blow) pays more: stamina back, the foe's posture
+      // hit harder, a longer freeze and a flash; any parry brings the weapon to where the blades meet
+      const perfect = this.time - this.player.guardPressT <= PERFECT_PARRY;
       this.playerDeflectAnim();
-      this.addPlayerPosture(3);
+      const meet = this.clashPose(e);
+      const mid = meet ? this.tmpV.copy(meet) : contact ? this.tmpV.copy(contact) : this.tmpV.set(this.player.pos.x - nx * 0.75, this.player.pos.y + 1.35, this.player.pos.z - nz * 0.75);
+      this.impacts.spawn(mid, IMPACT_DEFLECT, (st.kind === 'thrust' ? 2.4 : 1.9) * (perfect ? 1.35 : 1), perfect ? 0.22 : 0.16);
+      this.emitParticles(mid.x, mid.y, mid.z, perfect ? 40 : 26, perfect ? 0xfff0b0 : 0xffb347, perfect ? 11 : 9, 2.2, 18, 0.32);
+      this.hitstop = perfect ? 0.1 : 0.075;
+      this.lastHS = performance.now();
+      this.shake = Math.max(this.shake, perfect ? 0.3 : 0.2);
+      this.fovKick = Math.min(this.fovKick, perfect ? -4.5 : -3);
+      this.addPlayerPosture(perfect ? 0 : 3);
       sfx.clang();
-      if (st.kind === 'thrust') {
+      if (perfect) {
+        this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'APARO PERFEITO!', '#ffd166', 1.45);
+        this.triggerSlowmo(0.22, 0.38);
+        this.player.st = Math.min(this.player.maxSt, this.player.st + 10);
+        this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
+        if (this.settings.cinematicCamera) {
+          this.flashFx = Math.max(this.flashFx, 0.14);
+          this.spikeFx = Math.max(this.spikeFx, 0.3);
+        }
+        this.addEnemyPosture(e, 12);
+      } else if (st.kind === 'thrust') {
         this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'CONTRA-ATAQUE!', '#ffd166', 1.3);
         this.triggerSlowmo(0.35, 0.3);
-      }
+      } else this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.4, this.player.pos.z, 'APAROU!', '#ffb347', 1);
+      // a short push-in on the defences worth seeing: the wave's first, a thrust, the Oni, a captain
+      if (perfect || st.kind === 'thrust' || this.waveStat.deflects === 1 || e.type === 'boss' || e.captain) this.parryZoom(perfect || st.kind === 'thrust');
       e.staggerT = e.type === 'boss' ? 0.18 : 0.32;
       e.anim = { kind: 'erecoil', t: 0, dur: 0.32, side: 0 };
       this.enemyClip(e, 'hit1', { from: 0.1, to: 0.75, speed: 1.6 });
@@ -4303,7 +4755,8 @@ export class GameEngine {
       aoeR: o.aoeR,
       kb: o.kb,
       noSolid: o.noSolid,
-      grav: o.grav
+      grav: o.grav,
+      owner: o.owner
     };
     if (p.pierce) p.hit = new Set();
     this.projectiles.push(p);
@@ -4665,6 +5118,45 @@ export class GameEngine {
     const leadTarget = this.player.vel.clone().multiplyScalar(TUNE.camLeadAmount);
     this.camLead.lerp(leadTarget, 1 - Math.exp(-4 * dt));
     const lookTarget = camTarget.clone().add(this.camLead);
+    // fight camera: the frame leans toward the opponent (the one swinging, else the closest) and opens
+    // up for a crowd or the Oni, so the exchange is the picture and nobody hides behind the player
+    let leadX = 0;
+    let leadZ = 0;
+    let extra = 0;
+    const fc = this.state === 'play' && !this.cine && !(typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) ? TUNE.fightCam : 0;
+    if (fc > 0) {
+      let focus: EnemyInstance | null = null;
+      let best = 0;
+      let crowd = 0;
+      let bossNear = false;
+      for (const e of this.enemies) {
+        if (e.dead || e.flee) continue;
+        const d = Math.hypot(e.pos.x - this.player.pos.x, e.pos.z - this.player.pos.z);
+        if (d < 7 && !isFodder(e)) crowd++;
+        if (e.type === 'boss' && d < 14) bossNear = true;
+        if (d > 9 || isFodder(e)) continue;
+        const sc = (e.strike || e.mode === 'attack' ? 2 : 1) / (0.5 + d);
+        if (sc > best) {
+          best = sc;
+          focus = e;
+        }
+      }
+      if (focus) {
+        const dx = focus.pos.x - this.player.pos.x;
+        const dz = focus.pos.z - this.player.pos.z;
+        const d = Math.hypot(dx, dz) || 1;
+        const k = Math.min(2.2, d * 0.3) / d;
+        leadX = dx * k * fc;
+        leadZ = dz * k * fc;
+      }
+      extra = fc * ((crowd >= 3 ? 0.9 : crowd === 2 ? 0.4 : 0) + (bossNear ? 1.6 : 0));
+    }
+    const fk = 1 - Math.exp(-3.5 * dt);
+    this.fightLead.x += (leadX - this.fightLead.x) * fk;
+    this.fightLead.z += (leadZ - this.fightLead.z) * fk;
+    this.camExtra += (extra - this.camExtra) * (1 - Math.exp(-2.5 * dt));
+    lookTarget.x += this.fightLead.x;
+    lookTarget.z += this.fightLead.z;
     this.fovKick *= Math.exp(-5 * dt);
     // special-move punch-in: a quick push toward the fighter that eases back out
     let punch = 0;
@@ -4684,7 +5176,7 @@ export class GameEngine {
       Math.cos(this.camYaw) * cp
     );
 
-    const want = (this.camDistOverride ?? (this.camera.aspect < 1 ? 10.5 : 7.2)) * (1 - 0.3 * punch);
+    const want = ((this.camDistOverride ?? (this.camera.aspect < 1 ? 10.5 : 7.2)) + this.camExtra) * (1 - 0.3 * punch);
     // pull in when a trunk, pillar or pole stands between the camera and the player
     let limit = want;
     for (const so of this.solids) {
@@ -4849,6 +5341,8 @@ export class GameEngine {
     this.enemyBlades.length = 0;
     const tokensFree = this.maxTokens() - this.tokensInUse();
     let granted = 0;
+    let fodderSwinging = 0;
+    for (const o of this.enemies) if (!o.dead && isFodder(o) && o.mode === 'attack') fodderSwinging++;
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const e = this.enemies[i];
       // a windy wave (and the Oni in its fury) runs the whole fighter faster - movement,
@@ -5138,17 +5632,19 @@ export class GameEngine {
       } else {
         // approach / circle / guard: keep a ring around the player and take turns attacking
         e.yaw = turnTo(e.yaw, toP, dt * 7);
-        const ring = boss ? 4.2 : e.variant === 'brute' ? 3.9 : e.variant === 'monk' ? 4.4 + (i % 3) * 0.4 : 3.4 + (i % 3) * 0.55;
+        const ring = boss ? 4.2 : isFodder(e) ? 3 + (i % 4) * 0.5 : e.variant === 'brute' ? 3.9 : e.variant === 'monk' ? 4.4 + (i % 3) * 0.4 : 3.4 + (i % 3) * 0.55;
         const canAttack = !freezeAttacks && e.cd <= 0 && d < (boss ? 9 : 7);
-        if (canAttack && (boss || granted < tokensFree)) {
-          if (!boss) granted++;
-          e.token = !boss;
+        const fodder = isFodder(e);
+        if (canAttack && (boss || (fodder ? fodderSwinging < FODDER_SWINGERS : granted < tokensFree))) {
+          if (fodder) fodderSwinging++;
+          else if (!boss) granted++;
+          e.token = !boss && !fodder;
           e.mode = 'attack';
           e.modeT = 0;
           e.t = 0;
           e.cd2 = 0;
           const maxCombo = boss ? (e.fury ? 3 : 2) : e.variant === 'brute' ? 2 : Math.min(3, 1 + Math.floor(this.wave / 2) + (e.variant === 'monk' ? 1 : 0));
-          e.comboLeft = 1 + Math.floor(Math.random() * maxCombo);
+          e.comboLeft = fodder ? 1 : 1 + Math.floor(Math.random() * maxCombo);
         } else if (d > ring + 1.4) {
           e.mode = 'approach';
           mvx = nx;
@@ -5176,9 +5672,10 @@ export class GameEngine {
         const ox = e.pos.x - o.pos.x;
         const oz = e.pos.z - o.pos.z;
         const od = Math.hypot(ox, oz);
-        const minD = e.r + o.r + 0.35;
+        // faces waiting their turn keep a little more room between them than the ones trading blows
+        const minD = e.r + o.r + (e.mode !== 'attack' && o.mode !== 'attack' ? 0.9 : 0.35);
         if (od < minD && od > 1e-4) {
-          const push = ((minD - od) / minD) * 3 * dt;
+          const push = ((minD - od) / minD) * 4 * dt;
           e.pos.x += (ox / od) * push;
           e.pos.z += (oz / od) * push;
         }
@@ -5273,7 +5770,8 @@ export class GameEngine {
       }
 
       const pr = Math.min(1, e.posture / e.maxPosture);
-      e.bar.visible = e.hp < e.maxHp || pr > 0.01 || boss;
+      // a life bar only where it matters: the Oni, whoever is close, striking or staggered
+      e.bar.visible = (e.hp < e.maxHp || pr > 0.01 || boss) && (boss || d < 9 || !!e.token || e.brokenT > 0);
       e.bar.position.set(e.pos.x, e.pos.y + (boss ? 5.3 : 2.6), e.pos.z);
       e.bar.quaternion.copy(this.camera.quaternion);
       e.barFg.scale.x = Math.max(0.001, e.hp / e.maxHp);
@@ -5420,7 +5918,8 @@ export class GameEngine {
         pos: new THREE.Vector3(h.x, h.y, h.z),
         vel: new THREE.Vector3(Math.sin(a) * 17, 0, Math.cos(a) * 17),
         dmg: 7,
-        life: 1.8
+        life: 1.8,
+        owner: e
       });
     }
     this.emitParticles(h.x, h.y, h.z, 10, 0x5ad0ff, 5, 1.5, 14, 0.3);
@@ -5604,7 +6103,198 @@ export class GameEngine {
     }
   }
 
+  // Is the player's weapon cutting through the air right now (a swing with the blade moving fast)?
+  private stepCutBlade(dt: number): boolean {
+    const a = this.act;
+    const w = this.weapons[this.activeWeaponIdx];
+    this.cutActive = !!a && (a.kind === 'attack' || a.kind === 'special') && !!a.move && (a.move.eff ?? 'sword') === 'sword' && w?.kind === 'melee' && a.windows.length > 0 && !!this.player.rig.clip;
+    if (!this.cutActive) return false;
+    this.cutCur.a.copy(this.bladeCur.a);
+    this.cutCur.b.copy(this.bladeCur.b);
+    return this.cutPrevOk && this.cutCur.b.distanceTo(this.cutPrev.b) / Math.max(dt, 1e-3) >= CUT_MIN_SPEED;
+  }
+
+  // The blade's path since last frame against the shot's path this frame (a little generous,
+  // like every other hit test: TUNE.hitAssist)
+  private bladeCutsShot(p: ProjectileInstance, dt: number): boolean {
+    const [c, d, pa, pb] = this.cutV;
+    pa.set(p.pos.x - p.vel.x * dt, p.pos.y - p.vel.y * dt, p.pos.z - p.vel.z * dt);
+    pb.copy(p.pos);
+    const reach = 0.3 + 0.3 * TUNE.hitAssist;
+    for (const k of [0.25, 0.5, 0.75, 1]) {
+      c.lerpVectors(this.cutPrev.a, this.cutCur.a, k);
+      d.lerpVectors(this.cutPrev.b, this.cutCur.b, k);
+      if (segSegDist(c, d, pa, pb) < reach) return true;
+    }
+    return false;
+  }
+
+  // Does the shot come from inside the cone the player is facing?
+  private shotComesFromFront(p: ProjectileInstance): boolean {
+    if (TUNE.arrowDirectional <= 0.5) return true;
+    const vl = Math.hypot(p.vel.x, p.vel.z) || 1;
+    const dot = (-p.vel.x / vl) * Math.sin(this.player.yaw) + (-p.vel.z / vl) * Math.cos(this.player.yaw);
+    return dot >= Math.cos((TUNE.arrowCone * Math.PI) / 180);
+  }
+
+  // A shot is stopped by the weapon: cut out of the air by a swing, or parried with a timed
+  // guard. Seen coming (inside the cone) it goes back at whoever loosed it. true = it lives on.
+  private defendShot(p: ProjectileInstance, how: 'cut' | 'parry', front: boolean): boolean {
+    const P = this.player;
+    const mid = this.tmpV.copy(p.pos);
+    this.impacts.spawn(mid, IMPACT_DEFLECT, 1.4, 0.14);
+    this.emitParticles(mid.x, mid.y, mid.z, 16, 0xffb347, 7, 2, 16, 0.25);
+    sfx.clang();
+    this.waveStat.deflects++;
+    this.deflectsTotal++;
+    if (how === 'parry') this.playerDeflectAnim();
+    if (!(TUNE.arrowReflect > 0.5 && front)) {
+      this.spawnLabel(P.pos.x, P.pos.y + 2.5, P.pos.z, 'DESVIOU!', '#8fe0c8', 1);
+      return false;
+    }
+    const o = p.owner && !p.owner.dead && !p.owner.flee ? p.owner : null;
+    let dx = o ? o.pos.x - p.pos.x : -p.vel.x;
+    let dz = o ? o.pos.z - p.pos.z : -p.vel.z;
+    const dl = Math.hypot(dx, dz) || 1;
+    dx /= dl;
+    dz /= dl;
+    p.vel.set(dx * SHOT_BACK_SPEED, 0, dz * SHOT_BACK_SPEED);
+    p.friendly = true;
+    p.dmg = Math.round(p.dmg * 2.2);
+    p.life = 1.4;
+    p.hit = new Set();
+    p.reflected = true;
+    this.spawnLabel(P.pos.x, P.pos.y + 2.5, P.pos.z, 'REBATIDA!', '#ffd166', 1.3);
+    this.parryZoom(true);
+    return true;
+  }
+
+  // The swords really meet: the point of the enemy's blade nearest the player's chest is where the
+  // blades cross, and the player's weapon is turned (for a moment) so its blade lies across that point.
+  // Returns the meeting point (null: nothing to pose - a kick, no weapon, no blade).
+  private clashPose(e: EnemyInstance): THREE.Vector3 | null {
+    const P = this.player;
+    const w = this.weapons[this.activeWeaponIdx];
+    const mesh = P.weaponMeshes[this.activeWeaponIdx];
+    if (!P.rig.clip || !mesh || !mesh.visible || !mesh.parent || w.kind !== 'melee' || !BLADE_SEG[w.id]) return null;
+    if (e.blade?.limb === 'foot' || !this.readEnemyBlade(e, false, this.clashSeg)) return null;
+    const seg = this.clashSeg;
+    const chest = this.tmpH.set(P.pos.x, P.pos.y + 1.3, P.pos.z);
+    const ab = this.tmpV.subVectors(seg.b, seg.a);
+    const t = Math.max(0, Math.min(1, chest.clone().sub(seg.a).dot(ab) / Math.max(ab.lengthSq(), 1e-6)));
+    const meet = seg.a.clone().addScaledVector(ab, t);
+    // pose the weapon: its blade from the grip toward the meeting point, its edge facing the foe
+    P.rig.root.updateMatrixWorld(true);
+    const grip = mesh.getWorldPosition(new THREE.Vector3());
+    const dist = grip.distanceTo(meet);
+    if (dist < 0.3 || dist > 2.4) return meet;
+    const o = this.clashObj;
+    o.position.copy(grip);
+    o.up.set(e.pos.x - grip.x, 0.2, e.pos.z - grip.z).normalize();
+    o.lookAt(meet);
+    o.updateMatrixWorld(true);
+    const local = mesh.parent.getWorldQuaternion(this.clashQ).invert().multiply(o.quaternion);
+    this.endClash();
+    this.clash = { mesh, q: mesh.quaternion.clone(), t: CLASH_POSE_TIME };
+    mesh.quaternion.copy(local);
+    return meet;
+  }
+
+  private endClash() {
+    if (!this.clash) return;
+    this.clash.mesh.quaternion.copy(this.clash.q);
+    this.clash = null;
+  }
+
+  private stepClash(dt: number) {
+    if (!this.clash) return;
+    this.clash.t -= dt;
+    if (this.clash.t <= 0) this.endClash();
+  }
+
+  // A short push-in on a defence: rare, brief and never a lock on the controls
+  private parryZoom(strong: boolean) {
+    if (!this.settings.cinematicCamera || TUNE.parryZoom < 0.5) return;
+    if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+    if (this.time - this.lastParryZoom < (strong ? 2.5 : 5)) return;
+    this.lastParryZoom = this.time;
+    this.punchT = 0;
+    this.punchDur = strong ? 0.5 : 0.38;
+  }
+
+  // While the guard is up the player turns toward an arrow or star coming from the side, so a defence
+  // isn't lost to which way the stick was last pushed (never one from behind: that one is on you)
+  private assistGuardFacing(dt: number) {
+    if (TUNE.arrowDirectional <= 0.5 || !this.guarding()) return;
+    const P = this.player;
+    let best: ProjectileInstance | null = null;
+    let bd = 16;
+    for (const p of this.projectiles) {
+      if (p.friendly || (p.type !== 'arrow' && p.type !== 'shuriken')) continue;
+      const dx = P.pos.x - p.pos.x;
+      const dz = P.pos.z - p.pos.z;
+      const d = Math.hypot(dx, dz);
+      if (d > bd || d < 0.5) continue;
+      if ((p.vel.x * dx + p.vel.z * dz) / (d * (Math.hypot(p.vel.x, p.vel.z) || 1)) < 0.8) continue;
+      best = p;
+      bd = d;
+    }
+    if (!best) return;
+    // a shot off to the side is pulled into the cone; one from behind is not (turn to meet it)
+    const want = Math.atan2(-best.vel.x, -best.vel.z);
+    const off = Math.abs(wrap(want - P.yaw));
+    if (off > ((TUNE.arrowCone * Math.PI) / 180) * 0.6 && off < 1.75) P.yaw = turnTo(P.yaw, want, Math.min(1, dt * 6));
+  }
+
+  // Warnings for what the player cannot see: an archer drawing its bow, a thrower casting, a
+  // shot already on its way - shown as markers at the screen edge by the UI, with a chirp
+  private stepThreats(dt: number) {
+    this.threatT -= dt;
+    if (this.threatT > 0) return;
+    this.threatT = 0.1;
+    const P = this.player.pos;
+    const fx = -Math.sin(this.camYaw);
+    const fz = -Math.cos(this.camYaw);
+    const rx = Math.cos(this.camYaw);
+    const rz = -Math.sin(this.camYaw);
+    const half = Math.atan(Math.tan((this.camera.fov * Math.PI) / 360) * this.camera.aspect) * 0.85;
+    const out: { a: number; u: number }[] = [];
+    const live = new Set<EnemyInstance>();
+    if (this.state === 'play' && !this.cine) {
+      const angleOf = (x: number, z: number) => Math.atan2((x - P.x) * rx + (z - P.z) * rz, (x - P.x) * fx + (z - P.z) * fz);
+      for (const e of this.enemies) {
+        if (e.dead || e.flee) continue;
+        const aiming = (e.type === 'archer' && ((!!e.bow && e.bow.phase !== 'release') || !!e.shotPending)) || (e.castT ?? 0) > 0;
+        if (!aiming) continue;
+        const a = angleOf(e.pos.x, e.pos.z);
+        if (Math.abs(a) <= half) continue;
+        live.add(e);
+        out.push({ a: Math.round(a * 20) / 20, u: 0.7 });
+        if (!this.warnedShooters.has(e)) {
+          this.warnedShooters.add(e);
+          sfx.warn();
+        }
+      }
+      for (const p of this.projectiles) {
+        if (p.friendly || (p.type !== 'arrow' && p.type !== 'shuriken')) continue;
+        const dx = P.x - p.pos.x;
+        const dz = P.z - p.pos.z;
+        const d = Math.hypot(dx, dz);
+        if (d > 18 || (p.vel.x * dx + p.vel.z * dz) / (d * (Math.hypot(p.vel.x, p.vel.z) || 1)) < 0.85) continue;
+        const a = angleOf(p.pos.x, p.pos.z);
+        if (Math.abs(a) > half) out.push({ a: Math.round(a * 20) / 20, u: 1 });
+      }
+    }
+    for (const e of this.warnedShooters) if (!live.has(e)) this.warnedShooters.delete(e);
+    const key = out.map((t) => `${t.a}:${t.u}`).join(',');
+    if (key !== this.lastThreatKey) {
+      this.lastThreatKey = key;
+      this.callbacks.onThreats?.(out);
+    }
+  }
+
   private updateProjectiles(dt: number) {
+    const swinging = this.stepCutBlade(dt);
     for (let i = this.projectiles.length - 1; i >= 0; i--) {
       const p = this.projectiles[i];
       p.life -= dt;
@@ -5650,21 +6340,34 @@ export class GameEngine {
           }
         }
       } else if (!dead && !p.friendly) {
-        if (Math.hypot(p.pos.x - this.player.pos.x, p.pos.z - this.player.pos.z) < 0.6) {
+        const ranged = TUNE.arrowDirectional > 0.5 && (p.type === 'arrow' || p.type === 'shuriken');
+        let handled = false;
+        // a weapon swung through its path cuts a shot out of the air (and, facing it, sends it back)
+        if (ranged && swinging && this.player.inv <= 0 && this.bladeCutsShot(p, dt)) {
+          handled = true;
+          if (!this.defendShot(p, 'cut', this.shotComesFromFront(p))) dead = true;
+        }
+        if (!handled && Math.hypot(p.pos.x - this.player.pos.x, p.pos.z - this.player.pos.z) < 0.6) {
           dead = true;
           const canAct = this.player.staggerT <= 0 && this.player.inv <= 0;
           const mid = this.tmpV.copy(p.pos);
-          if (canAct && this.time - this.player.guardPressT <= DEFLECT_WINDOW) {
-            this.impacts.spawn(mid, IMPACT_DEFLECT, 1.4, 0.14);
-            this.emitParticles(mid.x, mid.y, mid.z, 14, 0xffb347, 7, 2, 16, 0.25);
-            this.playerDeflectAnim();
-            sfx.clang();
-          } else if (canAct && this.guarding()) {
+          // only what is faced can be parried or blocked; from the side or behind it just hits
+          const front = !ranged || this.shotComesFromFront(p);
+          if (canAct && front && this.time - this.player.guardPressT <= DEFLECT_WINDOW) {
+            if (ranged) dead = !this.defendShot(p, 'parry', true);
+            else {
+              this.impacts.spawn(mid, IMPACT_DEFLECT, 1.4, 0.14);
+              this.emitParticles(mid.x, mid.y, mid.z, 14, 0xffb347, 7, 2, 16, 0.25);
+              this.playerDeflectAnim();
+              sfx.clang();
+            }
+          } else if (canAct && front && this.guarding()) {
             this.impacts.spawn(mid, IMPACT_BLOCK, 1, 0.1);
             this.addPlayerPosture(10);
             sfx.block();
           } else {
             const vl = Math.hypot(p.vel.x, p.vel.z) || 1;
+            if (canAct && ranged && !front && this.guarding()) this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'NAS COSTAS!', '#ff8a7a', 1.1);
             this.damagePlayer(p.dmg, p.vel.x / vl, p.vel.z / vl, true);
           }
         }
@@ -5677,6 +6380,12 @@ export class GameEngine {
         this.killProj(i);
       }
     }
+    // this frame's weapon path becomes the "last frame" of the next
+    if (this.cutActive) {
+      this.cutPrev.a.copy(this.cutCur.a);
+      this.cutPrev.b.copy(this.cutCur.b);
+      this.cutPrevOk = true;
+    } else this.cutPrevOk = false;
   }
 
   private updatePickups(dt: number) {
@@ -5749,12 +6458,31 @@ export class GameEngine {
     this.mmCtx.arc(o[0], o[1], R_ARENA * s, 0, TAU);
     this.mmCtx.stroke();
 
+    // Conquista posts: a diamond (red while hostile, jade once taken); a far one rides the rim
+    for (const post of this.posts) {
+      let q = toS(post.x, post.z);
+      const off = Math.hypot(q[0] - c, q[1] - c);
+      const lim = c - 12;
+      if (off > lim) q = [c + ((q[0] - c) / off) * lim, c + ((q[1] - c) / off) * lim];
+      this.mmCtx.fillStyle = post.captured ? '#4fd6a8' : '#ff5a4a';
+      this.mmCtx.strokeStyle = 'rgba(239,230,210,.85)';
+      this.mmCtx.lineWidth = 1.5;
+      this.mmCtx.beginPath();
+      this.mmCtx.moveTo(q[0], q[1] - 7);
+      this.mmCtx.lineTo(q[0] + 6, q[1]);
+      this.mmCtx.lineTo(q[0], q[1] + 7);
+      this.mmCtx.lineTo(q[0] - 6, q[1]);
+      this.mmCtx.closePath();
+      this.mmCtx.fill();
+      this.mmCtx.stroke();
+    }
+
     for (const e of this.enemies) {
       if (e.dead) continue;
       const q = toS(e.pos.x, e.pos.z);
-      this.mmCtx.fillStyle = e.captain ? '#ffd166' : e.type === 'boss' ? '#f2a65a' : e.type === 'archer' ? '#d88ad0' : '#e0404a';
+      this.mmCtx.fillStyle = e.captain ? '#ffd166' : e.type === 'boss' ? '#f2a65a' : e.type === 'archer' ? '#d88ad0' : isFodder(e) ? '#b98a56' : '#e0404a';
       this.mmCtx.beginPath();
-      this.mmCtx.arc(q[0], q[1], e.captain ? 6 : e.type === 'boss' ? 7 : 4, 0, TAU);
+      this.mmCtx.arc(q[0], q[1], e.captain ? 6 : e.type === 'boss' ? 7 : isFodder(e) ? 2.5 : 4, 0, TAU);
       this.mmCtx.fill();
     }
     this.mmCtx.restore();
@@ -5792,14 +6520,21 @@ export class GameEngine {
     this.updateShocks(dt);
     this.updateBolts(dt);
     this.updateProjectiles(dt);
+    this.stepClash(dt);
+    this.assistGuardFacing(dt);
+    this.stepThreats(dt);
     this.updatePickups(dt);
     this.updateScrolls(dt);
     this.updateReticle(dt);
     this.stepGoal(dt);
+    this.stepReinforcements(dt);
+    if (this.mode === 'conquest') this.stepConquest(dt);
 
-    const alive = this.enemies.some((e) => !e.dead);
+    const alive = this.waveQueue.length > 0 || this.enemies.some((e) => !e.dead);
     // a Resistir wave is not over while the clock runs, even with the field empty
-    if (!alive && this.wave > 0 && !(this.goal && !this.goal.done && this.goal.id === 'resistir')) {
+    // (Conquista: between posts there is nobody to beat, so nothing is "cleared" until a post is woken)
+    const betweenPosts = this.mode === 'conquest' && this.conq.active < 0;
+    if (!alive && this.wave > 0 && !betweenPosts && !(this.goal && !this.goal.done && this.goal.id === 'resistir')) {
       if (!this.clearedShown) {
         this.clearedShown = true;
         const rank = this.waveRank();
@@ -5817,14 +6552,15 @@ export class GameEngine {
         gain = Math.round(gain);
         this.player.score += 100 * this.wave;
         this.callbacks.onScoreChange(this.player.score);
-        this.callbacks.onWaveChange(this.wave, `Onda limpa · Nota ${rank}`, `+${100 * this.wave} pontos · +${gain} 誉`);
+        this.callbacks.onWaveChange(this.wave, `${this.mode === 'conquest' ? 'Posto tomado' : 'Onda limpa'} · Nota ${rank}`, `+${100 * this.wave} pontos · +${gain} 誉`);
         this.player.hp = Math.min(this.player.maxHp, this.player.hp + 20);
         this.callbacks.onHpChange(this.player.hp, this.player.maxHp);
       }
       this.waveTimer += dt;
       if (this.waveTimer > 2.5) {
         this.waveTimer = 0;
-        this.nextWave();
+        if (this.mode === 'conquest') this.captureOutpost();
+        else this.nextWave();
       }
     }
   }

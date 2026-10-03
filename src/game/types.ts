@@ -105,7 +105,7 @@ export interface RigInstance {
 
 // samurai kinds (the Brutamontes, the Samurai do Bō = 'monk', the Shinobi, the Lutador do Raio and
 // the Samurai das Duas Espadas = 'nito') and the Oni's boss-wave forms
-export type EnemyVariant = 'brute' | 'monk' | 'shinobi' | 'raio' | 'nito' | 'trovao' | 'sombrio';
+export type EnemyVariant = 'brute' | 'monk' | 'shinobi' | 'raio' | 'nito' | 'trovao' | 'sombrio' | 'ashigaru';
 
 export interface EnemyInstance {
   type: 'samurai' | 'archer' | 'boss';
@@ -214,6 +214,7 @@ export interface EnemyInstance {
   vanishT?: number;
   forcePeril?: boolean;
   captain?: boolean;
+  patrol?: boolean; // a roving patrol of the Conquista mode (dismissed when a post wakes)
   flee?: boolean;
   fleeT?: number;
   postureBar?: THREE.Mesh;
@@ -255,6 +256,8 @@ export interface ProjectileInstance {
   aoeR?: number;
   kb?: number;
   noSolid?: boolean;
+  owner?: EnemyInstance; // who loosed it (a parried arrow goes back to them)
+  reflected?: boolean;
 }
 
 export interface GameSettings {

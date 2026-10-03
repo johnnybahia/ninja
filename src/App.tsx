@@ -119,6 +119,8 @@ export default function App() {
   const [cardOffer, setCardOffer] = useState<CardOffer[] | null>(null);
   const [bossBar, setBossBar] = useState<{ hp: number; max: number; fury: boolean; name: string } | null>(null);
   const [waveMod, setWaveMod] = useState<{ id: string; name: string; glyph: string; desc: string } | null>(null);
+  // shots being drawn or flying at the player from outside the view (marked at the screen edge)
+  const [threats, setThreats] = useState<{ a: number; u: number }[]>([]);
   const [runResult, setRunResult] = useState<RunResult | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [bestScore, setBestScore] = useState<number>(() => {
@@ -249,6 +251,16 @@ export default function App() {
     }
   });
   const themeRef = useRef(themeMode);
+  // how a run is played: waves in the middle of the arena, or Conquista (take the enemy posts)
+  const [gameMode, setGameMode] = useState<'waves' | 'conquest'>(() => {
+    try {
+      if (new URLSearchParams(location.search).get('mode') === 'conquista') return 'conquest';
+      return localStorage.getItem('kage_mode_v1') === 'conquest' ? 'conquest' : 'waves';
+    } catch {
+      return 'waves';
+    }
+  });
+  const [runMode, setRunMode] = useState<'waves' | 'conquest'>('waves');
   const [sensitivity, setSensitivity] = useState(1.0);
   const [autoCamera, setAutoCamera] = useState(true);
   const [autoTurnStick, setAutoTurnStick] = useState(true);
@@ -336,6 +348,7 @@ export default function App() {
       onCardOffer: (offer) => setCardOffer(offer),
       onBossChange: (b) => setBossBar(b),
       onWaveMod: (m) => setWaveMod(m),
+      onThreats: (t) => setThreats(t),
       onGameOver: (finalScore, wave, _level, _kills, _combo, summary) => {
         const prevBest = bestScoreRef.current;
         if (finalScore > prevBest && !engineRef.current?.practice) {
@@ -348,7 +361,7 @@ export default function App() {
         setRunResult(bank(summary, prevBest));
         setGameState('over');
         setRunBoard(null);
-        if (rankActiveRef.current && !engineRef.current?.practice) {
+        if (rankActiveRef.current && !engineRef.current?.practice && engineRef.current?.mode === 'waves') {
           // best-effort and off the game's path: the table shows "atualizando" until it arrives
           const before = loadPlayer();
           const base = { score: finalScore, wave, isBest: finalScore > (before?.sent ?? 0), name: before?.name ?? '' };
@@ -422,6 +435,8 @@ export default function App() {
       }
       eng.loadout = slots;
       eng.metaBonus = bonusesFor(metaRef.current);
+      eng.mode = gameMode;
+      setRunMode(gameMode);
       setRunResult(null);
       setCardOffer(null);
       setBossBar(null);
@@ -1162,6 +1177,29 @@ export default function App() {
               );
             })()}
 
+            <div className="mb-3">
+              <div className="flex rounded-md border border-[rgba(239,230,210,0.3)] overflow-hidden text-sm font-bold" role="group" aria-label="Modo de jogo">
+                {(['waves', 'conquest'] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => {
+                      setGameMode(m);
+                      try {
+                        localStorage.setItem('kage_mode_v1', m);
+                      } catch {}
+                    }}
+                    aria-pressed={gameMode === m}
+                    className={`flex-1 py-2 cursor-pointer transition-colors ${gameMode === m ? 'bg-[var(--ember)] text-[var(--ink)]' : 'text-[var(--paper)]/80'}`}
+                  >
+                    {m === 'waves' ? 'Ondas' : '旗 Conquista'}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[11px] text-[var(--paper)]/70 mt-1.5 text-center leading-snug">
+                {gameMode === 'waves' ? 'Inimigos chegam em ondas até você cair. Vale para o ranking.' : 'Tome os 3 postos inimigos espalhados pelo campo: derrote o capitão de cada guarnição. Não conta para o ranking.'}
+              </p>
+            </div>
+
             <button
               onClick={handleStartGame}
               disabled={startingGame}
@@ -1171,6 +1209,21 @@ export default function App() {
               <span className="relative">{startingGame ? `Carregando… ${loadPct}%` : 'Entrar em combate'}</span>
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Off-screen shooters and shots in flight: a marker at the edge pointing at them */}
+      {gameState === 'play' && !cinematic && threats.length > 0 && (
+        <div className="fixed inset-0 z-[26] pointer-events-none" aria-hidden="true">
+          {threats.map((t, i) => (
+            <div
+              key={i}
+              className="absolute left-1/2 top-[46%] -ml-3 -mt-3 w-6 h-6 flex items-center justify-center"
+              style={{ transform: `rotate(${t.a}rad) translateY(calc(-1 * min(38vh, 36vw)))`, opacity: 0.55 + 0.4 * t.u }}
+            >
+              <span className={`block text-[#ff5a4a] text-2xl leading-none drop-shadow-[0_0_6px_rgba(255,60,40,0.9)] ${t.u >= 1 ? 'arcade-blink' : ''}`}>▲</span>
+            </div>
+          ))}
         </div>
       )}
 
@@ -1188,7 +1241,8 @@ export default function App() {
           onTemple={() => setShowTemple(true)}
           onArsenal={() => openArsenal(charId)}
           board={runBoard}
-          onJoin={rankOn && !rankActive ? () => setNameMode(player ? 'confirm' : 'new') : undefined}
+          mode={runMode}
+          onJoin={rankOn && !rankActive && runMode === 'waves' ? () => setNameMode(player ? 'confirm' : 'new') : undefined}
           onRanking={rankOn && rankActive ? () => setShowRanking(true) : undefined}
         />
       )}

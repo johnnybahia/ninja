@@ -43,6 +43,7 @@ export function RunSummary({
   onTemple,
   onArsenal,
   board,
+  mode = 'waves',
   onJoin,
   onRanking
 }: {
@@ -55,6 +56,7 @@ export function RunSummary({
   onTemple: () => void;
   onArsenal: () => void;
   board?: RunBoard | null; // the ranking after this run (none: ranking off, or the run didn't count)
+  mode?: 'waves' | 'conquest';
   onJoin?: () => void; // ranking on but the player hasn't joined this session
   onRanking?: () => void;
 }) {
@@ -81,7 +83,7 @@ export function RunSummary({
       <div className="w-full max-w-2xl mx-auto min-h-full flex flex-col justify-center">
         <div className="text-center mb-3">
           <div className="short-hide font-serif text-6xl font-bold text-[var(--torii)] leading-none">散</div>
-          <h2 className="font-serif text-2xl font-extrabold text-[var(--paper)] mt-1">Você caiu na onda {s.wave}</h2>
+          <h2 className="font-serif text-2xl font-extrabold text-[var(--paper)] mt-1">Você caiu {mode === 'conquest' ? 'no posto' : 'na onda'} {s.wave}</h2>
           <div className="text-sm text-[var(--paper)]/85 mt-1">
             <b className="text-[var(--ember)]">{s.score.toLocaleString('pt-BR')}</b> pontos ·{' '}
             {newRecord ? (

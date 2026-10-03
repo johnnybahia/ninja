@@ -36,6 +36,13 @@ export const TUNE = {
   blockPosture: 0.7,
   arrowDmg: 11,
   arrowLead: 0.5,
+  // arrows and stars: defended only facing them (or by cutting them out of the air with a swing), sent back at the archer
+  arrowDirectional: 1,
+  arrowCone: 65,
+  arrowReflect: 0, // 1: a defended arrow goes back at the archer (off: it just vanishes)
+  parryZoom: 1,
+  // fight camera: the frame leans toward the opponent and opens up for a crowd or the Oni (0 = off)
+  fightCam: 0.7,
   // glow around the characters' silhouettes (a rim light that helps them read in the dark)
   rim: 0.55,
   camLeadAmount: 0.12,
@@ -72,6 +79,11 @@ export const TUNABLES: Tunable[] = [
   { key: 'enemyHpScale', label: 'Inimigo: vida extra por onda', min: 0, max: 0.4, step: 0.01 },
   { key: 'arrowDmg', label: 'Flecha: dano', min: 2, max: 30, step: 1 },
   { key: 'arrowLead', label: 'Flecha: tiros que antecipam seu movimento', min: 0, max: 1, step: 0.05 },
+  { key: 'arrowDirectional', label: 'Flecha: só defende de frente ou cortando com a espada (0/1)', min: 0, max: 1, step: 1 },
+  { key: 'arrowCone', label: 'Flecha: cone frontal da defesa (graus)', min: 30, max: 120, step: 5 },
+  { key: 'arrowReflect', label: 'Flecha: rebater de volta no arqueiro (0/1)', min: 0, max: 1, step: 1 },
+  { key: 'parryZoom', label: 'Zoom curto em algumas defesas (0/1)', min: 0, max: 1, step: 1 },
+  { key: 'fightCam', label: 'Câmera de luta: enquadra o oponente e abre com multidão (0 = desliga)', min: 0, max: 1, step: 0.05 },
   { key: 'rim', label: 'Brilho de contorno dos personagens (×, 0 = sem brilho)', min: 0, max: 1.5, step: 0.05 },
   { key: 'legSwingBase', label: 'Balanço da perna (andando)', min: 0.1, max: 1.2, step: 0.02 },
   { key: 'legSwingRun', label: 'Balanço extra da perna (correndo)', min: 0, max: 1.2, step: 0.02 },

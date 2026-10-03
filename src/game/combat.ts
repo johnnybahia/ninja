@@ -201,3 +201,48 @@ export function bladeLerp(prev: BladeSeg, cur: BladeSeg, k: number, outA: THREE.
       .add(outA);
   } else outB.lerpVectors(prev.b, cur.b, k);
 }
+
+const sd1 = new THREE.Vector3();
+const sd2 = new THREE.Vector3();
+const sdr = new THREE.Vector3();
+const sc1 = new THREE.Vector3();
+const sc2 = new THREE.Vector3();
+
+/** Shortest distance between segment p1-q1 and segment p2-q2 (3D). */
+export function segSegDist(p1: THREE.Vector3, q1: THREE.Vector3, p2: THREE.Vector3, q2: THREE.Vector3): number {
+  sd1.subVectors(q1, p1);
+  sd2.subVectors(q2, p2);
+  sdr.subVectors(p1, p2);
+  const a = sd1.dot(sd1);
+  const e = sd2.dot(sd2);
+  const f = sd2.dot(sdr);
+  const clamp = (v: number) => Math.max(0, Math.min(1, v));
+  let s: number;
+  let t: number;
+  if (a <= 1e-9 && e <= 1e-9) return p1.distanceTo(p2);
+  if (a <= 1e-9) {
+    s = 0;
+    t = clamp(f / e);
+  } else {
+    const c = sd1.dot(sdr);
+    if (e <= 1e-9) {
+      t = 0;
+      s = clamp(-c / a);
+    } else {
+      const b = sd1.dot(sd2);
+      const denom = a * e - b * b;
+      s = denom > 1e-9 ? clamp((b * f - c * e) / denom) : 0;
+      t = (b * s + f) / e;
+      if (t < 0) {
+        t = 0;
+        s = clamp(-c / a);
+      } else if (t > 1) {
+        t = 1;
+        s = clamp((b - c) / a);
+      }
+    }
+  }
+  sc1.copy(p1).addScaledVector(sd1, s);
+  sc2.copy(p2).addScaledVector(sd2, t);
+  return sc1.distanceTo(sc2);
+}
