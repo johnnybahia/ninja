@@ -27,7 +27,7 @@ export const WEAPONS_KAGE: WeaponDef[] = [
 // Arsenal screen: role tag + one-line description per weapon id
 export const WEAPON_INFO: Record<string, { tag: string; desc: string }> = {
   katana: { tag: 'Corpo a corpo', desc: 'Cortes rápidos em arco; o 3º golpe da sequência causa quase o dobro de dano.' },
-  bo: { tag: 'Corpo a corpo · 360°', desc: 'Giro que atinge e empurra todos ao redor. Lento, ótimo quando cercado.' },
+  bo: { tag: 'Corpo a corpo · 360°', desc: 'Golpe horizontal, empurrão que afasta quem está à frente e giro de 360° que atinge todos ao redor. Lento, ótimo quando cercado.' },
   kama: { tag: 'Médio alcance', desc: 'Corrente longa que puxa o inimigo até você.' },
   shuriken: { tag: 'Distância', desc: 'Três estrelas em leque. Cobre uma área larga, dano baixo por estrela.' },
   kunai: { tag: 'Distância', desc: 'Lâmina rápida e forte que atravessa vários inimigos em linha.' },

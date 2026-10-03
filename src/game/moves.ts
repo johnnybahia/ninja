@@ -37,6 +37,8 @@ export interface ClipMove {
   heavy?: boolean;
   stamina: number;
   release?: number; // throwables: when the projectile leaves the hand
+  wide?: number; // extra contact radius for a broad push (the staff shoved across the body)
+  ring?: number; // a whirl: anyone this close (past their own radius) is caught as the staff comes around
 }
 
 export const COMBOS: Record<string, ClipMove[]> = {
@@ -46,7 +48,13 @@ export const COMBOS: Record<string, ClipMove[]> = {
     { clip: 'slash1', hit: [0.68], win: [[0.58, 0.84]], reach: 1.3, chain: 0.92, cancel: 0.86, end: 1.2, from: 0.4, speed: 2.5, dmg: 26, range: 2.9, arc: 2.1, kb: 5, stamina: 14 },
     { clip: 'slash2', hit: [0.95], win: [[0.84, 1.06]], reach: 1.35, chain: 99, cancel: 1.25, end: 1.6, from: 0.5, speed: 2.5, dmg: 47, range: 3.2, arc: 2.3, kb: 11, heavy: true, stamina: 20 }
   ],
-  bo: [{ clip: 'spin', hit: [0.43, 1.2], win: [[0.3, 0.52], [1.08, 1.36]], reach: 1.5, chain: 99, cancel: 1.3, end: 1.7, speed: 1.5, root: 0.45, dmg: 20, range: 3.5, arc: Math.PI * 2, kb: 10, heavy: true, stamina: 22 }],
+  // the staff's real techniques: a horizontal swing (yoko-uchi), a two-handed shove straight
+  // ahead (oshi / tsuki) that clears the space in front, then the whirl that covers the whole circle
+  bo: [
+    { clip: 'eSwordSlash', hit: [0.72], win: [[0.62, 0.86]], reach: 1.5, chain: 0.95, cancel: 0.9, end: 1.25, from: 0.42, speed: 2.2, dmg: 18, range: 3.4, arc: 2.2, kb: 6, stamina: 10 },
+    { clip: 'eSwordAttack', hit: [0.62], win: [[0.5, 0.74]], reach: 1.9, chain: 0.85, cancel: 0.82, end: 1.1, from: 0.3, speed: 2.0, dmg: 12, range: 3.6, arc: 1.4, kb: 14, wide: 0.45, heavy: true, stamina: 12 },
+    { clip: 'spin', hit: [0.43, 1.2], win: [[0.25, 0.85], [0.85, 1.45]], ring: 2.5, reach: 1.5, chain: 99, cancel: 1.3, end: 1.7, speed: 1.5, root: 0.45, dmg: 16, range: 3.5, arc: Math.PI * 2, kb: 10, heavy: true, stamina: 20 }
+  ],
   kama: [{ clip: 'eSwordAttack', hit: [0.62], chain: 99, cancel: 0.85, end: 1.1, from: 0.35, speed: 1.6, dmg: 29, range: 6.5, arc: 1.15, kb: -7, heavy: true, stamina: 14 }],
   karate: [
     { clip: 'jab', hit: [0.3], eff: 'LH', win: [[0.22, 0.42]], reach: 0.5, chain: 0.45, cancel: 0.45, end: 0.8, speed: 1.4, dmg: 14, range: 2.0, arc: 1.25, kb: 3, stamina: 8 },

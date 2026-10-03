@@ -255,6 +255,9 @@ interface HitWindow {
   weapon: WeaponDef;
   hits: Set<EnemyInstance>;
   began: boolean;
+  wide: number; // extra contact radius (a broad shove)
+  ring: number; // whirl: anyone this close is caught when the window is half through
+  ringDone: boolean;
 }
 
 // Where a blow really landed: the contact point and the direction the blade was travelling
@@ -2401,7 +2404,7 @@ export class GameEngine {
     if (sweepable) {
       // damage is decided by the weapon actually touching a body inside these spans
       for (const [t0, t1] of m.win ?? m.hit.map((h): [number, number] => [h - 0.08, h + 0.08])) {
-        act.windows.push({ t0, t1, dmg: m.dmg, kb: m.kb, heavy: !!m.heavy, weapon: w, hits: new Set(), began: false });
+        act.windows.push({ t0, t1, dmg: m.dmg, kb: m.kb, heavy: !!m.heavy, weapon: w, hits: new Set(), began: false, wide: m.wide ?? 0, ring: m.ring ?? 0, ringDone: false });
       }
       if (target && m.hit.length) {
         this.comboTarget = target;
@@ -2527,6 +2530,11 @@ export class GameEngine {
       }
       this.sweepEnemies(win, prev, cur, a);
       if (this.act !== a) return;
+      if (win.ring > 0 && !win.ringDone && sh.t >= (win.t0 + win.t1) / 2) {
+        win.ringDone = true;
+        this.ringHit(win, a);
+        if (this.act !== a) return;
+      }
       // the same blade also touches the scenery: sparks off stone, bark chips, a cut bamboo
       this.world.props.sweep(prev, cur, { power: a.kind === 'special' ? 3 : win.heavy ? 2 : 1, edged: w.id !== 'bo' && w.id !== 'karate', token: win, radius: this.bladeRadius });
       if (sh.t > win.t1) a.windows.splice(i, 1);
@@ -2537,40 +2545,57 @@ export class GameEngine {
   }
 
   private sweepEnemies(win: HitWindow, prev: BladeSeg | null, cur: BladeSeg, a: PlayerAct) {
-    const P = this.player;
     const inflate = 0.1 + 0.3 * TUNE.hitAssist + this.bladeRadius;
     for (const e of this.enemies) {
       if (e.dead || win.hits.has(e)) continue;
       const s = this.sizeOf(e);
-      if (!sweepVsCapsule(prev, cur, e.pos.x, e.pos.z, e.pos.y + HURT_BOTTOM * s, e.pos.y + HURT_TOP * s, e.r + inflate, this.hitPt, false, e.r)) continue;
-      win.hits.add(e);
-      const dx = e.pos.x - P.pos.x;
-      const dz = e.pos.z - P.pos.z;
-      const d = Math.hypot(dx, dz) || 0.001;
-      const nx = dx / d;
-      const nz = dz / d;
-      // knock along a mix of "away from the attacker" and the way the blade was travelling
-      let bx = prev ? cur.b.x - prev.b.x : 0;
-      let bz = prev ? cur.b.z - prev.b.z : 0;
-      const bl = Math.hypot(bx, bz);
-      if (bl > 1e-3) {
-        bx /= bl;
-        bz /= bl;
-      } else {
-        bx = nx;
-        bz = nz;
-      }
-      let kx = nx * 0.55 + bx * 0.45;
-      let kz = nz * 0.55 + bz * 0.45;
-      const kl = Math.hypot(kx, kz) || 1;
-      kx /= kl;
-      kz /= kl;
-      this.dbgHits.push({ p: this.hitPt.clone(), t: this.time });
-      // a wide swing can cut several enemies, the third onward for less
-      const mult = win.hits.size > 2 ? 0.7 : 1;
-      this.hitEnemy(e, win.dmg * mult, nx, nz, win.kb, win.heavy, { point: this.hitPt, dirX: kx, dirZ: kz });
+      if (!sweepVsCapsule(prev, cur, e.pos.x, e.pos.z, e.pos.y + HURT_BOTTOM * s, e.pos.y + HURT_TOP * s, e.r + inflate + win.wide, this.hitPt, false, e.r)) continue;
+      this.landSweepHit(e, win, prev, cur);
       if (this.act !== a) return;
     }
+  }
+
+  // A whirl catches everyone inside its ring that the staff's path didn't touch (it swings
+  // high and wide, so a body just inside its reach could slip between two frames)
+  private ringHit(win: HitWindow, a: PlayerAct) {
+    const P = this.player;
+    for (const e of this.enemies.slice()) {
+      if (e.dead || win.hits.has(e)) continue;
+      if (Math.hypot(e.pos.x - P.pos.x, e.pos.z - P.pos.z) - e.r > win.ring) continue;
+      this.hitPt.set(e.pos.x, e.pos.y + 1.2 * this.sizeOf(e), e.pos.z);
+      this.landSweepHit(e, win, null, null);
+      if (this.act !== a) return;
+    }
+  }
+
+  private landSweepHit(e: EnemyInstance, win: HitWindow, prev: BladeSeg | null, cur: BladeSeg | null) {
+    const P = this.player;
+    win.hits.add(e);
+    const dx = e.pos.x - P.pos.x;
+    const dz = e.pos.z - P.pos.z;
+    const d = Math.hypot(dx, dz) || 0.001;
+    const nx = dx / d;
+    const nz = dz / d;
+    // knock along a mix of "away from the attacker" and the way the blade was travelling
+    let bx = prev && cur ? cur.b.x - prev.b.x : 0;
+    let bz = prev && cur ? cur.b.z - prev.b.z : 0;
+    const bl = Math.hypot(bx, bz);
+    if (bl > 1e-3) {
+      bx /= bl;
+      bz /= bl;
+    } else {
+      bx = nx;
+      bz = nz;
+    }
+    let kx = nx * 0.55 + bx * 0.45;
+    let kz = nz * 0.55 + bz * 0.45;
+    const kl = Math.hypot(kx, kz) || 1;
+    kx /= kl;
+    kz /= kl;
+    this.dbgHits.push({ p: this.hitPt.clone(), t: this.time });
+    // a wide swing can cut several enemies, the third onward for less
+    const mult = win.hits.size > 2 ? 0.7 : 1;
+    this.hitEnemy(e, win.dmg * mult, nx, nz, win.kb, win.heavy, { point: this.hitPt, dirX: kx, dirZ: kz });
   }
 
   // Throwables leave the off hand (normal throw or the weapon's special volley)
