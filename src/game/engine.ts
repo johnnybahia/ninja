@@ -81,6 +81,16 @@ const VARIANT_WEAPONS: Partial<Record<EnemyVariant, [string, string]>> = { nito:
 // wait at the edge of the arena, stepping in a moment after someone falls (the fight stays readable)
 // Conquista: a post wakes up when the player comes this close; each post has its own garrison
 const POST_ACTIVATE = 20;
+// Foot soldiers (ashigaru): plenty of them, each falls to one blow and hits lightly. They need no
+// attack token, only a couple swing at once, so a crowd of them is a battlefield, not a wall.
+const ASHIGARU_TINT = new THREE.Color(0.6, 0.55, 0.46);
+const FODDER_SWINGERS = 2;
+const FODDER_DAMAGE = 0.3;
+// patrols on the road between posts
+const PATROL_FIRST = 9;
+const PATROL_EVERY: [number, number] = [16, 26];
+const PATROL_CLEAR = 22; // no patrol while the player is this close to a post that is still hostile
+const isFodder = (e: { variant?: EnemyVariant }) => e.variant === 'ashigaru';
 const GARRISONS = ['infantry', 'archers', 'elite'] as const;
 type Garrison = (typeof GARRISONS)[number];
 const GARRISON_NAME: Record<Garrison, string> = { infantry: 'infantaria', archers: 'arqueiros', elite: 'guarda de elite' };
@@ -463,11 +473,11 @@ export class GameEngine {
   public mode: 'waves' | 'conquest' = 'waves';
   private posts: Outpost[] = [];
   private postSolids: { x: number; z: number; r: number; h: number }[] = [];
-  private conq = { round: 1, active: -1, taken: 0, hudT: 0, hudText: '', bossKills0: 0, routed: false };
+  private conq = { round: 1, active: -1, taken: 0, hudT: 0, hudText: '', bossKills0: 0, routed: false, patrolT: PATROL_FIRST };
   private spawnOrigin: { x: number; z: number } | null = null;
   private garrison: Garrison = 'infantry';
   private waveQueue: { type: 'samurai' | 'archer'; variant?: EnemyVariant }[] = [];
-  private waveCap: { melee: number; archer: number } | null = null;
+  private waveCap: { melee: number; archer: number; fodder: number } | null = null;
   private reinforceT = 0;
   private prevActive = 0;
 
@@ -1100,6 +1110,11 @@ export class GameEngine {
     for (let i = 0; i < nMonk; i++) list.push({ type: 'samurai', variant: this.fighterReady('monk') ? 'monk' : undefined });
     for (const v of fighters) list.push({ type: 'samurai', variant: v });
     for (let i = 0; i < nA; i++) list.push({ type: 'archer' });
+    // a post's foot soldiers: plenty, each worth little (the garrison of infantry has the most)
+    if (conq) {
+      const nAshi = Math.round(Math.min(10, 3 + this.conq.round * 2) * (boss ? 0.5 : this.garrison === 'infantry' ? 1 : 0.6));
+      for (let i = 0; i < nAshi; i++) list.push({ type: 'samurai', variant: 'ashigaru' });
+    }
     if (boss) list.push({ type: 'boss', variant: bossFormFor(this.wave) });
 
     // only so many at a time: a mix goes in now (a plain face or two, one of the special ones, an
@@ -1110,21 +1125,29 @@ export class GameEngine {
     let now = list;
     if (cap) {
       const plain = list.filter((it) => it.type === 'samurai' && !it.variant);
-      const special = list.filter((it) => it.type === 'samurai' && it.variant);
+      const special = list.filter((it) => it.type === 'samurai' && it.variant && !isFodder(it));
+      const fodder = list.filter((it) => isFodder(it));
       const archers = list.filter((it) => it.type === 'archer');
       const first: typeof list = list.filter((it) => it.type === 'boss');
       const sp = special.shift();
       if (sp) first.push(sp);
-      while (first.filter((it) => it.type === 'samurai').length < cap.melee && plain.length) first.push(plain.shift()!);
-      while (first.filter((it) => it.type === 'samurai').length < cap.melee && special.length) first.push(special.shift()!);
+      const meleeIn = () => first.filter((it) => it.type === 'samurai').length;
+      while (meleeIn() < cap.melee && plain.length) first.push(plain.shift()!);
+      while (meleeIn() < cap.melee && special.length) first.push(special.shift()!);
       while (first.filter((it) => it.type === 'archer').length < cap.archer && archers.length) first.push(archers.shift()!);
-      // the rest, plain and special faces alternating
+      while (first.filter((it) => isFodder(it)).length < cap.fodder && fodder.length) first.push(fodder.shift()!);
+      // the rest, plain and special faces alternating, a couple of foot soldiers after each
       const rest: typeof list = [];
+      const melee: typeof list = [];
       while (plain.length || special.length) {
-        if (special.length) rest.push(special.shift()!);
-        if (plain.length) rest.push(plain.shift()!);
+        if (special.length) melee.push(special.shift()!);
+        if (plain.length) melee.push(plain.shift()!);
       }
-      rest.push(...archers);
+      for (const m of melee) {
+        rest.push(m);
+        for (let k = 0; k < 2 && fodder.length; k++) rest.push(fodder.shift()!);
+      }
+      rest.push(...fodder, ...archers);
       now = first;
       this.waveQueue = rest.filter((it): it is { type: 'samurai' | 'archer'; variant?: EnemyVariant } => it.type !== 'boss');
     }
@@ -1155,7 +1178,7 @@ export class GameEngine {
       for (let n = 1 + Math.floor(this.wave / 6); n > 0 && pool.length; n--) this.makeElite(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
     }
 
-    this.waveStat = { t0: this.time, enemies: list.length, queued: this.waveQueue.length, finishers: 0, deflects: 0 };
+    this.waveStat = { t0: this.time, enemies: list.filter((it) => !isFodder(it)).length, queued: this.waveQueue.filter((it) => !isFodder(it)).length, finishers: 0, deflects: 0 };
     let sub = boss ? BOSS_HINT[bossFormFor(this.wave) ?? 'oni'] : mod ? mod.desc : goalDef ? (duelist ? `Duelo contra ${FIGHTER_NAME[duelist]}` : goalDef.desc) : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
     const atmIdx = atmosphereForWave(this.wave, this.atmosMode, this.world.atmIndex);
     if (atmIdx !== this.world.atmIndex) {
@@ -1191,23 +1214,31 @@ export class GameEngine {
 
   // How many may be in the fight at once. Duels and Resistir (which streams its own
   // reinforcements) are left alone; the Oni's escorts are fewer, the captain's band one more.
-  private capsFor(boss: boolean, goalId?: string, modId?: string): { melee: number; archer: number } | null {
+  private capsFor(boss: boolean, goalId?: string, modId?: string): { melee: number; archer: number; fodder: number } | null {
     if (goalId === 'duelo' || goalId === 'resistir') return null;
     const w = this.wave;
     let melee = w <= 2 ? 2 : w <= 5 ? 3 : 4;
     let archer = w <= 5 ? 1 : 2;
+    let fodder = w <= 3 ? 4 : 6;
     if (boss) {
       melee = Math.max(2, melee - 1);
       archer = 1;
+      fodder = 4;
     }
     if (goalId === 'capitao') melee += 1;
     if (modId === 'flechas') archer = 4;
-    return { melee, archer };
+    return { melee, archer, fodder };
   }
 
   // A new face steps in from ahead of the camera (so it is seen coming, not met in the back),
   // else from anywhere on the ring
   private spawnAhead(type: 'samurai' | 'archer', variant?: EnemyVariant): EnemyInstance | null {
+    const pt = this.aheadPoint();
+    return pt ? this.spawnEnemy(type, pt.x, pt.z, variant) : this.spawnRing(type, true, variant);
+  }
+
+  // An open spot 15-23 m away in the half of the field the camera looks at
+  private aheadPoint(): { x: number; z: number } | null {
     const P = this.player.pos;
     const fa = Math.atan2(-Math.sin(this.camYaw), -Math.cos(this.camYaw));
     for (let k = 0; k < 24; k++) {
@@ -1217,21 +1248,26 @@ export class GameEngine {
       const z = P.z + Math.cos(a) * r;
       if (Math.hypot(x, z) > 35) continue;
       if (this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r + 0.8)) continue;
-      return this.spawnEnemy(type, x, z, variant);
+      return { x, z };
     }
-    return this.spawnRing(type, true, variant);
+    return null;
   }
 
   // Which of the waiting ones steps in: one whose kind isn't already in the fight, if the
   // numbers allow it (-1: no room yet)
-  private pickQueued(melee: number, archers: number): number {
+  private pickQueued(melee: number, archers: number, fodder: number): number {
     const cap = this.waveCap;
     if (!cap) return -1;
     const live = new Set<string>();
-    for (const e of this.enemies) if (!e.dead && e.type === 'samurai') live.add(e.variant ?? 'plain');
+    for (const e of this.enemies) if (!e.dead && e.type === 'samurai' && !isFodder(e)) live.add(e.variant ?? 'plain');
     let first = -1;
     for (let i = 0; i < this.waveQueue.length; i++) {
       const it = this.waveQueue[i];
+      if (isFodder(it)) {
+        if (fodder >= cap.fodder) continue;
+        if (first < 0) first = i;
+        continue;
+      }
       if (it.type === 'samurai' ? melee >= cap.melee : archers >= cap.archer) continue;
       if (first < 0) first = i;
       if (it.type === 'archer' || !live.has(it.variant ?? 'plain')) return i;
@@ -1243,17 +1279,20 @@ export class GameEngine {
     if (!this.waveQueue.length) return;
     let melee = 0;
     let archers = 0;
+    let fodder = 0;
     for (const e of this.enemies) {
       if (e.dead) continue;
-      if (e.type === 'samurai') melee++;
+      if (isFodder(e)) fodder++;
+      else if (e.type === 'samurai') melee++;
       else if (e.type === 'archer') archers++;
     }
-    const act = melee + archers;
-    if (act < this.prevActive) this.reinforceT = Math.max(this.reinforceT, REINFORCE_GAP);
+    const act = melee + archers + fodder;
+    const idx = this.pickQueued(melee, archers, fodder);
+    // a foot soldier steps in almost at once; a face of note takes its moment
+    if (act < this.prevActive) this.reinforceT = Math.max(this.reinforceT, idx >= 0 && isFodder(this.waveQueue[idx]) ? 0.5 : REINFORCE_GAP);
     this.prevActive = act;
     this.reinforceT -= dt;
     if (this.reinforceT > 0) return;
-    const idx = this.pickQueued(melee, archers);
     if (idx < 0) return;
     const [it] = this.waveQueue.splice(idx, 1);
     const e = this.spawnOrigin ? this.spawnAtPost(it.type, it.variant) : this.spawnAhead(it.type, it.variant);
@@ -1264,9 +1303,8 @@ export class GameEngine {
     if (this.waveMod?.id === 'ferro') e.maxPosture *= 1.6;
     if (it.variant) this.hintVariant(it.variant, 0.6);
     this.prevActive = act + 1;
-    this.reinforceT = REINFORCE_SPACING;
+    this.reinforceT = isFodder(it) ? 0.25 : REINFORCE_SPACING;
   }
-
 
   // ---------------------------------------------------------------------------
   // Conquista: enemy posts across the field, each with a garrison and a captain
@@ -1283,7 +1321,7 @@ export class GameEngine {
       }
       this.posts.push(post);
     }
-    this.conq = { round: 1, active: -1, taken: 0, hudT: 0, hudText: '', bossKills0: 0, routed: false };
+    this.conq = { round: 1, active: -1, taken: 0, hudT: 0, hudText: '', bossKills0: 0, routed: false, patrolT: PATROL_FIRST };
     this.wave = 0;
     this.callbacks.onWaveChange(0, 'Conquista', `Tome os ${this.posts.length} postos inimigos: derrote o capitão de cada um`);
     this.updateConquestHud(0, true);
@@ -1298,7 +1336,7 @@ export class GameEngine {
       this.postSolids = [];
     }
     this.spawnOrigin = null;
-    this.conq = { round: 1, active: -1, taken: 0, hudT: 0, hudText: '', bossKills0: 0, routed: false };
+    this.conq = { round: 1, active: -1, taken: 0, hudT: 0, hudText: '', bossKills0: 0, routed: false, patrolT: PATROL_FIRST };
   }
 
   private stepConquest(dt: number) {
@@ -1323,6 +1361,7 @@ export class GameEngine {
         return;
       }
     }
+    this.stepPatrols(dt);
     this.updateConquestHud(dt);
   }
 
@@ -1363,6 +1402,8 @@ export class GameEngine {
     this.conq.active = i;
     this.conq.routed = false;
     this.conq.bossKills0 = this.bossKills;
+    // a patrol still on the road breaks off: the post is the fight now
+    this.routEnemies((e) => !!e.patrol);
     this.spawnOrigin = { x: p.x, z: p.z };
     this.garrison = GARRISONS[i % GARRISONS.length];
     this.nextWave();
@@ -1414,6 +1455,33 @@ export class GameEngine {
       return this.spawnEnemy(type, x, z, variant);
     }
     return this.spawnRing(type, true, variant);
+  }
+
+  // A patrol takes the road now and then while no post is awake: a few foot soldiers and a leader
+  // who has already seen the player. One at a time, never near a hostile post, gone when a post wakes.
+  private stepPatrols(dt: number) {
+    const c = this.conq;
+    c.patrolT -= dt;
+    if (c.patrolT > 0) return;
+    c.patrolT = rand(PATROL_EVERY[0], PATROL_EVERY[1]);
+    if (this.enemies.some((e) => !e.dead && e.patrol)) return;
+    const P = this.player.pos;
+    if (this.posts.some((p) => !p.captured && Math.hypot(p.x - P.x, p.z - P.z) < PATROL_CLEAR)) return;
+    const base = this.aheadPoint();
+    if (!base) return;
+    const lead: { type: 'samurai'; variant?: EnemyVariant } = { type: 'samurai' };
+    const fighters = FIGHTER_ORDER.filter((v) => this.wave >= FIGHTER_MIN[v]! && this.fighterReady(v));
+    if (c.round >= 2 && fighters.length && Math.random() < 0.5) lead.variant = fighters[Math.floor(Math.random() * fighters.length)];
+    else if (this.wave >= 3 && this.fighterReady('monk') && Math.random() < 0.4) lead.variant = 'monk';
+    const group: { type: 'samurai'; variant?: EnemyVariant }[] = [lead];
+    for (let i = 0; i < Math.min(6, 2 + c.round); i++) group.push({ type: 'samurai', variant: 'ashigaru' });
+    for (const it of group) {
+      const a = Math.random() * TAU;
+      const r = rand(0.5, 2.6);
+      const e = this.spawnEnemy(it.type, base.x + Math.sin(a) * r, base.z + Math.cos(a) * r, it.variant);
+      e.patrol = true;
+    }
+    this.spawnLabel(base.x, 3.2, base.z, 'RONDA INIMIGA!', '#ffb36a', 1.3);
   }
 
   // Who leads a garrison: a named fighter if there is one, else the brute, else any samurai
@@ -1473,9 +1541,9 @@ export class GameEngine {
   }
 
   // The enemies still standing turn and run, then vanish (no Honra, no drops)
-  private routEnemies() {
+  private routEnemies(only?: (e: EnemyInstance) => boolean) {
     for (const e of this.enemies) {
-      if (e.dead || e.flee) continue;
+      if (e.dead || e.flee || (only && !only(e))) continue;
       e.flee = true;
       e.fleeT = 0;
       e.token = false;
@@ -1558,8 +1626,8 @@ export class GameEngine {
       // per spawn, same clips and AI
       const tpl = characterIfReady('ronin');
       const tpl2 = characterIfReady('samurai2');
-      const vTint = variant === 'brute' ? BRUTE_TINT : undefined;
-      const vHeight = variant === 'brute' ? 2.8 : undefined;
+      const vTint = variant === 'brute' ? BRUTE_TINT : variant === 'ashigaru' ? ASHIGARU_TINT : undefined;
+      const vHeight = variant === 'brute' ? 2.8 : variant === 'ashigaru' ? 2.1 : undefined;
       // a fighter with a model of its own (when it has finished loading)
       const fm = variant && VARIANT_MODEL[variant] ? characterIfReady(VARIANT_MODEL[variant]!) : null;
       if (fm && variant) rig = createClipRig(fm, { lod: true, height: VARIANT_HEIGHT[variant], grips: VARIANT_GRIP[variant] });
@@ -1581,6 +1649,7 @@ export class GameEngine {
         weaponObj = makeWeapon(variant === 'monk' ? 'bo' : 'ekatana');
         bladeKey = variant === 'monk' ? 'bo' : 'ekatana';
         if (variant === 'brute') weaponObj.scale.setScalar(1.45);
+        else if (variant === 'ashigaru') weaponObj.scale.setScalar(0.85);
         rig.hand.add(weaponObj);
         if (variant === 'nito' && fm) {
           weaponObjL = makeWeapon('ekatana');
@@ -1595,6 +1664,11 @@ export class GameEngine {
         speed *= 0.62;
         r = 0.8;
         h = 3.0;
+      } else if (variant === 'ashigaru') {
+        // a single blow of any weapon brings one down (until the late waves, when two may)
+        hp = Math.min(24, 10 + this.wave * 0.6);
+        speed *= 0.95;
+        r = 0.45;
       } else if (variant === 'monk') {
         hp *= 0.85;
         speed *= 1.12;
@@ -3650,12 +3724,13 @@ export class GameEngine {
     this.cancelStrike(e);
 
     this.player.kills++;
+    const fodder = isFodder(e);
     if (e.type === 'boss') {
       this.addHonor('boss', HONOR.boss);
       this.bossKills++;
-    } else this.addHonor('kill', HONOR.kill[e.type] ?? 1);
+    } else this.addHonor('kill', fodder ? 0.2 : HONOR.kill[e.type] ?? 1);
     if (e.elite) this.addHonor('mod', HONOR.elite);
-    const pts = e.type === 'boss' ? 1200 : e.type === 'archer' ? 120 : 80;
+    const pts = e.type === 'boss' ? 1200 : e.type === 'archer' ? 120 : fodder ? 20 : 80;
     this.player.score += pts;
     this.callbacks.onScoreChange(this.player.score);
 
@@ -3667,15 +3742,17 @@ export class GameEngine {
     this.addXp(pts);
 
     // Erupção de sangue estelar ao eliminar o inimigo
-    this.emitBlood(e.pos.x, e.pos.y + 1.2, e.pos.z, 0, 0, e.type === 'boss' ? 65 : 42, true, true);
+    this.emitBlood(e.pos.x, e.pos.y + 1.2, e.pos.z, 0, 0, e.type === 'boss' ? 65 : fodder ? 18 : 42, true, true);
     {
       const a = rand(0, TAU);
       this.decals.spawn(e.pos.x, e.pos.z, Math.sin(a), Math.cos(a), e.type === 'boss' ? 2.6 : 1.8);
     }
-    this.emitParticles(e.pos.x, 1, e.pos.z, 28, 0x9a88c0, 5, 3, 4, 1);
+    this.emitParticles(e.pos.x, 1, e.pos.z, fodder ? 10 : 28, 0x9a88c0, 5, 3, 4, 1);
 
     // Bosses always drop a scroll; other kills roll against the loadout-proportional rate
-    if (e.type === 'boss' || e.elite || this.rollScroll()) this.dropScroll(e.pos.x, e.pos.z);
+    if (fodder) {
+      if (Math.random() < 0.04) this.dropPickup(e.pos.x, e.pos.z);
+    } else if (e.type === 'boss' || e.elite || this.rollScroll()) this.dropScroll(e.pos.x, e.pos.z);
     else if (Math.random() < 0.2) this.dropPickup(e.pos.x, e.pos.z);
   }
 
@@ -4196,7 +4273,7 @@ export class GameEngine {
     const brute = e.variant === 'brute';
     const monk = e.variant === 'monk';
     // the Brutamontes always ends a chain with a slow sweep to jump; the Monge jabs
-    const perilChance = boss ? (e.fury ? 0.45 : 0.35) : brute ? 1 : monk ? 0.3 : this.wave >= 2 ? 0.28 : 0.1;
+    const perilChance = boss ? (e.fury ? 0.45 : 0.35) : isFodder(e) ? 0 : brute ? 1 : monk ? 0.3 : this.wave >= 2 ? 0.28 : 0.1;
     let kind: StrikeKind = boss ? 'smash' : 'slash';
     let perilous = false;
     if (last && (e.forcePeril || Math.random() < perilChance)) {
@@ -4206,7 +4283,7 @@ export class GameEngine {
     }
     const windup = boss ? (kind === 'sweep' ? 0.85 : first ? 0.62 : 0.46) : perilous ? 0.64 : first ? 0.46 : 0.32;
     let reach = boss ? (kind === 'sweep' ? 4.6 : 3.9) : brute ? (kind === 'sweep' ? 3.7 : 3.0) : monk ? (kind === 'thrust' ? 4.3 : 3.3) : kind === 'thrust' ? 3.4 : kind === 'sweep' ? 2.8 : 2.3;
-    let dmg = Math.round((boss ? (kind === 'sweep' ? 22 : 24) : kind === 'thrust' ? 18 : kind === 'sweep' ? 15 : 12) * (e.elite ? 1.25 : 1) * (brute ? 1.7 : monk ? 0.85 : 1));
+    let dmg = Math.round((boss ? (kind === 'sweep' ? 22 : 24) : kind === 'thrust' ? 18 : kind === 'sweep' ? 15 : 12) * (e.elite ? 1.25 : 1) * (brute ? 1.7 : monk ? 0.85 : isFodder(e) ? FODDER_DAMAGE : 1));
     let wind = windup;
     // the named fighters use the Rōnin's own moves in their own style (see fighterStrike)
     const fs = e.rig.clip ? this.fighterStrike(e, first, last) : null;
@@ -4232,7 +4309,7 @@ export class GameEngine {
       // arrives when the damage does (combo follow-ups come a little quicker)
       const opts = ENEMY_STRIKES[kind];
       const pick = opts[Math.floor(Math.random() * opts.length)];
-      const speed = (perilous ? 0.95 : first ? 1.05 : 1.25) * (brute ? 0.72 : monk ? 1.15 : 1);
+      const speed = (perilous ? 0.95 : first ? 1.05 : 1.25) * (brute ? 0.72 : monk ? 1.15 : isFodder(e) ? 0.8 : 1);
       const from = pick.from ?? 0;
       wind = (pick.hit - from) / speed;
       this.enemyClip(e, pick.clip, { from, speed, fadeIn: 0.12, fadeOut: 0.3 });
@@ -5182,6 +5259,8 @@ export class GameEngine {
     this.enemyBlades.length = 0;
     const tokensFree = this.maxTokens() - this.tokensInUse();
     let granted = 0;
+    let fodderSwinging = 0;
+    for (const o of this.enemies) if (!o.dead && isFodder(o) && o.mode === 'attack') fodderSwinging++;
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const e = this.enemies[i];
       // a windy wave (and the Oni in its fury) runs the whole fighter faster - movement,
@@ -5471,17 +5550,19 @@ export class GameEngine {
       } else {
         // approach / circle / guard: keep a ring around the player and take turns attacking
         e.yaw = turnTo(e.yaw, toP, dt * 7);
-        const ring = boss ? 4.2 : e.variant === 'brute' ? 3.9 : e.variant === 'monk' ? 4.4 + (i % 3) * 0.4 : 3.4 + (i % 3) * 0.55;
+        const ring = boss ? 4.2 : isFodder(e) ? 3 + (i % 4) * 0.5 : e.variant === 'brute' ? 3.9 : e.variant === 'monk' ? 4.4 + (i % 3) * 0.4 : 3.4 + (i % 3) * 0.55;
         const canAttack = !freezeAttacks && e.cd <= 0 && d < (boss ? 9 : 7);
-        if (canAttack && (boss || granted < tokensFree)) {
-          if (!boss) granted++;
-          e.token = !boss;
+        const fodder = isFodder(e);
+        if (canAttack && (boss || (fodder ? fodderSwinging < FODDER_SWINGERS : granted < tokensFree))) {
+          if (fodder) fodderSwinging++;
+          else if (!boss) granted++;
+          e.token = !boss && !fodder;
           e.mode = 'attack';
           e.modeT = 0;
           e.t = 0;
           e.cd2 = 0;
           const maxCombo = boss ? (e.fury ? 3 : 2) : e.variant === 'brute' ? 2 : Math.min(3, 1 + Math.floor(this.wave / 2) + (e.variant === 'monk' ? 1 : 0));
-          e.comboLeft = 1 + Math.floor(Math.random() * maxCombo);
+          e.comboLeft = fodder ? 1 : 1 + Math.floor(Math.random() * maxCombo);
         } else if (d > ring + 1.4) {
           e.mode = 'approach';
           mvx = nx;
@@ -6106,9 +6187,9 @@ export class GameEngine {
     for (const e of this.enemies) {
       if (e.dead) continue;
       const q = toS(e.pos.x, e.pos.z);
-      this.mmCtx.fillStyle = e.captain ? '#ffd166' : e.type === 'boss' ? '#f2a65a' : e.type === 'archer' ? '#d88ad0' : '#e0404a';
+      this.mmCtx.fillStyle = e.captain ? '#ffd166' : e.type === 'boss' ? '#f2a65a' : e.type === 'archer' ? '#d88ad0' : isFodder(e) ? '#b98a56' : '#e0404a';
       this.mmCtx.beginPath();
-      this.mmCtx.arc(q[0], q[1], e.captain ? 6 : e.type === 'boss' ? 7 : 4, 0, TAU);
+      this.mmCtx.arc(q[0], q[1], e.captain ? 6 : e.type === 'boss' ? 7 : isFodder(e) ? 2.5 : 4, 0, TAU);
       this.mmCtx.fill();
     }
     this.mmCtx.restore();
