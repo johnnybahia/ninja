@@ -76,6 +76,18 @@ const VARIANT_GRIP: Partial<Record<EnemyVariant, { right: Grip; left?: Grip }>> 
 };
 // the weapons each fighter wields (right hand, left hand) - fetched in the background
 const VARIANT_WEAPONS: Partial<Record<EnemyVariant, [string, string]>> = { nito: ['dsfire', 'dsmagic'], raio: ['claw_r', 'claw_l'] };
+// A wave doesn't pour in all at once: only so many enemies are in the fight at a time and the rest
+// wait at the edge of the arena, stepping in a moment after someone falls (the fight stays readable)
+const REINFORCE_GAP = 1.4; // seconds after a fall before the next one steps in
+const REINFORCE_SPACING = 0.6; // between two that step in back to back
+const RESIST_MAX = 5; // most enemies in the field at once on a Resistir wave
+const HINTS: Partial<Record<EnemyVariant, [string, string]>> = {
+  brute: ['Novo inimigo: Brutamontes', 'Pule a varrida e castigue a recuperação'],
+  monk: ['Novo inimigo: Samurai do Bō', 'Ataca de longe: feche a distância com a esquiva'],
+  nito: ['Novo inimigo: Samurai das Duas Espadas', 'Espadas gêmeas de fogo e magia: apare ou afaste-se'],
+  shinobi: ['Novo inimigo: Shinobi', 'Veloz: some e reaparece perto, atira estrelas'],
+  raio: ['Novo inimigo: Lutador do Raio', 'Garras em combos relâmpago e teletransporte: esquive no ritmo']
+};
 const FIGHTER_NAME: Partial<Record<EnemyVariant, string>> = { shinobi: 'Shinobi', raio: 'Lutador do Raio', nito: 'Samurai das Duas Espadas', monk: 'Samurai do Bō' };
 const SHINOBI_LIGHT = new THREE.Color(0.5, 1.7, 3.2);
 const RAIO_LIGHT = new THREE.Color(1.7, 1.3, 3.4);
@@ -438,6 +450,11 @@ export class GameEngine {
   public wave = 0;
   private waveTimer = 0;
   private clearedShown = false;
+  // enemies of the wave waiting to step in, and how many of each kind may be in the fight
+  private waveQueue: { type: 'samurai' | 'archer'; variant?: EnemyVariant }[] = [];
+  private waveCap: { melee: number; archer: number } | null = null;
+  private reinforceT = 0;
+  private prevActive = 0;
 
   // Run progression: level-up cards, Honra (meta currency) and the per-wave grade
   public metaBonus: MetaBonus = NO_BONUS;
@@ -467,7 +484,7 @@ export class GameEngine {
   private bestRank = 0;
   private bolts: { x: number; z: number; t: number; ring: THREE.Mesh; pillar: THREE.Mesh; struck: boolean; visual?: boolean }[] = [];
   private shocks: { x: number; z: number; r: number; mesh: THREE.Mesh; hit: boolean }[] = [];
-  private waveStat = { t0: 0, enemies: 0, finishers: 0, deflects: 0 };
+  private waveStat = { t0: 0, enemies: 0, queued: 0, finishers: 0, deflects: 0 };
   private lastBossKey = -1;
   private lastHardDef = -99;
   private timers: { at: number; fn: () => void }[] = [];
@@ -1058,8 +1075,36 @@ export class GameEngine {
     for (let i = 0; i < nA; i++) list.push({ type: 'archer' });
     if (boss) list.push({ type: 'boss', variant: bossFormFor(this.wave) });
 
+    // only so many at a time: a mix goes in now (a plain face or two, one of the special ones, an
+    // archer) and the rest steps in as the fight thins out
+    const cap = this.capsFor(boss, goalDef?.id, mod?.id);
+    this.waveCap = cap;
+    this.waveQueue = [];
+    let now = list;
+    if (cap) {
+      const plain = list.filter((it) => it.type === 'samurai' && !it.variant);
+      const special = list.filter((it) => it.type === 'samurai' && it.variant);
+      const archers = list.filter((it) => it.type === 'archer');
+      const first: typeof list = list.filter((it) => it.type === 'boss');
+      const sp = special.shift();
+      if (sp) first.push(sp);
+      while (first.filter((it) => it.type === 'samurai').length < cap.melee && plain.length) first.push(plain.shift()!);
+      while (first.filter((it) => it.type === 'samurai').length < cap.melee && special.length) first.push(special.shift()!);
+      while (first.filter((it) => it.type === 'archer').length < cap.archer && archers.length) first.push(archers.shift()!);
+      // the rest, plain and special faces alternating
+      const rest: typeof list = [];
+      while (plain.length || special.length) {
+        if (special.length) rest.push(special.shift()!);
+        if (plain.length) rest.push(plain.shift()!);
+      }
+      rest.push(...archers);
+      now = first;
+      this.waveQueue = rest.filter((it): it is { type: 'samurai' | 'archer'; variant?: EnemyVariant } => it.type !== 'boss');
+    }
+    this.reinforceT = REINFORCE_GAP;
+    this.prevActive = now.filter((it) => it.type !== 'boss').length;
     const spawned: EnemyInstance[] = [];
-    list.forEach((it) => {
+    now.forEach((it) => {
       const e = this.spawnRing(it.type, near, it.variant);
       if (e) spawned.push(e);
     });
@@ -1083,7 +1128,7 @@ export class GameEngine {
       for (let n = 1 + Math.floor(this.wave / 6); n > 0 && pool.length; n--) this.makeElite(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
     }
 
-    this.waveStat = { t0: this.time, enemies: list.length, finishers: 0, deflects: 0 };
+    this.waveStat = { t0: this.time, enemies: list.length, queued: this.waveQueue.length, finishers: 0, deflects: 0 };
     let sub = boss ? BOSS_HINT[bossFormFor(this.wave) ?? 'oni'] : mod ? mod.desc : goalDef ? (duelist ? `Duelo contra ${FIGHTER_NAME[duelist]}` : goalDef.desc) : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
     const atmIdx = atmosphereForWave(this.wave, this.atmosMode, this.world.atmIndex);
     if (atmIdx !== this.world.atmIndex) {
@@ -1096,25 +1141,101 @@ export class GameEngine {
       sub += ` · ${THEMES[themeIdx].glyph} ${THEMES[themeIdx].name}`;
     }
     // the first time a new kind of samurai shows up, a hint on how to beat it
-    const HINTS: Partial<Record<EnemyVariant, [string, string]>> = {
-      brute: ['Novo inimigo: Brutamontes', 'Pule a varrida e castigue a recuperação'],
-      monk: ['Novo inimigo: Samurai do Bō', 'Ataca de longe: feche a distância com a esquiva'],
-      nito: ['Novo inimigo: Samurai das Duas Espadas', 'Espadas gêmeas de fogo e magia: apare ou afaste-se'],
-      shinobi: ['Novo inimigo: Shinobi', 'Veloz: some e reaparece perto, atira estrelas'],
-      raio: ['Novo inimigo: Lutador do Raio', 'Garras em combos relâmpago e teletransporte: esquive no ritmo']
-    };
     let hintAt = 2.3;
     for (const v of ['brute', 'monk', 'nito', 'shinobi', 'raio'] as EnemyVariant[]) {
-      if (!this.seenVariants.has(v) && spawned.some((e) => e.variant === v)) {
-        this.seenVariants.add(v);
-        const wv = this.wave;
-        this.timers.push({ at: this.time + hintAt, fn: () => this.state === 'play' && this.wave === wv && this.callbacks.onWaveChange(wv, HINTS[v]![0], HINTS[v]![1]) });
-        hintAt += 2.3;
-      }
+      if (spawned.some((e) => e.variant === v) && this.hintVariant(v, hintAt)) hintAt += 2.3;
     }
     this.callbacks.onWaveMod?.(mod ? { id: mod.id, name: mod.name, glyph: mod.glyph, desc: mod.desc } : goalDef ? { id: goalDef.id, name: goalDef.name, glyph: goalDef.glyph, desc: goalDef.desc } : null);
     this.callbacks.onWaveChange(this.wave, mod ? `Onda ${this.wave} · ${mod.name}` : goalDef ? `Onda ${this.wave} · ${goalDef.name}` : `Onda ${this.wave}`, sub);
     sfx.wave();
+  }
+
+  // The first time a kind of samurai shows up, a hint on how to beat it (true if one was shown)
+  private hintVariant(v: EnemyVariant, delay: number): boolean {
+    const h = HINTS[v];
+    if (!h || this.seenVariants.has(v)) return false;
+    this.seenVariants.add(v);
+    const wv = this.wave;
+    this.timers.push({ at: this.time + delay, fn: () => this.state === 'play' && this.wave === wv && this.callbacks.onWaveChange(wv, h[0], h[1]) });
+    return true;
+  }
+
+  // How many may be in the fight at once. Duels and Resistir (which streams its own
+  // reinforcements) are left alone; the Oni's escorts are fewer, the captain's band one more.
+  private capsFor(boss: boolean, goalId?: string, modId?: string): { melee: number; archer: number } | null {
+    if (goalId === 'duelo' || goalId === 'resistir') return null;
+    const w = this.wave;
+    let melee = w <= 2 ? 2 : w <= 5 ? 3 : 4;
+    let archer = w <= 5 ? 1 : 2;
+    if (boss) {
+      melee = Math.max(2, melee - 1);
+      archer = 1;
+    }
+    if (goalId === 'capitao') melee += 1;
+    if (modId === 'flechas') archer = 4;
+    return { melee, archer };
+  }
+
+  // A new face steps in from ahead of the camera (so it is seen coming, not met in the back),
+  // else from anywhere on the ring
+  private spawnAhead(type: 'samurai' | 'archer', variant?: EnemyVariant): EnemyInstance | null {
+    const P = this.player.pos;
+    const fa = Math.atan2(-Math.sin(this.camYaw), -Math.cos(this.camYaw));
+    for (let k = 0; k < 24; k++) {
+      const a = fa + rand(-1.25, 1.25);
+      const r = rand(15, 23);
+      const x = P.x + Math.sin(a) * r;
+      const z = P.z + Math.cos(a) * r;
+      if (Math.hypot(x, z) > 35) continue;
+      if (this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r + 0.8)) continue;
+      return this.spawnEnemy(type, x, z, variant);
+    }
+    return this.spawnRing(type, true, variant);
+  }
+
+  // Which of the waiting ones steps in: one whose kind isn't already in the fight, if the
+  // numbers allow it (-1: no room yet)
+  private pickQueued(melee: number, archers: number): number {
+    const cap = this.waveCap;
+    if (!cap) return -1;
+    const live = new Set<string>();
+    for (const e of this.enemies) if (!e.dead && e.type === 'samurai') live.add(e.variant ?? 'plain');
+    let first = -1;
+    for (let i = 0; i < this.waveQueue.length; i++) {
+      const it = this.waveQueue[i];
+      if (it.type === 'samurai' ? melee >= cap.melee : archers >= cap.archer) continue;
+      if (first < 0) first = i;
+      if (it.type === 'archer' || !live.has(it.variant ?? 'plain')) return i;
+    }
+    return first;
+  }
+
+  private stepReinforcements(dt: number) {
+    if (!this.waveQueue.length) return;
+    let melee = 0;
+    let archers = 0;
+    for (const e of this.enemies) {
+      if (e.dead) continue;
+      if (e.type === 'samurai') melee++;
+      else if (e.type === 'archer') archers++;
+    }
+    const act = melee + archers;
+    if (act < this.prevActive) this.reinforceT = Math.max(this.reinforceT, REINFORCE_GAP);
+    this.prevActive = act;
+    this.reinforceT -= dt;
+    if (this.reinforceT > 0) return;
+    const idx = this.pickQueued(melee, archers);
+    if (idx < 0) return;
+    const [it] = this.waveQueue.splice(idx, 1);
+    const e = this.spawnAhead(it.type, it.variant);
+    if (!e) {
+      this.waveQueue.unshift(it);
+      return;
+    }
+    if (this.waveMod?.id === 'ferro') e.maxPosture *= 1.6;
+    if (it.variant) this.hintVariant(it.variant, 0.6);
+    this.prevActive = act + 1;
+    this.reinforceT = REINFORCE_SPACING;
   }
 
   // Elite samurai: tougher and harder-hitting, marked with a golden ground ring and a gold
@@ -1198,11 +1319,13 @@ export class GameEngine {
       }
       const alive = this.enemies.reduce((n, e) => n + (e.dead ? 0 : 1), 0);
       g.next -= dt;
-      if (g.t < g.dur - 4 && (g.next <= 0 || alive === 0) && alive < 9) {
+      // never more than a handful in the field at once, however long the night
+      const room = RESIST_MAX - alive;
+      if (g.t < g.dur - 4 && (g.next <= 0 || alive === 0) && room > 0) {
         g.next = 7;
-        const n = 2 + (this.wave >= 6 ? 1 : 0);
+        const n = Math.min(2 + (this.wave >= 6 ? 1 : 0), room);
         for (let i = 0; i < n; i++) this.spawnRing('samurai', false);
-        if (this.wave >= 5 && Math.random() < 0.5) this.spawnRing('archer', false);
+        if (this.wave >= 5 && room - n > 0 && Math.random() < 0.5) this.spawnRing('archer', false);
         this.spawnLabel(this.player.pos.x, this.player.pos.y + 3.2, this.player.pos.z, 'REFORÇOS!', '#ffd166', 1.2);
         sfx.wave();
       }
@@ -1214,6 +1337,7 @@ export class GameEngine {
 
   private finishGoal(g: NonNullable<GameEngine['goal']>, text: string) {
     g.done = true;
+    this.waveQueue = [];
     this.routEnemies();
     this.callbacks.onWaveMod?.({ id: g.id, name: `${g.name} ✓`, glyph: g.glyph, desc: text });
     this.callbacks.onWaveChange(this.wave, text, '');
@@ -3445,7 +3569,8 @@ export class GameEngine {
     const w = this.waveStat;
     let pts = 0;
     if (!this.player.tookDamage) pts += 2;
-    if (this.time - w.t0 <= 12 + 10 * w.enemies) pts += 1;
+    // (each one that waits its turn adds the time it takes to step in and walk up)
+    if (this.time - w.t0 <= 12 + 10 * w.enemies + 6 * w.queued) pts += 1;
     if (w.finishers >= Math.ceil(w.enemies * 0.4)) pts += 1;
     if (w.deflects >= 3) pts += 1;
     return pts >= 5 ? 'S' : pts === 4 ? 'A' : pts === 3 ? 'B' : pts === 2 ? 'C' : 'D';
@@ -5201,9 +5326,10 @@ export class GameEngine {
         const ox = e.pos.x - o.pos.x;
         const oz = e.pos.z - o.pos.z;
         const od = Math.hypot(ox, oz);
-        const minD = e.r + o.r + 0.35;
+        // faces waiting their turn keep a little more room between them than the ones trading blows
+        const minD = e.r + o.r + (e.mode !== 'attack' && o.mode !== 'attack' ? 0.9 : 0.35);
         if (od < minD && od > 1e-4) {
-          const push = ((minD - od) / minD) * 3 * dt;
+          const push = ((minD - od) / minD) * 4 * dt;
           e.pos.x += (ox / od) * push;
           e.pos.z += (oz / od) * push;
         }
@@ -5298,7 +5424,8 @@ export class GameEngine {
       }
 
       const pr = Math.min(1, e.posture / e.maxPosture);
-      e.bar.visible = e.hp < e.maxHp || pr > 0.01 || boss;
+      // a life bar only where it matters: the Oni, whoever is close, striking or staggered
+      e.bar.visible = (e.hp < e.maxHp || pr > 0.01 || boss) && (boss || d < 9 || !!e.token || e.brokenT > 0);
       e.bar.position.set(e.pos.x, e.pos.y + (boss ? 5.3 : 2.6), e.pos.z);
       e.bar.quaternion.copy(this.camera.quaternion);
       e.barFg.scale.x = Math.max(0.001, e.hp / e.maxHp);
@@ -5821,8 +5948,9 @@ export class GameEngine {
     this.updateScrolls(dt);
     this.updateReticle(dt);
     this.stepGoal(dt);
+    this.stepReinforcements(dt);
 
-    const alive = this.enemies.some((e) => !e.dead);
+    const alive = this.waveQueue.length > 0 || this.enemies.some((e) => !e.dead);
     // a Resistir wave is not over while the clock runs, even with the field empty
     if (!alive && this.wave > 0 && !(this.goal && !this.goal.done && this.goal.id === 'resistir')) {
       if (!this.clearedShown) {
