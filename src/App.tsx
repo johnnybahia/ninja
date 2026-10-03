@@ -16,6 +16,7 @@ import { ensureDaily, localDate } from './game/missions';
 import { Missions } from './ui/Missions';
 import { PlayerName, type NameMode } from './ui/PlayerName';
 import { Ranking } from './ui/Ranking';
+import type { RunBoard } from './ui/RunSummary';
 import { confirmedThisSession, confirmSession, fetchRanking, flushPending, loadPlayer, rankingEnabled, savePlayer, submitScore, type Player } from './game/ranking';
 import type { CardOffer } from './game/cards';
 import { CardPicker } from './ui/CardPicker';
@@ -99,7 +100,7 @@ export default function App() {
   const [nameMode, setNameMode] = useState<NameMode | null>(() => (!rankOn ? null : loadPlayer() ? (confirmedThisSession() ? null : 'confirm') : 'new'));
   const [showRanking, setShowRanking] = useState(false);
   const [rankRefresh, setRankRefresh] = useState(0);
-  const [runRank, setRunRank] = useState<{ rank: number; total: number } | null>(null);
+  const [runBoard, setRunBoard] = useState<RunBoard | null>(null);
   const rankActiveRef = useRef(rankActive);
   rankActiveRef.current = rankActive;
   useEffect(() => {
@@ -346,13 +347,17 @@ export default function App() {
         }
         setRunResult(bank(summary, prevBest));
         setGameState('over');
-        setRunRank(null);
+        setRunBoard(null);
         if (rankActiveRef.current && !engineRef.current?.practice) {
-          // best-effort and off the game's path: the run screen shows the place once it arrives
+          // best-effort and off the game's path: the table shows "atualizando" until it arrives
+          const before = loadPlayer();
+          const base = { score: finalScore, wave, isBest: finalScore > (before?.sent ?? 0), name: before?.name ?? '' };
+          setRunBoard({ ...base, state: 'sending', data: null, pending: false });
           void submitScore(finalScore, wave)
             .then(() => fetchRanking(loadPlayer()?.id))
             .then((d) => {
-              if (d && !d.stale && d.me) setRunRank({ rank: d.me.rank, total: d.total });
+              const pending = !!loadPlayer()?.pending;
+              setRunBoard({ ...base, state: d && !d.stale ? 'ready' : 'offline', data: d, pending });
               setRankRefresh((n) => n + 1);
             });
         }
@@ -1182,8 +1187,9 @@ export default function App() {
           onBuy={buy}
           onTemple={() => setShowTemple(true)}
           onArsenal={() => openArsenal(charId)}
-          rank={runRank}
-          onRanking={rankOn ? () => setShowRanking(true) : undefined}
+          board={runBoard}
+          onJoin={rankOn && !rankActive ? () => setNameMode(player ? 'confirm' : 'new') : undefined}
+          onRanking={rankOn && rankActive ? () => setShowRanking(true) : undefined}
         />
       )}
 

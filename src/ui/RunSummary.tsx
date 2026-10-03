@@ -2,6 +2,8 @@ import { Swords } from 'lucide-react';
 import { CARDS } from '../game/cards';
 import { nextGoal, upgradeCost, type MetaSave, type RunSummary as Summary } from '../game/meta';
 import type { MissionDone } from '../game/missions';
+import type { RankData } from '../game/ranking';
+import { ArcadeBoard } from './ArcadeBoard';
 
 export interface RunResult {
   summary: Summary;
@@ -12,6 +14,20 @@ export interface RunResult {
   missions: MissionDone[]; // finished by this run (already paid)
   streak: { count: number; bonus: number } | null; // first run of a new day
 }
+
+// The ranking as this run left it: the score is being sent, the table is in, or there is no
+// connection (the table is the last copy kept, the score still pending)
+export interface RunBoard {
+  state: 'sending' | 'ready' | 'offline';
+  data: RankData | null;
+  score: number;
+  wave: number;
+  isBest: boolean; // this run set the player's best score
+  name: string;
+  pending: boolean; // the score has not reached the server yet
+}
+
+const SHOWN_AFTER_RUN = 5;
 
 const RANK_COLOR: Record<string, string> = { S: '#ffd166', A: '#8fe0c8', B: '#9ec5ff', C: '#c9c2d6', D: '#8a8398' };
 
@@ -26,7 +42,8 @@ export function RunSummary({
   onBuy,
   onTemple,
   onArsenal,
-  rank,
+  board,
+  onJoin,
   onRanking
 }: {
   result: RunResult;
@@ -37,7 +54,8 @@ export function RunSummary({
   onBuy: (id: string) => void;
   onTemple: () => void;
   onArsenal: () => void;
-  rank?: { rank: number; total: number } | null; // place in the global ranking, once known
+  board?: RunBoard | null; // the ranking after this run (none: ranking off, or the run didn't count)
+  onJoin?: () => void; // ranking on but the player hasn't joined this session
   onRanking?: () => void;
 }) {
   const s = result.summary;
@@ -54,6 +72,8 @@ export function RunSummary({
   ];
   const cards = CARDS.filter((c) => (s.cards[c.id] ?? 0) > 0);
   const upCost = goal ? upgradeCost(goal.def, goal.lvl) : null;
+  const me = board?.state === 'ready' ? board.data?.me : undefined;
+  const banner = !board || board.state === 'sending' ? '' : me ? (board.isBest ? (me.rank === 1 ? 'NOVO CAMPEÃO!' : `NOVA POSIÇÃO #${me.rank}!`) : `SUA MELHOR POSIÇÃO: #${me.rank}`) : '';
 
   return (
     <div className="fixed inset-0 flex flex-col bg-[rgba(22,18,31,0.88)] backdrop-blur-md z-30">
@@ -70,11 +90,6 @@ export function RunSummary({
               <span>{result.prevBest > 0 ? `faltaram ${(result.prevBest - s.score + 1).toLocaleString('pt-BR')} para o recorde` : 'sem recorde ainda'}</span>
             )}
           </div>
-          {rank && (
-            <div className="text-xs text-[var(--paper)]/80 mt-0.5">
-              Ranking: <b className="text-[var(--ember)]">#{rank.rank}</b> de {rank.total.toLocaleString('pt-BR')}
-            </div>
-          )}
           {s.ranks.length > 0 && (
             <div className="flex justify-center gap-1.5 mt-2">
               {s.ranks.map((r, i) => (
@@ -85,6 +100,47 @@ export function RunSummary({
             </div>
           )}
         </div>
+
+        <div className="text-center text-xs text-[var(--paper)]/80 mb-3">
+          Honra <b className="text-[var(--ember)]">+{s.honor.total} 誉</b>
+          {goal && upCost !== null && (
+            <>
+              {' '}
+              · {afford ? <b className="text-[var(--jade)]">dá para comprar</b> : <>faltam {upCost - meta.honor} 誉 para</>} {goal.def.name} {goal.lvl + 1}
+            </>
+          )}
+        </div>
+
+        {board && (
+          <section className="mb-4 rounded-lg border border-[rgba(239,230,210,0.25)] bg-[rgba(10,8,18,0.85)] px-2.5 py-3">
+            <div className="text-center font-serif text-xs tracking-[0.35em] text-[var(--paper)]/60">頂 RANKING 頂</div>
+            {banner && <div className="arcade-blink text-center font-serif text-lg font-black tracking-widest text-[#ffd166] mt-1">{banner}</div>}
+            <div className="mt-2">
+              {board.state === 'sending' && !board.data && <div className="arcade-blink text-center font-mono text-sm text-[var(--paper)]/70 py-5">ATUALIZANDO…</div>}
+              {board.data && board.data.top.length > 0 && (
+                <ArcadeBoard top={board.data.top} me={board.state === 'offline' ? undefined : board.data.me} limit={SHOWN_AFTER_RUN} pending={board.pending ? { score: board.score, wave: board.wave } : null} playerName={board.name} />
+              )}
+              {board.state === 'offline' && <div className="text-center text-[11px] text-[#ff9a7a] mt-1.5">Sem conexão: sua pontuação será enviada na próxima vez.</div>}
+            </div>
+            {onRanking && (
+              <div className="text-center mt-2">
+                <button onClick={onRanking} className="text-[11px] font-bold text-[var(--paper)]/70 underline cursor-pointer">
+                  Ver o ranking completo (top 20)
+                </button>
+              </div>
+            )}
+          </section>
+        )}
+
+        {!board && onJoin && (
+          <section className="mb-4 rounded-lg border border-[rgba(239,230,210,0.25)] bg-[rgba(10,8,18,0.85)] px-3 py-3 text-center">
+            <div className="font-serif text-xs tracking-[0.35em] text-[var(--paper)]/60">頂 RANKING 頂</div>
+            <p className="text-xs text-[var(--paper)]/80 mt-1.5">Escolha um nome para guardar suas pontuações no ranking de todos os jogadores.</p>
+            <button onClick={onJoin} className="mt-2 text-xs font-extrabold bg-[var(--torii)] border border-[var(--torii)] text-[var(--paper)] px-4 py-1.5 rounded-md active:scale-95 transition-all cursor-pointer">
+              Entrar no ranking
+            </button>
+          </section>
+        )}
 
         <div className="grid sm:grid-cols-2 gap-3 mb-4">
           <div className="rounded-lg border border-[rgba(239,230,210,0.2)] bg-[rgba(30,24,42,0.9)] p-3">
@@ -183,7 +239,7 @@ export function RunSummary({
             className="relative overflow-hidden font-serif font-extrabold text-lg bg-[var(--torii)] text-[var(--paper)] px-10 py-3 rounded-md hover:brightness-110 active:scale-95 transition-all shadow-lg cursor-pointer disabled:opacity-60 disabled:cursor-wait"
           >
             {starting && <span className="absolute inset-y-0 left-0 bg-white/20 transition-[width] duration-200" style={{ width: `${loadPct}%` }} />}
-            <span className="relative">{starting ? `Carregando… ${loadPct}%` : 'Jogar de novo'}</span>
+            <span className={`relative ${starting ? '' : 'arcade-blink'}`}>{starting ? `Carregando… ${loadPct}%` : board ? 'TOQUE PARA JOGAR DE NOVO' : 'Jogar de novo'}</span>
           </button>
           <div className="flex gap-2">
             <button onClick={onTemple} className="flex items-center gap-1.5 font-bold text-sm border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-5 py-2 rounded-md active:scale-95 transition-all cursor-pointer">

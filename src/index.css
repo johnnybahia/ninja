@@ -103,3 +103,52 @@ html, body, #root {
     display: none;
   }
 }
+
+/* Arcade high-score table: rows slide in one by one (bottom first), the player's row and the
+   prompts blink in hard steps like an old cabinet */
+@keyframes arcadeIn {
+  from {
+    opacity: 0;
+    transform: translateX(-14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes arcadeBlink {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@keyframes arcadeMine {
+  50% {
+    background: rgba(242, 166, 90, 0.22);
+    color: #fff3c4;
+  }
+}
+
+.arcade-row {
+  animation: arcadeIn 0.26s ease-out both;
+  animation-delay: var(--d, 0ms);
+}
+
+.arcade-mine {
+  background: rgba(242, 166, 90, 0.12);
+  animation: arcadeIn 0.26s ease-out both, arcadeMine 0.9s step-end infinite;
+  animation-delay: var(--d, 0ms), calc(var(--d, 0ms) + 0.3s);
+}
+
+.arcade-blink {
+  animation: arcadeBlink 1s step-end infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .arcade-row,
+  .arcade-mine,
+  .arcade-blink {
+    animation: none !important;
+  }
+}
