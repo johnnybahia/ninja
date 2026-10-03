@@ -6511,7 +6511,10 @@ export class GameEngine {
   // guard. Seen coming (inside the cone) it goes back at whoever loosed it. true = it lives on.
   private defendShot(p: ProjectileInstance, how: 'cut' | 'parry' | 'block', front: boolean): boolean {
     const P = this.player;
-    // the weapon meets the shot: its blade is laid across the shot's path (a swing already carries it there)
+    // the body answers first (starting an action drops any pose), then the weapon is laid across the shot's
+    // path (a swing already carries it there)
+    if (how === 'parry') this.playerDeflectAnim();
+    else if (how === 'block' && this.player.rig.clip) this.startAct('block', 'hit1', { speed: 1.25, to: 0.85, cancel: 0.4, end: 0.8, fadeIn: 0.06 });
     let meet: THREE.Vector3 | null = null;
     if (how !== 'cut') {
       const seg = this.shotSeg;
@@ -6529,8 +6532,6 @@ export class GameEngine {
       this.waveStat.deflects++;
       this.deflectsTotal++;
     }
-    if (how === 'parry') this.playerDeflectAnim();
-    else if (how === 'block' && this.player.rig.clip) this.startAct('block', 'hit1', { speed: 1.25, to: 0.85, cancel: 0.4, end: 0.8, fadeIn: 0.06 });
     if (!(TUNE.arrowReflect > 0.5 && front)) {
       this.spawnLabel(P.pos.x, P.pos.y + 2.5, P.pos.z, 'DESVIOU!', '#8fe0c8', 1);
       // the shot glances off: it tumbles away to the side for a moment, harmless, instead of vanishing on the spot
