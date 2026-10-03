@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* short landscape phones: the HUD text shrinks and moves out of the middle of the picture */
+@custom-variant short (@media (max-height: 520px));
+
 :root {
   --ink: #16121f;
   --dusk: #2b2140;

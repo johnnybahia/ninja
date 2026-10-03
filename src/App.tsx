@@ -301,6 +301,14 @@ export default function App() {
       localStorage.setItem('kage_parry_scene', String(parryScene));
     } catch {}
   }, [parryScene]);
+  // the "drag on the left to move" tip stays until the stick has been used once (remembered)
+  const [tipSeen, setTipSeen] = useState(() => {
+    try {
+      return localStorage.getItem('kage_tip_seen') === '1';
+    } catch {
+      return false;
+    }
+  });
   const [cineCam, setCineCam] = useState(() => {
     try {
       return localStorage.getItem('kage_cine') !== '0';
@@ -454,6 +462,14 @@ export default function App() {
       localStorage.setItem('kage_cine', cineCam ? '1' : '0');
     } catch {}
   }, [sensitivity, autoCamera, autoTurnStick, cineCam]);
+
+  useEffect(() => {
+    if (!joyActive || tipSeen) return;
+    setTipSeen(true);
+    try {
+      localStorage.setItem('kage_tip_seen', '1');
+    } catch {}
+  }, [joyActive, tipSeen]);
 
   const handleStartGame = async (modeOverride?: GameMode) => {
     initAudio();
@@ -787,11 +803,11 @@ export default function App() {
             ref={minimapRef}
             width={200}
             height={200}
-            className="absolute top-[calc(var(--sat)+10px)] right-[calc(var(--sar)+10px)] w-24 h-24 rounded-full border-1.5 border-[rgba(239,230,210,0.4)] bg-[rgba(22,18,31,0.55)] pointer-events-auto"
+            className="absolute top-[calc(var(--sat)+10px)] right-[calc(var(--sar)+10px)] w-24 h-24 short:w-20 short:h-20 rounded-full border-1.5 border-[rgba(239,230,210,0.4)] bg-[rgba(22,18,31,0.55)] pointer-events-auto"
           />
 
           {/* Camera Recenter & Settings Buttons */}
-          <div className="absolute top-[calc(var(--sat)+115px)] right-[calc(var(--sar)+12px)] flex flex-col gap-2 pointer-events-auto">
+          <div className="absolute top-[calc(var(--sat)+115px)] short:top-[calc(var(--sat)+96px)] right-[calc(var(--sar)+12px)] flex flex-col gap-2 pointer-events-auto">
             <button
               onClick={handleRecenterCamera}
               className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(239,230,210,0.3)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform duration-75"
@@ -824,11 +840,11 @@ export default function App() {
 
           {/* Banner message */}
           {banner && (
-            <div className="absolute left-0 right-0 top-[calc(var(--sat)+64px)] text-center pointer-events-none drop-shadow-lg transition-opacity duration-300">
-              <span className="block font-serif text-2xl sm:text-3xl font-extrabold tracking-wide text-[var(--paper)]">
+            <div className={`absolute left-0 right-0 top-[calc(var(--sat)+64px)] ${bossBar ? 'short:top-[calc(var(--sat)+44px)]' : 'short:top-[calc(var(--sat)+8px)]'} text-center pointer-events-none drop-shadow-lg transition-opacity duration-300`}>
+              <span className="block font-serif text-2xl sm:text-3xl short:text-lg font-extrabold tracking-wide text-[var(--paper)]">
                 {banner.main}
               </span>
-              <span className="block text-xs sm:text-sm text-[var(--ember)] font-medium mt-1">
+              <span className="block text-xs sm:text-sm short:text-[10px] short:truncate short:max-w-[44vw] short:mx-auto text-[var(--ember)] font-medium mt-1 short:mt-0">
                 {banner.sub}
               </span>
             </div>
@@ -836,11 +852,11 @@ export default function App() {
 
           {/* Combo indicator com feedback de sangue e impacto */}
           {combo > 1 && (
-            <div className="absolute left-1/2 top-[calc(var(--sat)+130px)] -translate-x-1/2 text-center pointer-events-none drop-shadow-2xl transition-all">
-              <div className="font-serif text-xl sm:text-2xl font-black tracking-wider bg-linear-to-r from-[#ff4d4d] via-[#ffd166] to-[#ff2a45] bg-clip-text text-transparent drop-shadow-[0_0_16px_rgba(230,0,38,0.7)] animate-pulse">
+            <div className="absolute left-1/2 top-[calc(var(--sat)+130px)] -translate-x-1/2 text-center pointer-events-none drop-shadow-2xl transition-all short:left-[calc(var(--sal)+12px)] short:top-[calc(var(--sat)+124px)] short:translate-x-0 short:text-left">
+              <div className="font-serif text-xl sm:text-2xl short:text-base font-black tracking-wider bg-linear-to-r from-[#ff4d4d] via-[#ffd166] to-[#ff2a45] bg-clip-text text-transparent drop-shadow-[0_0_16px_rgba(230,0,38,0.7)] animate-pulse">
                 {combo}× GOLPES!
               </div>
-              <div className="text-[10px] sm:text-xs font-extrabold text-[#ffd166] tracking-widest uppercase mt-0.5 drop-shadow-md">
+              <div className="text-[10px] sm:text-xs short:hidden font-extrabold text-[#ffd166] tracking-widest uppercase mt-0.5 drop-shadow-md">
                 {combo >= 7
                   ? '⚔️ Massacre Sangrento!'
                   : combo >= 5
@@ -858,14 +874,16 @@ export default function App() {
             </div>
           )}
 
-          {/* Touch Movement Guidance Tip */}
-          <div className="absolute left-[calc(var(--sal)+24px)] bottom-[calc(var(--sab)+64px)] max-w-[calc(100vw-262px)] text-xs leading-snug text-[var(--paper)]/60 pointer-events-none">
-            Arraste na esquerda para mover e girar a câmera
-          </div>
+          {/* Touch Movement Guidance Tip: until the player has moved with the stick once */}
+          {!tipSeen && (
+            <div className="absolute left-[calc(var(--sal)+24px)] bottom-[calc(var(--sab)+64px)] max-w-[calc(100vw-262px)] text-xs leading-snug text-[var(--paper)]/60 pointer-events-none">
+              Arraste na esquerda para mover e girar a câmera
+            </div>
+          )}
 
           {/* Player posture: grows from the center; red and pulsing near a guard break */}
           <div
-            className={`absolute left-1/2 -translate-x-1/2 bottom-[calc(var(--sab)+196px)] w-[min(46vw,220px)] transition-opacity duration-300 pointer-events-none ${
+            className={`absolute left-1/2 -translate-x-1/2 bottom-[calc(var(--sab)+196px)] w-[min(46vw,220px)] short:left-[calc(var(--sal)+12px)] short:translate-x-0 short:bottom-auto short:top-[calc(var(--sat)+110px)] short:w-[min(30vw,170px)] transition-opacity duration-300 pointer-events-none ${
               posture > 0.02 ? 'opacity-100' : 'opacity-0'
             }`}
           >
