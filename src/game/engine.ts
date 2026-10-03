@@ -6499,6 +6499,17 @@ export class GameEngine {
     return false;
   }
 
+  // A swing in progress cuts a shot that comes into its arc: close, in front, at body height (the blade's
+  // window is short, so the exact path alone almost never lines up with a fast arrow)
+  private shotInSwingArc(p: ProjectileInstance): boolean {
+    const P = this.player;
+    const dx = p.pos.x - P.pos.x;
+    const dz = p.pos.z - P.pos.z;
+    const d = Math.hypot(dx, dz);
+    if (d > 2.1 || d < 0.2 || p.pos.y < 0.3 || p.pos.y > 2.3) return false;
+    return (dx * Math.sin(P.yaw) + dz * Math.cos(P.yaw)) / d >= Math.cos(1.35);
+  }
+
   // Does the shot come from inside the cone the player is facing?
   private shotComesFromFront(p: ProjectileInstance): boolean {
     if (TUNE.arrowDirectional <= 0.5) return true;
@@ -6523,7 +6534,7 @@ export class GameEngine {
       meet = this.poseAcross(seg, p.pos.x - p.vel.x, p.pos.z - p.vel.z, 0.28);
     }
     const mid = this.tmpV.copy(meet ?? p.pos);
-    this.impacts.spawn(mid, how === 'block' ? IMPACT_BLOCK : IMPACT_DEFLECT, how === 'block' ? 1.1 : 1.5, 0.14);
+    this.impacts.spawn(mid, how === 'block' ? IMPACT_BLOCK : IMPACT_DEFLECT, how === 'block' ? 0.9 : 1.2, 0.14);
     this.emitParticles(mid.x, mid.y, mid.z, how === 'block' ? 10 : 18, 0xffb347, 7, 2, 16, 0.25);
     this.emitParticles(mid.x, mid.y, mid.z, 6, 0xd8c8a0, 3, 1.5, 14, 0.5); // splinters of the shaft
     if (how === 'block') sfx.block();
@@ -6863,7 +6874,7 @@ export class GameEngine {
         const ranged = TUNE.arrowDirectional > 0.5 && (p.type === 'arrow' || p.type === 'shuriken');
         let handled = false;
         // a weapon swung through its path cuts a shot out of the air (and, facing it, sends it back)
-        if (ranged && swinging && this.player.inv <= 0 && this.bladeCutsShot(p, dt)) {
+        if (ranged && this.player.inv <= 0 && ((swinging && this.bladeCutsShot(p, dt)) || (this.cutActive && this.shotInSwingArc(p)))) {
           handled = true;
           if (!this.defendShot(p, 'cut', this.shotComesFromFront(p))) dead = true;
         }
