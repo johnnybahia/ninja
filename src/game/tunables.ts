@@ -39,7 +39,7 @@ export const TUNE = {
   // arrows and stars: defended only facing them (or by cutting them out of the air with a swing), sent back at the archer
   arrowDirectional: 1,
   arrowCone: 65,
-  arrowReflect: 1,
+  arrowReflect: 0, // 1: a defended arrow goes back at the archer (off: it just vanishes)
   parryZoom: 1,
   // glow around the characters' silhouettes (a rim light that helps them read in the dark)
   rim: 0.55,
