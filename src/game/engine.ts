@@ -100,6 +100,7 @@ const GARRISON_NAME: Record<Garrison, string> = { infantry: 'infantaria', archer
 type PostKind = 'garrison' | 'powder' | 'drum' | 'duel' | 'castle';
 const POST_KINDS: PostKind[] = ['garrison', 'powder', 'duel', 'drum'];
 const POST_GLYPH: Record<PostKind, string> = { garrison: '将', powder: '火', drum: '鼓', duel: '決', castle: '城' };
+const POST_SHORT: Record<PostKind, string> = { garrison: 'Guarnição', powder: 'Pólvora', drum: 'Tambor', duel: 'Duelo', castle: 'Castelo' };
 const POST_TITLE: Record<PostKind, string> = { garrison: 'Guarnição', powder: 'Depósito de pólvora', drum: 'Tambor de guerra', duel: 'Duelo do General', castle: 'O Castelo' };
 const POST_DESC: Record<PostKind, string> = {
   garrison: 'Derrote o capitão de aura vermelha: o bando foge',
@@ -491,7 +492,7 @@ export class GameEngine {
   private slowmoT = 0;
   private attackQueueT = 0;
   private slowmoScale = 1;
-  private labels: { sprite: THREE.Sprite; t: number; life: number; vy: number }[] = [];
+  private labels: { sprite: THREE.Sprite; t: number; life: number; vy: number; base: number }[] = [];
   private reticle!: THREE.Sprite;
   private reticleTarget = new THREE.Vector3();
 
@@ -1591,7 +1592,7 @@ export class GameEngine {
     const ang = Math.atan2(dx * rx + dz * rz, dx * fx + dz * fz);
     const arrow = ARROWS[((Math.round(ang / (Math.PI / 4)) % 8) + 8) % 8];
     const kind = c.kinds[this.posts.indexOf(best)] ?? 'garrison';
-    const text = best.castle ? `Marche ao Castelo · ${arrow} ${Math.round(bd / 2) * 2} m` : `Conquista ${c.taken}/${this.posts.filter((p) => !p.castle).length} · ${POST_TITLE[kind]} ${arrow} ${Math.round(bd / 2) * 2} m`;
+    const text = best.castle ? `Marche ao Castelo · ${arrow} ${Math.round(bd / 2) * 2} m` : `Conquista ${c.taken}/${this.posts.filter((p) => !p.castle).length} · ${POST_SHORT[kind]} ${arrow} ${Math.round(bd / 2) * 2} m`;
     if (text === c.hudText) return;
     c.hudText = text;
     this.callbacks.onWaveMod?.({ id: 'conquista', name: text, glyph: POST_GLYPH[kind], desc: POST_DESC[kind] });
@@ -2581,7 +2582,7 @@ export class GameEngine {
     spr.scale.set(1.7 * scale, 0.64 * scale, 1);
     spr.renderOrder = 30;
     this.scene.add(spr);
-    this.labels.push({ sprite: spr, t: 0, life: 0.85, vy: 1.15 });
+    this.labels.push({ sprite: spr, t: 0, life: 0.85, vy: 1.15, base: scale });
 
     if (this.labels.length > 24) {
       const old = this.labels.shift();
@@ -2697,6 +2698,13 @@ export class GameEngine {
       L.t += dt;
       L.sprite.position.y += L.vy * dt;
       L.sprite.material.opacity = Math.max(0, 1 - L.t / L.life);
+      // however close the camera or big the text, a label takes only a slice of the screen's height
+      // (less on a short landscape phone, where the picture is already small)
+      const d = Math.max(1, this.camera.position.distanceTo(L.sprite.position));
+      const frac = (0.64 * L.base) / (2 * d * Math.tan((this.camera.fov * Math.PI) / 360));
+      const cap = typeof window !== 'undefined' && window.innerHeight < 520 ? 0.055 : this.camera.aspect > 1.2 ? 0.075 : 0.09;
+      const k = frac > cap ? cap / frac : 1;
+      L.sprite.scale.set(1.7 * L.base * k, 0.64 * L.base * k, 1);
       if (L.t >= L.life) {
         this.scene.remove(L.sprite);
         L.sprite.material.map?.dispose();
