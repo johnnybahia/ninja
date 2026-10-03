@@ -794,7 +794,7 @@ export default function App() {
           <div className="absolute top-[calc(var(--sat)+115px)] right-[calc(var(--sar)+12px)] flex flex-col gap-2 pointer-events-auto">
             <button
               onClick={handleRecenterCamera}
-              className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(239,230,210,0.3)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform"
+              className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(239,230,210,0.3)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform duration-75"
               title="Recentralizar Câmera atrás do Ninja"
               aria-label="Recentralizar Câmera"
             >
@@ -802,7 +802,7 @@ export default function App() {
             </button>
             <button
               onClick={() => setShowSettings(!showSettings)}
-              className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(239,230,210,0.3)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform"
+              className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(239,230,210,0.3)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform duration-75"
               title="Configurações de Câmera e Toque"
               aria-label="Configurações"
             >
@@ -811,7 +811,7 @@ export default function App() {
             {tuneEnabled && (
               <button
                 onClick={() => setShowTune(!showTune)}
-                className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(239,230,210,0.3)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform"
+                className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(239,230,210,0.3)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform duration-75"
                 title="Ajuste de movimento"
                 aria-label="Ajuste de movimento"
               >
@@ -945,7 +945,7 @@ export default function App() {
                 onPointerUp={() => engineRef.current?.guardUp()}
                 onPointerCancel={() => engineRef.current?.guardUp()}
                 onPointerLeave={() => engineRef.current?.guardUp()}
-                className="absolute right-[84px] bottom-[64px] w-[66px] h-[66px] rounded-full border-2 border-[rgba(143,224,200,0.6)] bg-[rgba(22,18,31,0.7)] flex flex-col items-center justify-center pointer-events-auto shadow-md active:bg-[rgba(143,224,200,0.3)] active:scale-95 transition-transform"
+                className="absolute right-[84px] bottom-[64px] w-[66px] h-[66px] rounded-full border-2 border-[rgba(143,224,200,0.6)] bg-[rgba(22,18,31,0.7)] flex flex-col items-center justify-center pointer-events-auto shadow-md active:bg-[rgba(143,224,200,0.3)] active:scale-95 transition-transform duration-75"
                 aria-label="Defesa"
               >
                 <Shield className="w-6 h-6 text-[#8fe0c8] pointer-events-none" />
@@ -970,7 +970,7 @@ export default function App() {
                   e.stopPropagation();
                   engineRef.current?.jump();
                 }}
-                className="absolute right-[164px] bottom-1 w-[50px] h-[50px] rounded-full border border-[rgba(239,230,210,0.4)] bg-[rgba(22,18,31,0.65)] flex flex-col items-center justify-center pointer-events-auto shadow-md active:bg-[rgba(242,166,90,0.4)] active:scale-95 transition-transform"
+                className="absolute right-[164px] bottom-1 w-[50px] h-[50px] rounded-full border border-[rgba(239,230,210,0.4)] bg-[rgba(22,18,31,0.65)] flex flex-col items-center justify-center pointer-events-auto shadow-md active:bg-[rgba(242,166,90,0.4)] active:scale-95 transition-transform duration-75"
                 aria-label="Pulo"
               >
                 <ArrowUp className="w-4 h-4 text-[var(--paper)] pointer-events-none" />
@@ -984,7 +984,7 @@ export default function App() {
                   engineRef.current?.heal();
                 }}
                 disabled={heals <= 0}
-                className={`absolute right-[158px] bottom-[72px] w-[46px] h-[46px] rounded-full border flex items-center justify-center pointer-events-auto shadow-md active:scale-95 transition-transform ${
+                className={`absolute right-[158px] bottom-[72px] w-[46px] h-[46px] rounded-full border flex items-center justify-center pointer-events-auto shadow-md active:scale-95 transition-transform duration-75 ${
                   heals > 0 ? 'border-[rgba(122,255,176,0.6)] bg-[rgba(22,18,31,0.7)]' : 'border-[rgba(239,230,210,0.15)] bg-[rgba(22,18,31,0.4)] opacity-50'
                 }`}
                 aria-label="Cura"

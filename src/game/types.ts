@@ -259,6 +259,7 @@ export interface ProjectileInstance {
   noSolid?: boolean;
   owner?: EnemyInstance; // who loosed it (a parried arrow goes back to them)
   reflected?: boolean;
+  harmless?: boolean; // glanced off a weapon: it tumbles away for a moment and hurts no one
 }
 
 export interface GameSettings {

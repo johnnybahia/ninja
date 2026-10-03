@@ -217,7 +217,9 @@ const IMPACT_TELL = new THREE.Color(2.8, 2.5, 1.3);
 // (the parry windows live in TUNE: parryWindow / perfectWindow)
 const TELL_LEAD = 0.17; // the blow's flash comes this long before it lands: pressing guard now is a perfect parry
 const PARRY_SCENE_GAP = [0, 14, 7, 3.5]; // seconds between two defence scenes, by TUNE.parryScene
-const CUT_MIN_SPEED = 5; // m/s: the tip must be moving at least this fast to cut a shot out of the air
+const CUT_MIN_SPEED = 3.5; // m/s: the tip must be moving at least this fast to cut a shot out of the air
+const DEFEND_REACH = 1.5; // a guard (held, or pressed in time) meets an arrow this far from the body, at the weapon
+const BUFFER_WINDOW = 0.35; // a dash/jump/guard pressed during a committed swing waits this long for its cancel point
 const SHOT_BACK_SPEED = 26;
 const CLASH_POSE_TIME = 0.2; // how long the weapon is held where the blades met
 const GHOST_DASH = new THREE.Color(0x2a2464);
@@ -524,6 +526,10 @@ export class GameEngine {
   // blades hold where they met, a short slow-motion; the controls stay live and it never lasts long
   private parryScene: { t: number; dur: number; e: EnemyInstance; mid: THREE.Vector3; side: number; camOk: boolean; spark: number } | null = null;
   private lastParryScene = -99;
+  private buffered: { kind: 'dash' | 'jump' | 'guard'; t: number } | null = null;
+  private staminaSent = -1;
+  private staminaSentAt = 0;
+  private shotSeg = makeSeg();
   private parrySide = 1;
   private parryFocus = new THREE.Vector3();
   // the weapon held where the blades met for a moment after a parry, and the fight camera's lean
@@ -1078,6 +1084,7 @@ export class GameEngine {
     this.spikeFx = 0;
     this.punchT = 1;
     this.parryScene = null;
+    this.buffered = null;
     this.callbacks.onCinematic?.(false);
     this.act = null;
     this.actQueued = false;
@@ -2722,7 +2729,11 @@ export class GameEngine {
 
   public jump() {
     if (this.state !== 'play' || this.player.jumps >= 2) return;
-    if (this.player.staggerT > 0 || this.cine || !this.freeToCancel()) return;
+    if (this.player.staggerT > 0 || this.cine) return;
+    if (!this.freeToCancel()) {
+      this.buffered = { kind: 'jump', t: this.time };
+      return;
+    }
     this.player.vy = this.player.jumps === 0 ? 10.5 : 9.5;
     this.player.jumps++;
     this.cancelAct(0.1);
@@ -2733,7 +2744,12 @@ export class GameEngine {
 
   public dash() {
     if (this.state !== 'play' || this.player.dash > 0 || this.player.st < this.dashCost()) return;
-    if (this.player.staggerT > 0 || this.cine || !this.freeToCancel()) return;
+    if (this.player.staggerT > 0 || this.cine) return;
+    // pressed while the last swing is still committed: remembered, it fires the moment it can
+    if (!this.freeToCancel()) {
+      this.buffered = { kind: 'dash', t: this.time };
+      return;
+    }
     this.player.st -= this.dashCost();
     this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
     this.cancelAct(0.08);
@@ -3044,6 +3060,24 @@ export class GameEngine {
   }
 
   /** Nothing committed is playing (or it's past its cancel point) - dodge/jump/guard OK. */
+  // The press waiting for the swing's cancel point (dash, jump, or the moment a guard started)
+  private stepBuffer() {
+    const b = this.buffered;
+    if (!b) return;
+    if (this.state !== 'play' || this.player.hp <= 0 || this.time - b.t > BUFFER_WINDOW) {
+      this.buffered = null;
+      return;
+    }
+    if (this.player.staggerT > 0 || this.cine || !this.freeToCancel()) return;
+    this.buffered = null;
+    if (b.kind === 'dash') this.dash();
+    else if (b.kind === 'jump') this.jump();
+    else if (this.input.guardHeld && this.player.healT <= 0) {
+      if (this.act && this.act.kind !== 'deflect' && this.act.kind !== 'block') this.cancelAct(0.1);
+      this.player.guardPressT = this.time;
+    }
+  }
+
   private freeToCancel() {
     if (!this.player.rig.clip) return true;
     if (this.player.hp <= 0) return false;
@@ -4439,8 +4473,11 @@ export class GameEngine {
   public guardDown() {
     if (this.state !== 'play' || this.player.healT > 0 || this.player.hp <= 0) return;
     this.input.guardHeld = true;
-    // mocap rig: a committed swing can't be turned into a parry, only its recovery
-    if (!this.freeToCancel()) return;
+    // mocap rig: a committed swing can't be turned into a parry, only its recovery (the press waits for it)
+    if (!this.freeToCancel()) {
+      this.buffered = { kind: 'guard', t: this.time };
+      return;
+    }
     if (this.act && this.act.kind !== 'deflect' && this.act.kind !== 'block') this.cancelAct(0.1);
     this.player.guardPressT = this.time;
   }
@@ -5321,7 +5358,12 @@ export class GameEngine {
     this.updateCinematic(dt);
 
     this.player.st = Math.min(this.player.maxSt, this.player.st + (STAMINA_REGEN + 4 * (this.cardLv.folego ?? 0)) * dt);
-    this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
+    // the bar needs a few updates a second, not sixty (each one re-renders the whole HUD: that was the lag)
+    if (this.player.st !== this.staminaSent && (this.player.st >= this.player.maxSt || performance.now() - this.staminaSentAt >= 100)) {
+      this.staminaSent = this.player.st;
+      this.staminaSentAt = performance.now();
+      this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
+    }
 
     // Bō special: spinning AoE tick for its duration, then releases the attack button
     if (this.player.tornado > 0) {
@@ -6448,7 +6490,7 @@ export class GameEngine {
     const [c, d, pa, pb] = this.cutV;
     pa.set(p.pos.x - p.vel.x * dt, p.pos.y - p.vel.y * dt, p.pos.z - p.vel.z * dt);
     pb.copy(p.pos);
-    const reach = 0.3 + 0.3 * TUNE.hitAssist;
+    const reach = 0.45 + 0.35 * TUNE.hitAssist;
     for (const k of [0.25, 0.5, 0.75, 1]) {
       c.lerpVectors(this.cutPrev.a, this.cutCur.a, k);
       d.lerpVectors(this.cutPrev.b, this.cutCur.b, k);
@@ -6467,18 +6509,38 @@ export class GameEngine {
 
   // A shot is stopped by the weapon: cut out of the air by a swing, or parried with a timed
   // guard. Seen coming (inside the cone) it goes back at whoever loosed it. true = it lives on.
-  private defendShot(p: ProjectileInstance, how: 'cut' | 'parry', front: boolean): boolean {
+  private defendShot(p: ProjectileInstance, how: 'cut' | 'parry' | 'block', front: boolean): boolean {
     const P = this.player;
-    const mid = this.tmpV.copy(p.pos);
-    this.impacts.spawn(mid, IMPACT_DEFLECT, 1.4, 0.14);
-    this.emitParticles(mid.x, mid.y, mid.z, 16, 0xffb347, 7, 2, 16, 0.25);
-    sfx.clang();
-    this.waveStat.deflects++;
-    this.deflectsTotal++;
+    // the weapon meets the shot: its blade is laid across the shot's path (a swing already carries it there)
+    let meet: THREE.Vector3 | null = null;
+    if (how !== 'cut') {
+      const seg = this.shotSeg;
+      seg.a.copy(p.pos).addScaledVector(p.vel, -0.035);
+      seg.b.copy(p.pos).addScaledVector(p.vel, 0.01);
+      meet = this.poseAcross(seg, p.pos.x - p.vel.x, p.pos.z - p.vel.z, 0.28);
+    }
+    const mid = this.tmpV.copy(meet ?? p.pos);
+    this.impacts.spawn(mid, how === 'block' ? IMPACT_BLOCK : IMPACT_DEFLECT, how === 'block' ? 1.1 : 1.5, 0.14);
+    this.emitParticles(mid.x, mid.y, mid.z, how === 'block' ? 10 : 18, 0xffb347, 7, 2, 16, 0.25);
+    this.emitParticles(mid.x, mid.y, mid.z, 6, 0xd8c8a0, 3, 1.5, 14, 0.5); // splinters of the shaft
+    if (how === 'block') sfx.block();
+    else {
+      sfx.clang();
+      this.waveStat.deflects++;
+      this.deflectsTotal++;
+    }
     if (how === 'parry') this.playerDeflectAnim();
+    else if (how === 'block' && this.player.rig.clip) this.startAct('block', 'hit1', { speed: 1.25, to: 0.85, cancel: 0.4, end: 0.8, fadeIn: 0.06 });
     if (!(TUNE.arrowReflect > 0.5 && front)) {
       this.spawnLabel(P.pos.x, P.pos.y + 2.5, P.pos.z, 'DESVIOU!', '#8fe0c8', 1);
-      return false;
+      // the shot glances off: it tumbles away to the side for a moment, harmless, instead of vanishing on the spot
+      const sp = Math.hypot(p.vel.x, p.vel.z) || 1;
+      const side = Math.random() < 0.5 ? -1 : 1;
+      p.vel.set(-p.vel.x * 0.18 + (-p.vel.z / sp) * side * 7, 3.5 + Math.random() * 2, -p.vel.z * 0.18 + (p.vel.x / sp) * side * 7);
+      p.grav = 18;
+      p.harmless = true;
+      p.life = 0.6;
+      return true;
     }
     const o = p.owner && !p.owner.dead && !p.owner.flee ? p.owner : null;
     let dx = o ? o.pos.x - p.pos.x : -p.vel.x;
@@ -6501,12 +6563,18 @@ export class GameEngine {
   // blades cross, and the player's weapon is turned (for a moment) so its blade lies across that point.
   // Returns the meeting point (null: nothing to pose - a kick, no weapon, no blade).
   private clashPose(e: EnemyInstance): THREE.Vector3 | null {
+    if (e.blade?.limb === 'foot' || !this.readEnemyBlade(e, false, this.clashSeg)) return null;
+    return this.poseAcross(this.clashSeg, e.pos.x, e.pos.z, CLASH_POSE_TIME);
+  }
+
+  // Lays the player's blade across `seg` (a foe's blade, or the path of a shot) for a moment: the blade runs
+  // from the grip toward the meeting point, its edge facing (fx, fz). Returns the meeting point
+  // (null: nothing to pose - no melee weapon in hand).
+  private poseAcross(seg: BladeSeg, fx: number, fz: number, hold: number): THREE.Vector3 | null {
     const P = this.player;
     const w = this.weapons[this.activeWeaponIdx];
     const mesh = P.weaponMeshes[this.activeWeaponIdx];
     if (!P.rig.clip || !mesh || !mesh.visible || !mesh.parent || w.kind !== 'melee' || !BLADE_SEG[w.id]) return null;
-    if (e.blade?.limb === 'foot' || !this.readEnemyBlade(e, false, this.clashSeg)) return null;
-    const seg = this.clashSeg;
     const chest = this.tmpH.set(P.pos.x, P.pos.y + 1.3, P.pos.z);
     const ab = this.tmpV.subVectors(seg.b, seg.a);
     const t = Math.max(0, Math.min(1, chest.clone().sub(seg.a).dot(ab) / Math.max(ab.lengthSq(), 1e-6)));
@@ -6518,12 +6586,12 @@ export class GameEngine {
     if (dist < 0.3 || dist > 2.4) return meet;
     const o = this.clashObj;
     o.position.copy(grip);
-    o.up.set(e.pos.x - grip.x, 0.2, e.pos.z - grip.z).normalize();
+    o.up.set(fx - grip.x, 0.2, fz - grip.z).normalize();
     o.lookAt(meet);
     o.updateMatrixWorld(true);
     const local = mesh.parent.getWorldQuaternion(this.clashQ).invert().multiply(o.quaternion);
     this.endClash();
-    this.clash = { mesh, q: mesh.quaternion.clone(), t: CLASH_POSE_TIME };
+    this.clash = { mesh, q: mesh.quaternion.clone(), t: hold };
     mesh.quaternion.copy(local);
     return meet;
   }
@@ -6790,7 +6858,7 @@ export class GameEngine {
             }
           }
         }
-      } else if (!dead && !p.friendly) {
+      } else if (!dead && !p.friendly && !p.harmless) {
         const ranged = TUNE.arrowDirectional > 0.5 && (p.type === 'arrow' || p.type === 'shuriken');
         let handled = false;
         // a weapon swung through its path cuts a shot out of the air (and, facing it, sends it back)
@@ -6798,7 +6866,11 @@ export class GameEngine {
           handled = true;
           if (!this.defendShot(p, 'cut', this.shotComesFromFront(p))) dead = true;
         }
-        if (!handled && Math.hypot(p.pos.x - this.player.pos.x, p.pos.z - this.player.pos.z) < 0.6) {
+        // a guard held (or pressed in time) facing the shot meets it at the weapon, a step in front of the body;
+        // without one it only matters when it reaches the body
+        const canActNow = this.player.staggerT <= 0 && this.player.inv <= 0;
+        const guarded = ranged && canActNow && this.shotComesFromFront(p) && (this.guarding() || this.time - this.player.guardPressT <= TUNE.parryWindow);
+        if (!handled && Math.hypot(p.pos.x - this.player.pos.x, p.pos.z - this.player.pos.z) < (guarded ? DEFEND_REACH : 0.6)) {
           dead = true;
           const canAct = this.player.staggerT <= 0 && this.player.inv <= 0;
           const mid = this.tmpV.copy(p.pos);
@@ -6813,9 +6885,14 @@ export class GameEngine {
               sfx.clang();
             }
           } else if (canAct && front && this.guarding()) {
-            this.impacts.spawn(mid, IMPACT_BLOCK, 1, 0.1);
-            this.addPlayerPosture(10);
-            sfx.block();
+            if (ranged) {
+              dead = !this.defendShot(p, 'block', true);
+              this.addPlayerPosture(6);
+            } else {
+              this.impacts.spawn(mid, IMPACT_BLOCK, 1, 0.1);
+              this.addPlayerPosture(10);
+              sfx.block();
+            }
           } else {
             const vl = Math.hypot(p.vel.x, p.vel.z) || 1;
             if (canAct && ranged && !front && this.guarding()) this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'NAS COSTAS!', '#ff8a7a', 1.1);
@@ -6967,6 +7044,7 @@ export class GameEngine {
   private stepPlay(dt: number) {
     this.stepProgress(dt);
     this.updatePlayerMovementAndCamera(dt);
+    this.stepBuffer();
     this.updateEnemies(dt);
     this.updateShocks(dt);
     this.updateBolts(dt);
