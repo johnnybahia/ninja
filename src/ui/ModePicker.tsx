@@ -37,7 +37,7 @@ const MODES: { id: GameMode; glyph: string; name: string; goal: string; lines: s
     glyph: '旗',
     name: 'Conquista',
     goal: 'Tome o território',
-    lines: ['Há 3 postos inimigos espalhados pelo campo. Em cada um, derrote o capitão da guarnição.', 'Patrulhas rondam entre os postos. Com os 3 tomados, os reforços voltam mais fortes. Não conta para o ranking.']
+    lines: ['Tome 3 postos inimigos, cada um com seu objetivo: capitão, depósitos de pólvora, tambor de guerra ou um duelo com o General.', 'Com os 3 tomados, marche ao Castelo e derrote o Oni. Depois os postos voltam, diferentes e mais fortes. Não conta para o ranking.']
   }
 ];
 

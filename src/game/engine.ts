@@ -41,6 +41,7 @@ import { cardById, describeOffer, drawCards, CardOffer } from './cards';
 import { HONOR, NO_BONUS, MetaBonus, RunSummary } from './meta';
 import { pickWaveGoal, pickWaveMod, WAVE_GOALS, WaveMod, type GoalId } from './mods';
 import { Outpost, pickPostSpots } from './outposts';
+import { Objective } from './objectives';
 
 // Enemy samurai reuse the Rōnin's mesh, armour darkened toward blued steel
 const ENEMY_TINT = new THREE.Color(0.42, 0.46, 0.62);
@@ -94,7 +95,41 @@ const isFodder = (e: { variant?: EnemyVariant }) => e.variant === 'ashigaru';
 const GARRISONS = ['infantry', 'archers', 'elite'] as const;
 type Garrison = (typeof GARRISONS)[number];
 const GARRISON_NAME: Record<Garrison, string> = { infantry: 'infantaria', archers: 'arqueiros', elite: 'guarda de elite' };
+// What a post of the Conquista is about: each round the three ordinary posts get different kinds, and the
+// fourth is the castle, which only wakes once the others are taken
+type PostKind = 'garrison' | 'powder' | 'drum' | 'duel' | 'castle';
+const POST_KINDS: PostKind[] = ['garrison', 'powder', 'duel', 'drum'];
+const POST_GLYPH: Record<PostKind, string> = { garrison: '将', powder: '火', drum: '鼓', duel: '決', castle: '城' };
+const POST_TITLE: Record<PostKind, string> = { garrison: 'Guarnição', powder: 'Depósito de pólvora', drum: 'Tambor de guerra', duel: 'Duelo do General', castle: 'O Castelo' };
+const POST_DESC: Record<PostKind, string> = {
+  garrison: 'Derrote o capitão de aura vermelha: o bando foge',
+  powder: 'Destrua os 3 depósitos de pólvora: leve o inimigo até as explosões',
+  drum: 'Quebre o tambor de guerra: ele chama reforços sem parar',
+  duel: 'Duelo contra o General: apare, e ele se enfurece na metade da vida',
+  castle: 'O Oni desperta no castelo: derrote-o para conquistar o território'
+};
+// the Oni of the castle changes form from one round to the next
+const CASTLE_FORMS: (EnemyVariant | undefined)[] = [undefined, 'trovao', 'sombrio'];
+const DRUM_EVERY = 11; // seconds between two beats of the war drum
+const DRUM_CALLS = 3; // foot soldiers a beat calls (never more than DRUM_MAX in the field)
+const DRUM_MAX = 8;
+const OBJECTIVE_FALLBACK = 45; // seconds with nobody left to fight before a stuck objective gives way
 const ARROWS = ['↑', '↗', '→', '↘', '↓', '↙', '←', '↖'];
+const newConq = () => ({
+  round: 1,
+  active: -1,
+  taken: 0,
+  hudT: 0,
+  hudText: '',
+  bossKills0: 0,
+  routed: false,
+  patrolT: PATROL_FIRST,
+  kinds: [] as PostKind[],
+  general: null as EnemyInstance | null,
+  phase2: false,
+  drumT: 0,
+  idleT: 0
+});
 const REINFORCE_GAP = 1.4; // seconds after a fall before the next one steps in
 const REINFORCE_SPACING = 0.6; // between two that step in back to back
 const RESIST_MAX = 5; // most enemies in the field at once on a Resistir wave
@@ -176,12 +211,16 @@ const IMPACT_HURT = new THREE.Color(2.6, 0.5, 0.35);
 const IMPACT_DODGE = new THREE.Color(1.2, 2.2, 2.6);
 const IMPACT_DEFLECT = new THREE.Color(3.2, 1.7, 0.45);
 const IMPACT_BLOCK = new THREE.Color(1.8, 1.5, 1.1);
+const IMPACT_TELL = new THREE.Color(2.8, 2.5, 1.3);
 
 // Sekiro-style combat tuning
-const DEFLECT_WINDOW = 0.2;
-const CUT_MIN_SPEED = 5; // m/s: the tip must be moving at least this fast to cut a shot out of the air
+// (the parry windows live in TUNE: parryWindow / perfectWindow)
+const TELL_LEAD = 0.17; // the blow's flash comes this long before it lands: pressing guard now is a perfect parry
+const PARRY_SCENE_GAP = [0, 14, 7, 3.5]; // seconds between two defence scenes, by TUNE.parryScene
+const CUT_MIN_SPEED = 3.5; // m/s: the tip must be moving at least this fast to cut a shot out of the air
+const DEFEND_REACH = 1.5; // a guard (held, or pressed in time) meets an arrow this far from the body, at the weapon
+const BUFFER_WINDOW = 0.35; // a dash/jump/guard pressed during a committed swing waits this long for its cancel point
 const SHOT_BACK_SPEED = 26;
-const PERFECT_PARRY = 0.09; // a guard pressed this close to the blow is a perfect parry
 const CLASH_POSE_TIME = 0.2; // how long the weapon is held where the blades met
 const GHOST_DASH = new THREE.Color(0x2a2464);
 const GHOST_PERFECT = new THREE.Color(0x6a4a18);
@@ -252,7 +291,7 @@ export interface GameEngineCallbacks {
   onGameOver: (score: number, wave: number, level: number, kills: number, bestCombo: number, summary: RunSummary) => void;
   onQualityChange?: (setting: QualitySetting, effective: Quality) => void;
   onPostureChange?: (posture: number, max: number) => void;
-  onCinematic?: (active: boolean, kind?: 'full' | 'short') => void;
+  onCinematic?: (active: boolean, kind?: 'full' | 'short' | 'duel') => void;
   onDeathblowReady?: (ready: boolean) => void;
   onHealsChange?: (heals: number) => void;
   onCardOffer?: (offer: CardOffer[] | null) => void;
@@ -483,6 +522,16 @@ export class GameEngine {
   private lastThreatKey = '';
   private threatT = 0;
   private lastParryZoom = -99;
+  // The cut-in on a defence worth seeing: the camera swings low to the side of the two fighters, the
+  // blades hold where they met, a short slow-motion; the controls stay live and it never lasts long
+  private parryScene: { t: number; dur: number; e: EnemyInstance; mid: THREE.Vector3; side: number; camOk: boolean; spark: number } | null = null;
+  private lastParryScene = -99;
+  private buffered: { kind: 'dash' | 'jump' | 'guard'; t: number } | null = null;
+  private staminaSent = -1;
+  private staminaSentAt = 0;
+  private shotSeg = makeSeg();
+  private parrySide = 1;
+  private parryFocus = new THREE.Vector3();
   // the weapon held where the blades met for a moment after a parry, and the fight camera's lean
   private clash: { mesh: THREE.Object3D; q: THREE.Quaternion; t: number } | null = null;
   private clashSeg = makeSeg();
@@ -496,7 +545,10 @@ export class GameEngine {
   public mode: 'waves' | 'conquest' = 'waves';
   private posts: Outpost[] = [];
   private postSolids: { x: number; z: number; r: number; h: number }[] = [];
-  private conq = { round: 1, active: -1, taken: 0, hudT: 0, hudText: '', bossKills0: 0, routed: false, patrolT: PATROL_FIRST };
+  private conq = newConq();
+  private objectives: Objective[] = [];
+  private objectivePost = -1; // the post whose objectives are in play
+  private forceBoss = false; // the castle: this wave is the Oni's whatever its number
   private spawnOrigin: { x: number; z: number } | null = null;
   private garrison: Garrison = 'infantry';
   private waveQueue: { type: 'samurai' | 'archer'; variant?: EnemyVariant }[] = [];
@@ -1031,6 +1083,8 @@ export class GameEngine {
     this.flashFx = 0;
     this.spikeFx = 0;
     this.punchT = 1;
+    this.parryScene = null;
+    this.buffered = null;
     this.callbacks.onCinematic?.(false);
     this.act = null;
     this.actQueued = false;
@@ -1067,13 +1121,25 @@ export class GameEngine {
     this.clearedShown = false;
     this.player.tookDamage = false;
 
-    const boss = this.wave % 4 === 0;
-    // a post of the Conquista mode: the captain's goal on every ordinary one, no wave challenges
+    // a post of the Conquista mode: no wave challenges; its kind decides the objective (the captain of a
+    // garrison, the General of a duel, kegs or a drum to break, the Oni of the castle)
     const conq = this.mode === 'conquest' && this.conq.active >= 0;
+    const ck: PostKind | null = conq ? this.conq.kinds[this.conq.active] ?? 'garrison' : null;
+    const boss = conq ? this.forceBoss || (ck === 'garrison' && this.wave % 4 === 0) : this.wave % 4 === 0;
     const mod = conq ? null : pickWaveMod(this.wave, this.prevMod);
     this.waveMod = mod;
     if (mod) this.prevMod = mod.id;
-    const goalDef = conq ? (boss ? null : WAVE_GOALS.find((g) => g.id === 'capitao')!) : !boss && !mod ? pickWaveGoal(this.wave, this.prevGoal) : null;
+    const goalDef = conq
+      ? boss
+        ? null
+        : ck === 'duel'
+          ? WAVE_GOALS.find((g) => g.id === 'duelo')!
+          : ck === 'garrison'
+            ? WAVE_GOALS.find((g) => g.id === 'capitao')!
+            : null
+      : !boss && !mod
+        ? pickWaveGoal(this.wave, this.prevGoal)
+        : null;
     if (goalDef && !conq) this.prevGoal = goalDef.id;
     let nS = Math.min(9, 2 + this.wave);
     let nA = Math.min(4, Math.floor(this.wave / 2));
@@ -1136,10 +1202,12 @@ export class GameEngine {
     for (let i = 0; i < nA; i++) list.push({ type: 'archer' });
     // a post's foot soldiers: plenty, each worth little (the garrison of infantry has the most)
     if (conq) {
-      const nAshi = Math.round(Math.min(10, 3 + this.conq.round * 2) * (boss ? 0.5 : this.garrison === 'infantry' ? 1 : 0.6));
+      // (the General's duel is just the two of them)
+      const nAshi = ck === 'duel' ? 0 : Math.round(Math.min(10, 3 + this.conq.round * 2) * (boss ? 0.5 : this.garrison === 'infantry' ? 1 : 0.6));
       for (let i = 0; i < nAshi; i++) list.push({ type: 'samurai', variant: 'ashigaru' });
     }
-    if (boss) list.push({ type: 'boss', variant: bossFormFor(this.wave) });
+    const bossForm = ck === 'castle' ? CASTLE_FORMS[(this.conq.round - 1) % CASTLE_FORMS.length] : bossFormFor(this.wave);
+    if (boss) list.push({ type: 'boss', variant: bossForm });
 
     // only so many at a time: a mix goes in now (a plain face or two, one of the special ones, an
     // archer) and the rest steps in as the fight thins out
@@ -1203,7 +1271,7 @@ export class GameEngine {
     }
 
     this.waveStat = { t0: this.time, enemies: list.filter((it) => !isFodder(it)).length, queued: this.waveQueue.filter((it) => !isFodder(it)).length, finishers: 0, deflects: 0 };
-    let sub = boss ? BOSS_HINT[bossFormFor(this.wave) ?? 'oni'] : mod ? mod.desc : goalDef ? (duelist ? `Duelo contra ${FIGHTER_NAME[duelist]}` : goalDef.desc) : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
+    let sub = boss ? BOSS_HINT[bossForm ?? 'oni'] : mod ? mod.desc : goalDef ? (duelist ? `Duelo contra ${FIGHTER_NAME[duelist]}` : goalDef.desc) : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
     const atmIdx = atmosphereForWave(this.wave, this.atmosMode, this.world.atmIndex);
     if (atmIdx !== this.world.atmIndex) {
       this.world.setAtmosphere(atmIdx);
@@ -1220,9 +1288,9 @@ export class GameEngine {
       if (spawned.some((e) => e.variant === v) && this.hintVariant(v, hintAt)) hintAt += 2.3;
     }
     this.callbacks.onWaveMod?.(mod ? { id: mod.id, name: mod.name, glyph: mod.glyph, desc: mod.desc } : goalDef ? { id: goalDef.id, name: goalDef.name, glyph: goalDef.glyph, desc: goalDef.desc } : null);
-    const label = conq ? `Posto ${this.wave}` : `Onda ${this.wave}`;
-    if (conq) sub = `${GARRISON_NAME[this.garrison][0].toUpperCase()}${GARRISON_NAME[this.garrison].slice(1)} · ${boss ? sub : goalDef ? goalDef.desc : sub}`;
-    this.callbacks.onWaveChange(this.wave, mod ? `${label} · ${mod.name}` : goalDef ? `${label} · ${goalDef.name}` : label, sub);
+    const label = conq ? `${POST_TITLE[ck!]}` : `Onda ${this.wave}`;
+    if (conq) sub = ck === 'garrison' ? `${GARRISON_NAME[this.garrison][0].toUpperCase()}${GARRISON_NAME[this.garrison].slice(1)} · ${boss ? sub : goalDef ? goalDef.desc : sub}` : ck === 'castle' ? `${POST_DESC.castle} · ${sub}` : POST_DESC[ck!];
+    this.callbacks.onWaveChange(this.wave, mod ? `${label} · ${mod.name}` : goalDef && !conq ? `${label} · ${goalDef.name}` : label, sub);
     sfx.wave();
   }
 
@@ -1335,23 +1403,74 @@ export class GameEngine {
   // ---------------------------------------------------------------------------
   private setupConquest() {
     this.clearConquest();
-    const spots = pickPostSpots((x, z, pad) => this.world.isFree(x, z, pad), 3);
-    for (const sp of spots) {
-      const post = new Outpost(sp.x, sp.z);
+    // the farthest-apart open spots: three posts and, last, the castle
+    const spots = pickPostSpots((x, z, pad) => this.world.isFree(x, z, pad), 4);
+    this.conq = newConq();
+    this.assignKinds(spots.length >= 4);
+    spots.forEach((sp, i) => {
+      const kind = this.conq.kinds[i];
+      const post = new Outpost(sp.x, sp.z, { glyph: POST_GLYPH[kind], castle: kind === 'castle' });
+      post.locked = kind === 'castle';
       this.scene.add(post.group);
       for (const so of post.solids) {
         this.solids.push(so);
         this.postSolids.push(so);
       }
       this.posts.push(post);
-    }
-    this.conq = { round: 1, active: -1, taken: 0, hudT: 0, hudText: '', bossKills0: 0, routed: false, patrolT: PATROL_FIRST };
+    });
+    this.buildObjectives();
     this.wave = 0;
-    this.callbacks.onWaveChange(0, 'Conquista', `Tome os ${this.posts.length} postos inimigos: derrote o capitão de cada um`);
+    const n = this.posts.filter((p) => !p.castle).length;
+    this.callbacks.onWaveChange(0, 'Conquista', `Tome os ${n} postos inimigos e marche ao Castelo: cada posto tem um objetivo`);
     this.updateConquestHud(0, true);
   }
 
+  // Which kind each post of this round is: the ordinary ones rotate through the kinds from one round
+  // to the next, so a post is never the same twice running; the last one is always the castle
+  private assignKinds(withCastle: boolean) {
+    const c = this.conq;
+    const off = ((c.round - 1) * 3) % POST_KINDS.length;
+    c.kinds = [0, 1, 2].map((i) => POST_KINDS[(i + off) % POST_KINDS.length]);
+    if (withCastle) c.kinds.push('castle');
+  }
+
+  // The things to break at the posts of this round (powder kegs, a drum), standing inside their rings
+  private buildObjectives() {
+    this.clearObjectives();
+    this.posts.forEach((post, i) => {
+      const kind = this.conq.kinds[i];
+      const spots: { x: number; z: number }[] = [];
+      if (kind === 'powder') for (let k = 0; k < 3; k++) spots.push({ x: post.x + Math.sin(0.5 + (k * TAU) / 3) * 3.7, z: post.z + Math.cos(0.5 + (k * TAU) / 3) * 3.7 });
+      else if (kind === 'drum') spots.push({ x: post.x + 1.2, z: post.z + 3.1 });
+      for (const sp of spots) {
+        const o = new Objective(kind === 'powder' ? 'powder' : 'drum', sp.x, sp.z);
+        this.scene.add(o.group);
+        this.solids.push(o.solid);
+        this.postSolids.push(o.solid);
+        this.objectives.push(o);
+        o.post = i;
+      }
+    });
+  }
+
+  private clearObjectives() {
+    for (const o of this.objectives) {
+      o.dispose();
+      const i = this.solids.indexOf(o.solid);
+      if (i >= 0) this.solids.splice(i, 1);
+      const j = this.postSolids.indexOf(o.solid);
+      if (j >= 0) this.postSolids.splice(j, 1);
+    }
+    this.objectives = [];
+    this.objectivePost = -1;
+  }
+
+  private postObjectives(i: number) {
+    return this.objectives.filter((o) => o.post === i);
+  }
+
   private clearConquest() {
+    this.clearObjectives();
     for (const p of this.posts) p.dispose();
     this.posts = [];
     if (this.postSolids.length) {
@@ -1360,24 +1479,32 @@ export class GameEngine {
       this.postSolids = [];
     }
     this.spawnOrigin = null;
-    this.conq = { round: 1, active: -1, taken: 0, hudT: 0, hudText: '', bossKills0: 0, routed: false, patrolT: PATROL_FIRST };
+    this.forceBoss = false;
+    this.conq = newConq();
   }
 
   private stepConquest(dt: number) {
     for (const p of this.posts) p.update(this.time);
+    for (const o of this.objectives) o.update(this.time, dt, this.camera.quaternion);
     const c = this.conq;
     if (c.active >= 0) {
-      // the Oni leads its post like a captain: when it falls the escort breaks and runs
-      if (!this.goal && !c.routed && this.bossKills > c.bossKills0) {
-        c.routed = true;
-        this.waveQueue = [];
-        this.routEnemies();
-      }
+      this.stepPostKind(dt);
       return;
     }
     const P = this.player.pos;
+    // the castle only wakes once every other post is taken
+    const ordinary = this.posts.filter((p) => !p.castle);
+    const open = ordinary.every((p) => p.captured);
     for (let i = 0; i < this.posts.length; i++) {
       const p = this.posts[i];
+      if (p.castle) {
+        if (p.locked && open && !p.captured) {
+          p.locked = false;
+          this.spawnLabel(p.x, 5, p.z, 'O CASTELO SE ABRE!', '#ffd166', 1.6);
+          sfx.wave();
+        }
+        if (p.locked) continue;
+      }
       const d = Math.hypot(p.x - P.x, p.z - P.z);
       if (d > POST_ACTIVATE + 8) p.armed = true;
       if (!p.captured && p.armed && d < POST_ACTIVATE) {
@@ -1387,6 +1514,54 @@ export class GameEngine {
     }
     this.stepPatrols(dt);
     this.updateConquestHud(dt);
+  }
+
+  // While a post is awake: its own rules (the Oni leading a post, the drum calling, the General's rage)
+  private stepPostKind(dt: number) {
+    const c = this.conq;
+    const kind = c.kinds[c.active] ?? 'garrison';
+    // the Oni leads its post like a captain: when it falls the escort breaks and runs
+    if (!this.goal && !c.routed && this.bossKills > c.bossKills0) {
+      c.routed = true;
+      this.waveQueue = [];
+      this.routEnemies();
+    }
+    if (kind === 'drum' && !c.routed) {
+      const drum = this.postObjectives(c.active).find((o) => !o.dead);
+      if (drum) {
+        c.drumT -= dt;
+        if (c.drumT <= 0) {
+          c.drumT = DRUM_EVERY;
+          this.drumBeat(drum);
+        }
+      }
+    }
+    if (kind === 'duel' && c.general && !c.phase2 && !c.general.dead && c.general.hp <= c.general.maxHp * 0.5) this.generalRage(c.general);
+    // powder and drum posts end when the objectives are gone; if nobody is left to fight and one is stuck
+    // for too long (out of reach, a bug), it gives way on its own so the post can never hang
+    if ((kind === 'powder' || kind === 'drum') && !c.routed) {
+      const left = this.postObjectives(c.active).filter((o) => !o.dead);
+      const alive = this.enemies.some((e) => !e.dead && !e.flee);
+      c.idleT = alive ? 0 : c.idleT + dt;
+      if (left.length && c.idleT > OBJECTIVE_FALLBACK) {
+        for (const o of left) this.damageObjective(o, 99);
+      }
+      this.updateObjectiveHud(dt, kind, left.length);
+    }
+  }
+
+  private objectiveHudT = 0;
+  private objectiveHudText = '';
+  private updateObjectiveHud(dt: number, kind: PostKind, left: number) {
+    this.objectiveHudT -= dt;
+    if (this.objectiveHudT > 0) return;
+    this.objectiveHudT = 0.25;
+    const objs = this.postObjectives(this.conq.active);
+    const text =
+      kind === 'powder' ? `Pólvora ${objs.length - left}/${objs.length} destruídos` : `Tambor ${Math.round((objs.reduce((n, o) => n + o.hp, 0) / Math.max(1, objs.reduce((n, o) => n + o.maxHp, 0))) * 100)}%`;
+    if (text === this.objectiveHudText) return;
+    this.objectiveHudText = text;
+    this.callbacks.onWaveMod?.({ id: 'conquista', name: text, glyph: POST_GLYPH[kind], desc: POST_DESC[kind] });
   }
 
   // The objective pill: how many posts are taken and which way the nearest one lies
@@ -1399,7 +1574,7 @@ export class GameEngine {
     let best: Outpost | null = null;
     let bd = Infinity;
     for (const p of this.posts) {
-      if (p.captured) continue;
+      if (p.captured || p.locked) continue;
       const d = Math.hypot(p.x - P.x, p.z - P.z);
       if (d < bd) {
         bd = d;
@@ -1415,54 +1590,183 @@ export class GameEngine {
     const dz = best.z - P.z;
     const ang = Math.atan2(dx * rx + dz * rz, dx * fx + dz * fz);
     const arrow = ARROWS[((Math.round(ang / (Math.PI / 4)) % 8) + 8) % 8];
-    const text = `Conquista ${c.taken}/${this.posts.length} · ${arrow} ${Math.round(bd / 2) * 2} m`;
+    const kind = c.kinds[this.posts.indexOf(best)] ?? 'garrison';
+    const text = best.castle ? `Marche ao Castelo · ${arrow} ${Math.round(bd / 2) * 2} m` : `Conquista ${c.taken}/${this.posts.filter((p) => !p.castle).length} · ${POST_TITLE[kind]} ${arrow} ${Math.round(bd / 2) * 2} m`;
     if (text === c.hudText) return;
     c.hudText = text;
-    this.callbacks.onWaveMod?.({ id: 'conquista', name: text, glyph: '旗', desc: 'Vá até um posto inimigo e derrote o capitão da guarnição' });
+    this.callbacks.onWaveMod?.({ id: 'conquista', name: text, glyph: POST_GLYPH[kind], desc: POST_DESC[kind] });
   }
 
   private startOutpost(i: number) {
     const p = this.posts[i];
-    this.conq.active = i;
-    this.conq.routed = false;
-    this.conq.bossKills0 = this.bossKills;
+    const c = this.conq;
+    const kind = c.kinds[i] ?? 'garrison';
+    c.active = i;
+    c.routed = false;
+    c.idleT = 0;
+    c.general = null;
+    c.phase2 = false;
+    c.drumT = 5;
+    c.bossKills0 = this.bossKills;
+    this.objectiveHudText = '';
     // a patrol still on the road breaks off: the post is the fight now
     this.routEnemies((e) => !!e.patrol);
     this.spawnOrigin = { x: p.x, z: p.z };
-    this.garrison = GARRISONS[i % GARRISONS.length];
+    // the garrison's make-up: the plain post alternates infantry, archers and elite guards
+    this.garrison = kind === 'garrison' ? GARRISONS[i % GARRISONS.length] : kind === 'drum' ? 'elite' : 'infantry';
+    this.forceBoss = kind === 'castle';
     this.nextWave();
-    this.spawnLabel(p.x, 3.6, p.z, 'POSTO INIMIGO!', '#ff8a7a', 1.5);
+    this.forceBoss = false;
+    this.objectivePost = i;
+    for (const o of this.postObjectives(i)) o.setActive(true);
+    if (kind === 'duel') {
+      // the lone master the duel goal made is the General
+      const g = this.enemies.find((e) => !e.dead && e.type === 'samurai' && e.elite);
+      if (g) this.makeGeneral(g);
+    }
+    this.spawnLabel(p.x, 3.8, p.z, kind === 'castle' ? 'O CASTELO!' : kind === 'garrison' ? 'POSTO INIMIGO!' : `${POST_TITLE[kind].toUpperCase()}!`, kind === 'castle' ? '#ffd166' : '#ff8a7a', 1.5);
+  }
+
+  // The General: the duel's master, with a captain's red bar (so a good parry gets its scene) and a rage
+  // waiting at half life
+  private makeGeneral(e: EnemyInstance) {
+    this.conq.general = e;
+    e.captain = true;
+    e.hp *= 1.25;
+    e.maxHp = e.hp;
+    (e.barFg.material as THREE.MeshBasicMaterial).color.set(0xff3a2a);
+    if (e.aura) this.disposeAura(e);
+    e.aura = this.makeAura(0xff2a18, 1.7);
+    this.spawnLabel(e.pos.x, 3.4, e.pos.z, e.variant && FIGHTER_NAME[e.variant] ? `GENERAL · ${FIGHTER_NAME[e.variant]}` : 'O GENERAL', '#ffd166', 1.3);
+  }
+
+  private generalRage(e: EnemyInstance) {
+    this.conq.phase2 = true;
+    e.speed *= 1.22;
+    e.comboLeft = Math.max(e.comboLeft, 3);
+    e.cd = Math.min(e.cd, 0.3);
+    e.staggerT = 0;
+    if (e.aura) this.disposeAura(e);
+    e.aura = this.makeAura(0xff8a1a, 2.1);
+    this.emitParticles(e.pos.x, e.pos.y + 1.2, e.pos.z, 50, 0xff7a2a, 8, 3, 4, 0.8);
+    this.spawnBloodRing(e.pos.x, 0.5, e.pos.z, 4, 0xff7a20, 0.5);
+    this.spawnLabel(e.pos.x, 3.6, e.pos.z, 'O GENERAL SE ENFURECE!', '#ff8a3a', 1.5);
+    this.shake = Math.max(this.shake, 0.5);
+    sfx.boom();
   }
 
   private captureOutpost() {
     const c = this.conq;
     const p = this.posts[c.active];
+    const kind = c.kinds[c.active] ?? 'garrison';
     c.active = -1;
     this.spawnOrigin = null;
     this.waveQueue = [];
     c.taken++;
+    this.objectivePost = -1;
+    this.callbacks.onWaveMod?.(null);
+    c.hudText = '';
     if (p) {
       p.setCaptured(true);
       this.emitParticles(p.x, 1.5, p.z, 44, 0x4fd6a8, 6, 3, -1, 1.2);
-      this.spawnLabel(p.x, 3.6, p.z, 'POSTO TOMADO!', '#8fe0c8', 1.6);
+      this.spawnLabel(p.x, 3.6, p.z, kind === 'castle' ? 'CASTELO TOMADO!' : 'POSTO TOMADO!', '#8fe0c8', 1.6);
     }
     // the taken post pays in life and Honra
-    this.player.hp = Math.min(this.player.maxHp, this.player.hp + Math.round(this.player.maxHp * 0.3));
+    this.player.hp = Math.min(this.player.maxHp, this.player.hp + Math.round(this.player.maxHp * (kind === 'castle' ? 1 : 0.3)));
     this.callbacks.onHpChange(this.player.hp, this.player.maxHp);
-    this.addHonor('mod', 8);
+    this.addHonor('mod', kind === 'castle' ? 30 + 10 * c.round : 8);
     sfx.wave();
     if (c.taken >= this.posts.length) {
+      // the whole territory is taken: the castle's spoils are a card, then the garrisons come back stronger
+      this.picksPending++;
       c.round++;
       c.taken = 0;
-      this.posts.forEach((q) => {
+      this.assignKinds(this.posts.some((q) => q.castle));
+      this.posts.forEach((q, i) => {
         q.setCaptured(false);
         q.armed = false;
+        q.locked = q.castle;
+        q.setGlyph(POST_GLYPH[c.kinds[i]]);
       });
-      this.callbacks.onWaveChange(this.wave, `Território conquistado · Rodada ${c.round}`, 'Reforços retomam os postos: tome todos de novo, mais fortes');
+      this.buildObjectives();
+      this.callbacks.onWaveChange(this.wave, `Território conquistado · Rodada ${c.round}`, 'Um troféu do General: escolha uma carta. Os postos voltam, mais fortes e diferentes');
+    } else if (kind !== 'castle' && c.taken >= this.posts.filter((q) => !q.castle).length) {
+      this.callbacks.onWaveChange(this.wave, `Posto tomado · ${c.taken}/${this.posts.filter((q) => !q.castle).length}`, 'Todos os postos caíram: marche ao Castelo');
     } else {
-      this.callbacks.onWaveChange(this.wave, `Posto tomado · ${c.taken}/${this.posts.length}`, 'Siga para o próximo posto');
+      this.callbacks.onWaveChange(this.wave, `Posto tomado · ${c.taken}/${this.posts.filter((q) => !q.castle).length}`, 'Siga para o próximo posto');
     }
     this.updateConquestHud(0, true);
+  }
+
+  // The war drum beats: foot soldiers answer the call (never a crowd), and the drum swells
+  private drumBeat(drum: Objective) {
+    drum.pulse();
+    sfx.drum();
+    this.shake = Math.max(this.shake, 0.18);
+    this.emitParticles(drum.x, 0.3, drum.z, 18, 0xb09a78, 5, 2.6, 1, 0.7);
+    const fodder = this.enemies.reduce((n, e) => n + (!e.dead && !e.flee && isFodder(e) ? 1 : 0), 0);
+    const calls = Math.min(DRUM_CALLS, DRUM_MAX - fodder);
+    if (calls <= 0) return;
+    for (let k = 0; k < calls; k++) this.spawnAtPost('samurai', 'ashigaru');
+    this.spawnLabel(drum.x, 3.4, drum.z, 'O TAMBOR CHAMA REFORÇOS!', '#ffb36a', 1.2);
+  }
+
+  // A blow or shot reached an objective (damage in hits)
+  private damageObjective(o: Objective, dmg: number) {
+    if (o.dead || !o.active) return;
+    const killed = o.hit(dmg);
+    this.emitParticles(o.x, 1.1, o.z, killed ? 26 : 8, 0xd2a066, 5, 2, 10, 0.45);
+    sfx.wood(killed ? 3 : 1.5);
+    this.shake = Math.max(this.shake, killed ? 0.4 : 0.12);
+    if (!killed) return;
+    this.addHonor('mod', 4);
+    if (o.kind === 'powder') {
+      // the kegs blow: the garrison near them is thrown and hurt, and so is whoever stands too close
+      this.explodeAt(o.x, 0.9, o.z, 4.4, 80, 12);
+      this.emitParticles(o.x, 1.2, o.z, 60, 0xff8a3a, 10, 3.4, 5, 0.9);
+      this.spawnBloodRing(o.x, 0.9, o.z, 4.4, 0xff7a20, 0.5);
+      this.flashFx = Math.max(this.flashFx, 0.3);
+      this.hitstop = Math.max(this.hitstop, 0.08);
+      this.spawnLabel(o.x, 2.8, o.z, 'BOOM!', '#ffb347', 1.5);
+      const dx = this.player.pos.x - o.x;
+      const dz = this.player.pos.z - o.z;
+      const d = Math.hypot(dx, dz) || 1;
+      if (d < 2.6) this.damagePlayer(12, dx / d, dz / d, true);
+    } else {
+      this.emitParticles(o.x, 1.4, o.z, 40, 0x9a6a40, 7, 3, 8, 0.9);
+      this.spawnLabel(o.x, 2.8, o.z, 'TAMBOR QUEBRADO!', '#ffd166', 1.4);
+      sfx.crack();
+    }
+    const i = this.solids.indexOf(o.solid);
+    if (i >= 0) this.solids.splice(i, 1);
+    // the last one: the objective is done and the garrison breaks
+    const left = this.postObjectives(this.conq.active).some((x) => !x.dead);
+    if (!left && !this.conq.routed) {
+      this.conq.routed = true;
+      this.waveQueue = [];
+      this.routEnemies();
+      this.callbacks.onWaveMod?.({ id: 'conquista', name: `${POST_TITLE[this.conq.kinds[this.conq.active] ?? 'powder']} ✓`, glyph: '✓', desc: 'Objetivo cumprido: o bando foge' });
+      this.callbacks.onWaveChange(this.wave, 'Objetivo cumprido', 'O bando foge');
+    }
+  }
+
+  // The player's blade (this frame's path) against the objectives: one hit per swing
+  private hitObjectives(cur: BladeSeg, token: object, hits: number) {
+    for (const o of this.objectives) {
+      if (o.dead || !o.active || o.token === token) continue;
+      const a = cur.a;
+      const b = cur.b;
+      const abx = b.x - a.x;
+      const abz = b.z - a.z;
+      const l2 = abx * abx + abz * abz;
+      const t = l2 > 1e-6 ? Math.max(0, Math.min(1, ((o.x - a.x) * abx + (o.z - a.z) * abz) / l2)) : 0;
+      const d = Math.hypot(a.x + abx * t - o.x, a.z + abz * t - o.z);
+      const y = a.y + (b.y - a.y) * t;
+      if (d <= o.r + this.bladeRadius && y > -0.2 && y < o.h + 0.5) {
+        o.token = token;
+        this.damageObjective(o, hits);
+      }
+    }
   }
 
   // The garrison forms up inside the post's ring
@@ -2131,6 +2435,7 @@ export class GameEngine {
       const falloff = 1 - Math.min(1, d / (radius + e.r));
       this.hitEnemy(e, Math.round(dmg * (0.5 + 0.5 * falloff)), dx / d, dz / d, kb, true);
     }
+    for (const o of this.objectives) if (!o.dead && o.active && Math.hypot(o.x - x, o.z - z) <= radius + o.r) this.damageObjective(o, 2);
     this.emitParticles(x, y + 0.4, z, 26, 0xffb04a, 6, 3, 5, 0.55);
     this.world.props.explode(x, y, z, radius, 10);
     this.spawnBloodRing(x, y, z, radius, 0xffa030, 0.4);
@@ -2231,21 +2536,43 @@ export class GameEngine {
     canvas.height = 72;
     const ctx = canvas.getContext('2d');
     if (ctx) {
-      // long words shrink to fit the label instead of being cut at its edges
-      let size = 42;
-      ctx.font = `bold ${size}px "Zen Kaku Gothic New", sans-serif`;
-      while (size > 18 && ctx.measureText(text).width > 176) {
-        size -= 2;
+      // long text shrinks to fit the label instead of being cut at its edges; a long phrase breaks in two
+      const fit = (t: string, max: number, floor: number) => {
+        let size = max;
         ctx.font = `bold ${size}px "Zen Kaku Gothic New", sans-serif`;
+        while (size > floor && ctx.measureText(t).width > 176) {
+          size -= 2;
+          ctx.font = `bold ${size}px "Zen Kaku Gothic New", sans-serif`;
+        }
+        return size;
+      };
+      let lines = [text];
+      if (fit(text, 42, 30) === 30 && ctx.measureText(text).width > 176 && text.includes(' ')) {
+        // break at the space nearest the middle
+        let cut = -1;
+        for (let i = 0; i < text.length; i++) if (text[i] === ' ' && (cut < 0 || Math.abs(i - text.length / 2) < Math.abs(cut - text.length / 2))) cut = i;
+        lines = [text.slice(0, cut), text.slice(cut + 1)];
       }
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.lineJoin = 'round';
       ctx.lineWidth = 7;
       ctx.strokeStyle = 'rgba(10,6,4,0.8)';
-      ctx.strokeText(text, 96, 38);
       ctx.fillStyle = color;
-      ctx.fillText(text, 96, 38);
+      if (lines.length === 1) {
+        fit(text, 42, 18);
+        ctx.strokeText(text, 96, 38);
+        ctx.fillText(text, 96, 38);
+      } else {
+        const size = Math.min(fit(lines[0], 30, 16), fit(lines[1], 30, 16));
+        ctx.font = `bold ${size}px "Zen Kaku Gothic New", sans-serif`;
+        ctx.lineWidth = 6;
+        lines.forEach((ln, k) => {
+          const y = 22 + k * 30;
+          ctx.strokeText(ln, 96, y);
+          ctx.fillText(ln, 96, y);
+        });
+      }
     }
     const tex = new THREE.CanvasTexture(canvas);
     const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: false });
@@ -2402,7 +2729,11 @@ export class GameEngine {
 
   public jump() {
     if (this.state !== 'play' || this.player.jumps >= 2) return;
-    if (this.player.staggerT > 0 || this.cine || !this.freeToCancel()) return;
+    if (this.player.staggerT > 0 || this.cine) return;
+    if (!this.freeToCancel()) {
+      this.buffered = { kind: 'jump', t: this.time };
+      return;
+    }
     this.player.vy = this.player.jumps === 0 ? 10.5 : 9.5;
     this.player.jumps++;
     this.cancelAct(0.1);
@@ -2413,7 +2744,12 @@ export class GameEngine {
 
   public dash() {
     if (this.state !== 'play' || this.player.dash > 0 || this.player.st < this.dashCost()) return;
-    if (this.player.staggerT > 0 || this.cine || !this.freeToCancel()) return;
+    if (this.player.staggerT > 0 || this.cine) return;
+    // pressed while the last swing is still committed: remembered, it fires the moment it can
+    if (!this.freeToCancel()) {
+      this.buffered = { kind: 'dash', t: this.time };
+      return;
+    }
     this.player.st -= this.dashCost();
     this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
     this.cancelAct(0.08);
@@ -2724,6 +3060,24 @@ export class GameEngine {
   }
 
   /** Nothing committed is playing (or it's past its cancel point) - dodge/jump/guard OK. */
+  // The press waiting for the swing's cancel point (dash, jump, or the moment a guard started)
+  private stepBuffer() {
+    const b = this.buffered;
+    if (!b) return;
+    if (this.state !== 'play' || this.player.hp <= 0 || this.time - b.t > BUFFER_WINDOW) {
+      this.buffered = null;
+      return;
+    }
+    if (this.player.staggerT > 0 || this.cine || !this.freeToCancel()) return;
+    this.buffered = null;
+    if (b.kind === 'dash') this.dash();
+    else if (b.kind === 'jump') this.jump();
+    else if (this.input.guardHeld && this.player.healT <= 0) {
+      if (this.act && this.act.kind !== 'deflect' && this.act.kind !== 'block') this.cancelAct(0.1);
+      this.player.guardPressT = this.time;
+    }
+  }
+
   private freeToCancel() {
     if (!this.player.rig.clip) return true;
     if (this.player.hp <= 0) return false;
@@ -2943,6 +3297,7 @@ export class GameEngine {
       }
       // the same blade also touches the scenery: sparks off stone, bark chips, a cut bamboo
       this.world.props.sweep(prev, cur, { power: a.kind === 'special' ? 3 : win.heavy ? 2 : 1, edged: w.id !== 'bo' && w.id !== 'karate', token: win, radius: this.bladeRadius });
+      if (this.objectives.length) this.hitObjectives(cur, win, a.kind === 'special' ? 3 : win.heavy ? 2 : 1);
       if (sh.t > win.t1) a.windows.splice(i, 1);
     }
     this.bladePrev.a.copy(cur.a);
@@ -4118,8 +4473,11 @@ export class GameEngine {
   public guardDown() {
     if (this.state !== 'play' || this.player.healT > 0 || this.player.hp <= 0) return;
     this.input.guardHeld = true;
-    // mocap rig: a committed swing can't be turned into a parry, only its recovery
-    if (!this.freeToCancel()) return;
+    // mocap rig: a committed swing can't be turned into a parry, only its recovery (the press waits for it)
+    if (!this.freeToCancel()) {
+      this.buffered = { kind: 'guard', t: this.time };
+      return;
+    }
     if (this.act && this.act.kind !== 'deflect' && this.act.kind !== 'block') this.cancelAct(0.1);
     this.player.guardPressT = this.time;
   }
@@ -4410,14 +4768,14 @@ export class GameEngine {
     }
 
     const canAct = this.player.staggerT <= 0;
-    const deflect = canAct && st.kind !== 'sweep' && this.time - this.player.guardPressT <= DEFLECT_WINDOW;
+    const deflect = canAct && st.kind !== 'sweep' && this.time - this.player.guardPressT <= TUNE.parryWindow;
     if (deflect) {
       this.waveStat.deflects++;
       this.deflectsTotal++;
       this.faceEnemy(e);
       // a perfect parry (guard pressed right on the blow) pays more: stamina back, the foe's posture
       // hit harder, a longer freeze and a flash; any parry brings the weapon to where the blades meet
-      const perfect = this.time - this.player.guardPressT <= PERFECT_PARRY;
+      const perfect = this.time - this.player.guardPressT <= TUNE.perfectWindow;
       this.playerDeflectAnim();
       const meet = this.clashPose(e);
       const mid = meet ? this.tmpV.copy(meet) : contact ? this.tmpV.copy(contact) : this.tmpV.set(this.player.pos.x - nx * 0.75, this.player.pos.y + 1.35, this.player.pos.z - nz * 0.75);
@@ -4429,9 +4787,10 @@ export class GameEngine {
       this.fovKick = Math.min(this.fovKick, perfect ? -4.5 : -3);
       this.addPlayerPosture(perfect ? 0 : 3);
       sfx.clang();
+      const scene = this.startParryScene(e, meet, perfect, st.kind === 'thrust');
       if (perfect) {
         this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'APARO PERFEITO!', '#ffd166', 1.45);
-        this.triggerSlowmo(0.22, 0.38);
+        if (!scene) this.triggerSlowmo(0.22, 0.38);
         this.player.st = Math.min(this.player.maxSt, this.player.st + 10);
         this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
         if (this.settings.cinematicCamera) {
@@ -4444,7 +4803,7 @@ export class GameEngine {
         this.triggerSlowmo(0.35, 0.3);
       } else this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.4, this.player.pos.z, 'APAROU!', '#ffb347', 1);
       // a short push-in on the defences worth seeing: the wave's first, a thrust, the Oni, a captain
-      if (perfect || st.kind === 'thrust' || this.waveStat.deflects === 1 || e.type === 'boss' || e.captain) this.parryZoom(perfect || st.kind === 'thrust');
+      if (!scene && (perfect || st.kind === 'thrust' || this.waveStat.deflects === 1 || e.type === 'boss' || e.captain)) this.parryZoom(perfect || st.kind === 'thrust');
       e.staggerT = e.type === 'boss' ? 0.18 : 0.32;
       e.anim = { kind: 'erecoil', t: 0, dur: 0.32, side: 0 };
       this.enemyClip(e, 'hit1', { from: 0.1, to: 0.75, speed: 1.6 });
@@ -4999,7 +5358,12 @@ export class GameEngine {
     this.updateCinematic(dt);
 
     this.player.st = Math.min(this.player.maxSt, this.player.st + (STAMINA_REGEN + 4 * (this.cardLv.folego ?? 0)) * dt);
-    this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
+    // the bar needs a few updates a second, not sixty (each one re-renders the whole HUD: that was the lag)
+    if (this.player.st !== this.staminaSent && (this.player.st >= this.player.maxSt || performance.now() - this.staminaSentAt >= 100)) {
+      this.staminaSent = this.player.st;
+      this.staminaSentAt = performance.now();
+      this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
+    }
 
     // Bō special: spinning AoE tick for its duration, then releases the attack button
     if (this.player.tornado > 0) {
@@ -5202,6 +5566,7 @@ export class GameEngine {
     }
     this.camera.lookAt(lookTarget);
     this.applyCineCamera(dt, lookTarget);
+    this.applyParryScene(dt, lookTarget);
   }
 
   private nearSolids: { x: number; z: number; r: number; h: number }[] = [];
@@ -5551,6 +5916,11 @@ export class GameEngine {
           e.tele.position.set(e.pos.x, 0.05, e.pos.z);
           (e.tele.material as THREE.MeshBasicMaterial).opacity = 0.18 + 0.42 * k;
           if (boss) e.tele.scale.setScalar(1.6 + k * 0.8);
+        }
+        // a flash on the blade just before a parry-able blow lands: the cue for pressing guard
+        if (!st.warned && !st.feint && st.kind !== 'sweep' && !isFodder(e) && st.t >= st.windup - TELL_LEAD) {
+          st.warned = true;
+          this.tellFlash(e, st);
         }
         if (e.danger && e.danger.visible) {
           const pop = Math.min(1, st.t / 0.15);
@@ -6120,13 +6490,24 @@ export class GameEngine {
     const [c, d, pa, pb] = this.cutV;
     pa.set(p.pos.x - p.vel.x * dt, p.pos.y - p.vel.y * dt, p.pos.z - p.vel.z * dt);
     pb.copy(p.pos);
-    const reach = 0.3 + 0.3 * TUNE.hitAssist;
+    const reach = 0.45 + 0.35 * TUNE.hitAssist;
     for (const k of [0.25, 0.5, 0.75, 1]) {
       c.lerpVectors(this.cutPrev.a, this.cutCur.a, k);
       d.lerpVectors(this.cutPrev.b, this.cutCur.b, k);
       if (segSegDist(c, d, pa, pb) < reach) return true;
     }
     return false;
+  }
+
+  // A swing in progress cuts a shot that comes into its arc: close, in front, at body height (the blade's
+  // window is short, so the exact path alone almost never lines up with a fast arrow)
+  private shotInSwingArc(p: ProjectileInstance): boolean {
+    const P = this.player;
+    const dx = p.pos.x - P.pos.x;
+    const dz = p.pos.z - P.pos.z;
+    const d = Math.hypot(dx, dz);
+    if (d > 2.6 || d < 0.2 || p.pos.y < 0.3 || p.pos.y > 2.3) return false;
+    return (dx * Math.sin(P.yaw) + dz * Math.cos(P.yaw)) / d >= Math.cos(1.35);
   }
 
   // Does the shot come from inside the cone the player is facing?
@@ -6139,18 +6520,39 @@ export class GameEngine {
 
   // A shot is stopped by the weapon: cut out of the air by a swing, or parried with a timed
   // guard. Seen coming (inside the cone) it goes back at whoever loosed it. true = it lives on.
-  private defendShot(p: ProjectileInstance, how: 'cut' | 'parry', front: boolean): boolean {
+  private defendShot(p: ProjectileInstance, how: 'cut' | 'parry' | 'block', front: boolean): boolean {
     const P = this.player;
-    const mid = this.tmpV.copy(p.pos);
-    this.impacts.spawn(mid, IMPACT_DEFLECT, 1.4, 0.14);
-    this.emitParticles(mid.x, mid.y, mid.z, 16, 0xffb347, 7, 2, 16, 0.25);
-    sfx.clang();
-    this.waveStat.deflects++;
-    this.deflectsTotal++;
+    // the body answers first (starting an action drops any pose), then the weapon is laid across the shot's
+    // path (a swing already carries it there)
     if (how === 'parry') this.playerDeflectAnim();
+    else if (how === 'block' && this.player.rig.clip) this.startAct('block', 'hit1', { speed: 1.25, to: 0.85, cancel: 0.4, end: 0.8, fadeIn: 0.06 });
+    let meet: THREE.Vector3 | null = null;
+    if (how !== 'cut') {
+      const seg = this.shotSeg;
+      seg.a.copy(p.pos).addScaledVector(p.vel, -0.035);
+      seg.b.copy(p.pos).addScaledVector(p.vel, 0.01);
+      meet = this.poseAcross(seg, p.pos.x - p.vel.x, p.pos.z - p.vel.z, 0.28);
+    }
+    const mid = this.tmpV.copy(meet ?? p.pos);
+    this.impacts.spawn(mid, how === 'block' ? IMPACT_BLOCK : IMPACT_DEFLECT, how === 'block' ? 0.9 : 1.2, 0.14);
+    this.emitParticles(mid.x, mid.y, mid.z, how === 'block' ? 10 : 18, 0xffb347, 7, 2, 16, 0.25);
+    this.emitParticles(mid.x, mid.y, mid.z, 6, 0xd8c8a0, 3, 1.5, 14, 0.5); // splinters of the shaft
+    if (how === 'block') sfx.block();
+    else {
+      sfx.clang();
+      this.waveStat.deflects++;
+      this.deflectsTotal++;
+    }
     if (!(TUNE.arrowReflect > 0.5 && front)) {
       this.spawnLabel(P.pos.x, P.pos.y + 2.5, P.pos.z, 'DESVIOU!', '#8fe0c8', 1);
-      return false;
+      // the shot glances off: it tumbles away to the side for a moment, harmless, instead of vanishing on the spot
+      const sp = Math.hypot(p.vel.x, p.vel.z) || 1;
+      const side = Math.random() < 0.5 ? -1 : 1;
+      p.vel.set(-p.vel.x * 0.18 + (-p.vel.z / sp) * side * 7, 3.5 + Math.random() * 2, -p.vel.z * 0.18 + (p.vel.x / sp) * side * 7);
+      p.grav = 18;
+      p.harmless = true;
+      p.life = 0.6;
+      return true;
     }
     const o = p.owner && !p.owner.dead && !p.owner.flee ? p.owner : null;
     let dx = o ? o.pos.x - p.pos.x : -p.vel.x;
@@ -6173,12 +6575,18 @@ export class GameEngine {
   // blades cross, and the player's weapon is turned (for a moment) so its blade lies across that point.
   // Returns the meeting point (null: nothing to pose - a kick, no weapon, no blade).
   private clashPose(e: EnemyInstance): THREE.Vector3 | null {
+    if (e.blade?.limb === 'foot' || !this.readEnemyBlade(e, false, this.clashSeg)) return null;
+    return this.poseAcross(this.clashSeg, e.pos.x, e.pos.z, CLASH_POSE_TIME);
+  }
+
+  // Lays the player's blade across `seg` (a foe's blade, or the path of a shot) for a moment: the blade runs
+  // from the grip toward the meeting point, its edge facing (fx, fz). Returns the meeting point
+  // (null: nothing to pose - no melee weapon in hand).
+  private poseAcross(seg: BladeSeg, fx: number, fz: number, hold: number): THREE.Vector3 | null {
     const P = this.player;
     const w = this.weapons[this.activeWeaponIdx];
     const mesh = P.weaponMeshes[this.activeWeaponIdx];
     if (!P.rig.clip || !mesh || !mesh.visible || !mesh.parent || w.kind !== 'melee' || !BLADE_SEG[w.id]) return null;
-    if (e.blade?.limb === 'foot' || !this.readEnemyBlade(e, false, this.clashSeg)) return null;
-    const seg = this.clashSeg;
     const chest = this.tmpH.set(P.pos.x, P.pos.y + 1.3, P.pos.z);
     const ab = this.tmpV.subVectors(seg.b, seg.a);
     const t = Math.max(0, Math.min(1, chest.clone().sub(seg.a).dot(ab) / Math.max(ab.lengthSq(), 1e-6)));
@@ -6190,12 +6598,12 @@ export class GameEngine {
     if (dist < 0.3 || dist > 2.4) return meet;
     const o = this.clashObj;
     o.position.copy(grip);
-    o.up.set(e.pos.x - grip.x, 0.2, e.pos.z - grip.z).normalize();
+    o.up.set(fx - grip.x, 0.2, fz - grip.z).normalize();
     o.lookAt(meet);
     o.updateMatrixWorld(true);
     const local = mesh.parent.getWorldQuaternion(this.clashQ).invert().multiply(o.quaternion);
     this.endClash();
-    this.clash = { mesh, q: mesh.quaternion.clone(), t: CLASH_POSE_TIME };
+    this.clash = { mesh, q: mesh.quaternion.clone(), t: hold };
     mesh.quaternion.copy(local);
     return meet;
   }
@@ -6220,6 +6628,121 @@ export class GameEngine {
     this.lastParryZoom = this.time;
     this.punchT = 0;
     this.punchDur = strong ? 0.5 : 0.38;
+  }
+
+  // The tip of the blow's blade lights up for an instant (and ticks): guard pressed on it is a perfect parry
+  private tellFlash(e: EnemyInstance, st: EnemyStrike) {
+    const P = this.player.pos;
+    if (Math.hypot(e.pos.x - P.x, e.pos.z - P.z) > st.reach + 2.2) return;
+    const seg = this.clashSeg;
+    const p = this.tmpV;
+    if (!st.limb && this.readEnemyBlade(e, false, seg)) p.copy(seg.b);
+    else p.set(e.pos.x, e.pos.y + 1.3, e.pos.z);
+    const big = e.type === 'boss';
+    this.impacts.spawn(p, IMPACT_TELL, big ? 2 : 1.05, 0.14);
+    sfx.tell();
+  }
+
+  // Starts the defence scene when this parry is worth one (see TUNE.parryScene); false: not this time
+  private startParryScene(e: EnemyInstance, meet: THREE.Vector3 | null, perfect: boolean, thrust: boolean): boolean {
+    const lvl = Math.max(0, Math.min(3, Math.round(TUNE.parryScene)));
+    if (lvl < 1 || this.parryScene || this.cine || this.state !== 'play') return false;
+    if (!this.settings.cinematicCamera) return false;
+    if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return false;
+    const big = e.type === 'boss' || !!e.captain;
+    const worth = perfect || big || lvl >= 3 || (lvl >= 2 && (thrust || this.waveStat.deflects === 1));
+    if (!worth || this.time - this.lastParryScene < PARRY_SCENE_GAP[lvl]) return false;
+    const P = this.player.pos;
+    // a crowd on top of the two fighters would make the shot unreadable (and the pause unfair)
+    let near = 0;
+    for (const o of this.enemies) if (o !== e && !o.dead && !o.flee && !isFodder(o) && Math.hypot(o.pos.x - P.x, o.pos.z - P.z) < 4.5) near++;
+    if (near >= 2 && !big) return false;
+    let ax = e.pos.x - P.x;
+    let az = e.pos.z - P.z;
+    const ad = Math.hypot(ax, az) || 1;
+    ax /= ad;
+    az /= ad;
+    const mx = (P.x + e.pos.x) / 2;
+    const mz = (P.z + e.pos.z) / 2;
+    const dist = this.camera.aspect < 1 ? 4.3 : 3.4;
+    // the camera stands to one side of the fighters, on whichever side no trunk or pillar is in the way
+    const free = (side: number) => {
+      const cx = mx - az * side * dist - ax * 0.5;
+      const cz = mz + ax * side * dist - az * 0.5;
+      return !this.solids.some((so) => so.h > 0.9 && Math.hypot(so.x - cx, so.z - cz) < so.r + 0.7);
+    };
+    this.parrySide = -this.parrySide;
+    let side = this.parrySide;
+    if (!free(side)) side = -side;
+    const camOk = free(side);
+    const heavy = perfect || big;
+    this.parryScene = { t: 0, dur: heavy ? 0.85 : 0.65, e, mid: meet ? meet.clone() : new THREE.Vector3(mx, P.y + 1.35, mz), side, camOk, spark: 0 };
+    this.lastParryScene = this.time;
+    this.triggerSlowmo(heavy ? 0.5 : 0.36, heavy ? 0.2 : 0.3);
+    // the blades hold where they met a little longer, and the player is untouchable for the moment
+    if (this.clash) this.clash.t = Math.max(this.clash.t, 0.34);
+    this.player.inv = Math.max(this.player.inv, 0.35);
+    this.flashFx = Math.max(this.flashFx, heavy ? 0.24 : 0.14);
+    this.spikeFx = Math.max(this.spikeFx, heavy ? 0.45 : 0.28);
+    this.callbacks.onCinematic?.(true, 'duel');
+    return true;
+  }
+
+  private endParryScene() {
+    if (!this.parryScene) return;
+    this.parryScene = null;
+    if (!this.cine) this.callbacks.onCinematic?.(false);
+  }
+
+  // Runs after the normal camera: blends it into the low side shot while the scene lasts
+  private applyParryScene(real: number, look: THREE.Vector3) {
+    const s = this.parryScene;
+    if (!s) return;
+    s.t += real;
+    if (s.t >= s.dur || this.cine || this.state !== 'play') {
+      this.endParryScene();
+      return;
+    }
+    const ss = (a: number, b: number, x: number) => {
+      const k = Math.min(1, Math.max(0, (x - a) / (b - a)));
+      return k * k * (3 - 2 * k);
+    };
+    const w = ss(0, 0.14, s.t) * (1 - ss(s.dur - 0.24, s.dur, s.t));
+    // sparks stream off the crossed blades for the first part of the scene
+    s.spark -= real;
+    if (s.spark <= 0 && s.t < s.dur * 0.65) {
+      s.spark = 0.11;
+      this.emitParticles(s.mid.x, s.mid.y, s.mid.z, 4, 0xffd08a, 6, 1.4, 12, 0.28);
+      if (Math.random() < 0.25) this.impacts.spawn(s.mid, IMPACT_DEFLECT, 0.55 + Math.random() * 0.35, 0.08);
+    }
+    if (!s.camOk || w < 0.001) return;
+    const P = this.player.pos;
+    const e = s.e;
+    let ax = e.pos.x - P.x;
+    let az = e.pos.z - P.z;
+    const ad = Math.hypot(ax, az) || 1;
+    ax /= ad;
+    az /= ad;
+    const f = this.parryFocus.set((P.x + e.pos.x) / 2, P.y + 1.3, (P.z + e.pos.z) / 2);
+    f.x += (s.mid.x - f.x) * 0.4;
+    f.z += (s.mid.z - f.z) * 0.4;
+    const portrait = this.camera.aspect < 1;
+    const dist = portrait ? 4.3 : 3.4;
+    const camX = f.x - az * s.side * dist - ax * 0.5;
+    const camZ = f.z + ax * s.side * dist - az * 0.5;
+    const camY = Math.max(0.5, P.y + 0.95);
+    this.camera.position.x += (camX - this.camera.position.x) * w;
+    this.camera.position.y += (camY - this.camera.position.y) * w;
+    this.camera.position.z += (camZ - this.camera.position.z) * w;
+    look.lerp(f, w);
+    const fov = portrait ? 52 : 44;
+    this.camera.fov += (fov - this.camera.fov) * w;
+    this.camera.updateProjectionMatrix();
+    this.camera.lookAt(look);
+    this.camera.rotateZ(0.04 * s.side * w);
+    // depth of field on the pair (high quality only, like the finisher's)
+    this.cineW = w * 0.6;
+    this.cineFocus.copy(f);
   }
 
   // While the guard is up the player turns toward an arrow or star coming from the side, so a defence
@@ -6318,6 +6841,14 @@ export class GameEngine {
         p.pos.y = 0.05;
         dead = true;
       }
+      if (!dead && p.friendly && !p.bomb) {
+        for (const o of this.objectives) {
+          if (o.dead || !o.active || Math.hypot(p.pos.x - o.x, p.pos.z - o.z) > o.r + 0.25 || p.pos.y > o.h + 0.4) continue;
+          this.damageObjective(o, 1);
+          dead = true;
+          break;
+        }
+      }
       if (!dead && p.friendly) {
         for (const e of this.enemies) {
           if (e.dead || (p.hit && p.hit.has(e))) continue;
@@ -6339,21 +6870,25 @@ export class GameEngine {
             }
           }
         }
-      } else if (!dead && !p.friendly) {
+      } else if (!dead && !p.friendly && !p.harmless) {
         const ranged = TUNE.arrowDirectional > 0.5 && (p.type === 'arrow' || p.type === 'shuriken');
         let handled = false;
         // a weapon swung through its path cuts a shot out of the air (and, facing it, sends it back)
-        if (ranged && swinging && this.player.inv <= 0 && this.bladeCutsShot(p, dt)) {
+        if (ranged && this.player.inv <= 0 && ((swinging && this.bladeCutsShot(p, dt)) || (this.cutActive && this.shotInSwingArc(p)))) {
           handled = true;
           if (!this.defendShot(p, 'cut', this.shotComesFromFront(p))) dead = true;
         }
-        if (!handled && Math.hypot(p.pos.x - this.player.pos.x, p.pos.z - this.player.pos.z) < 0.6) {
+        // a guard held (or pressed in time) facing the shot meets it at the weapon, a step in front of the body;
+        // without one it only matters when it reaches the body
+        const canActNow = this.player.staggerT <= 0 && this.player.inv <= 0;
+        const guarded = ranged && canActNow && this.shotComesFromFront(p) && (this.guarding() || this.time - this.player.guardPressT <= TUNE.parryWindow);
+        if (!handled && Math.hypot(p.pos.x - this.player.pos.x, p.pos.z - this.player.pos.z) < (guarded ? DEFEND_REACH : 0.6)) {
           dead = true;
           const canAct = this.player.staggerT <= 0 && this.player.inv <= 0;
           const mid = this.tmpV.copy(p.pos);
           // only what is faced can be parried or blocked; from the side or behind it just hits
           const front = !ranged || this.shotComesFromFront(p);
-          if (canAct && front && this.time - this.player.guardPressT <= DEFLECT_WINDOW) {
+          if (canAct && front && this.time - this.player.guardPressT <= TUNE.parryWindow) {
             if (ranged) dead = !this.defendShot(p, 'parry', true);
             else {
               this.impacts.spawn(mid, IMPACT_DEFLECT, 1.4, 0.14);
@@ -6362,9 +6897,14 @@ export class GameEngine {
               sfx.clang();
             }
           } else if (canAct && front && this.guarding()) {
-            this.impacts.spawn(mid, IMPACT_BLOCK, 1, 0.1);
-            this.addPlayerPosture(10);
-            sfx.block();
+            if (ranged) {
+              dead = !this.defendShot(p, 'block', true);
+              this.addPlayerPosture(6);
+            } else {
+              this.impacts.spawn(mid, IMPACT_BLOCK, 1, 0.1);
+              this.addPlayerPosture(10);
+              sfx.block();
+            }
           } else {
             const vl = Math.hypot(p.vel.x, p.vel.z) || 1;
             if (canAct && ranged && !front && this.guarding()) this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'NAS COSTAS!', '#ff8a7a', 1.1);
@@ -6464,7 +7004,7 @@ export class GameEngine {
       const off = Math.hypot(q[0] - c, q[1] - c);
       const lim = c - 12;
       if (off > lim) q = [c + ((q[0] - c) / off) * lim, c + ((q[1] - c) / off) * lim];
-      this.mmCtx.fillStyle = post.captured ? '#4fd6a8' : '#ff5a4a';
+      this.mmCtx.fillStyle = post.captured ? '#4fd6a8' : post.locked ? '#6a5a40' : post.castle ? '#ffd166' : '#ff5a4a';
       this.mmCtx.strokeStyle = 'rgba(239,230,210,.85)';
       this.mmCtx.lineWidth = 1.5;
       this.mmCtx.beginPath();
@@ -6516,6 +7056,7 @@ export class GameEngine {
   private stepPlay(dt: number) {
     this.stepProgress(dt);
     this.updatePlayerMovementAndCamera(dt);
+    this.stepBuffer();
     this.updateEnemies(dt);
     this.updateShocks(dt);
     this.updateBolts(dt);
@@ -6534,7 +7075,9 @@ export class GameEngine {
     // a Resistir wave is not over while the clock runs, even with the field empty
     // (Conquista: between posts there is nobody to beat, so nothing is "cleared" until a post is woken)
     const betweenPosts = this.mode === 'conquest' && this.conq.active < 0;
-    if (!alive && this.wave > 0 && !betweenPosts && !(this.goal && !this.goal.done && this.goal.id === 'resistir')) {
+    // (a post of kegs or a drum is not taken while something is left to break)
+    const objectiveLeft = this.mode === 'conquest' && this.conq.active >= 0 && !this.conq.routed && this.postObjectives(this.conq.active).some((o) => !o.dead);
+    if (!alive && this.wave > 0 && !betweenPosts && !objectiveLeft && !(this.goal && !this.goal.done && this.goal.id === 'resistir')) {
       if (!this.clearedShown) {
         this.clearedShown = true;
         const rank = this.waveRank();

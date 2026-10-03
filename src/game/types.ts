@@ -234,6 +234,7 @@ export interface EnemyStrike {
   dmg: number;
   side: number;
   limb?: 'foot'; // a kick: the foot is the weapon
+  warned?: boolean; // the flash that tells the player the blow is about to land has been shown
 }
 
 export interface ProjectileInstance {
@@ -258,6 +259,7 @@ export interface ProjectileInstance {
   noSolid?: boolean;
   owner?: EnemyInstance; // who loosed it (a parried arrow goes back to them)
   reflected?: boolean;
+  harmless?: boolean; // glanced off a weapon: it tumbles away for a moment and hurts no one
 }
 
 export interface GameSettings {

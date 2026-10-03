@@ -9,7 +9,7 @@ import type { AtmosMode } from './game/atmosphere';
 import type { ThemeMode } from './game/theme';
 import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft, ArrowUp, SlidersHorizontal } from 'lucide-react';
 import { TunePanel } from './TunePanel';
-import { loadTune } from './game/tunables';
+import { TUNE, loadTune } from './game/tunables';
 import { getLoadProgress, onLoadProgress } from './game/models';
 import { bankRun, bonusesFor, buyUpgrade, loadMeta, metaPersistent, saveMeta, type MetaSave, type RunSummary } from './game/meta';
 import { ensureDaily, localDate } from './game/missions';
@@ -88,7 +88,7 @@ export default function App() {
   const [posture, setPosture] = useState(0);
   const [heals, setHeals] = useState(3);
   const [dbReady, setDbReady] = useState(false);
-  const [cinematic, setCinematic] = useState<false | 'full' | 'short'>(false);
+  const [cinematic, setCinematic] = useState<false | 'full' | 'short' | 'duel'>(false);
   // progression: permanent Honra upgrades, the run's Honra, level-up cards, boss bar
   const [meta, setMeta] = useState<MetaSave>(() => ensureDaily(loadMeta(), localDate()));
   const metaRef = useRef(meta);
@@ -286,6 +286,21 @@ export default function App() {
   const [sensitivity, setSensitivity] = useState(1.0);
   const [autoCamera, setAutoCamera] = useState(true);
   const [autoTurnStick, setAutoTurnStick] = useState(true);
+  // how often a good parry gets its cut-in (the engine reads TUNE.parryScene; this is the player's own saved choice)
+  const [parryScene, setParryScene] = useState<number>(() => {
+    try {
+      const v = Number(localStorage.getItem('kage_parry_scene'));
+      return localStorage.getItem('kage_parry_scene') !== null && v >= 0 && v <= 3 ? v : TUNE.parryScene;
+    } catch {
+      return TUNE.parryScene;
+    }
+  });
+  useEffect(() => {
+    TUNE.parryScene = parryScene;
+    try {
+      localStorage.setItem('kage_parry_scene', String(parryScene));
+    } catch {}
+  }, [parryScene]);
   const [cineCam, setCineCam] = useState(() => {
     try {
       return localStorage.getItem('kage_cine') !== '0';
@@ -779,7 +794,7 @@ export default function App() {
           <div className="absolute top-[calc(var(--sat)+115px)] right-[calc(var(--sar)+12px)] flex flex-col gap-2 pointer-events-auto">
             <button
               onClick={handleRecenterCamera}
-              className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(239,230,210,0.3)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform"
+              className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(239,230,210,0.3)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform duration-75"
               title="Recentralizar Câmera atrás do Ninja"
               aria-label="Recentralizar Câmera"
             >
@@ -787,7 +802,7 @@ export default function App() {
             </button>
             <button
               onClick={() => setShowSettings(!showSettings)}
-              className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(239,230,210,0.3)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform"
+              className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(239,230,210,0.3)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform duration-75"
               title="Configurações de Câmera e Toque"
               aria-label="Configurações"
             >
@@ -796,7 +811,7 @@ export default function App() {
             {tuneEnabled && (
               <button
                 onClick={() => setShowTune(!showTune)}
-                className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(239,230,210,0.3)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform"
+                className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(239,230,210,0.3)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform duration-75"
                 title="Ajuste de movimento"
                 aria-label="Ajuste de movimento"
               >
@@ -930,7 +945,7 @@ export default function App() {
                 onPointerUp={() => engineRef.current?.guardUp()}
                 onPointerCancel={() => engineRef.current?.guardUp()}
                 onPointerLeave={() => engineRef.current?.guardUp()}
-                className="absolute right-[84px] bottom-[64px] w-[66px] h-[66px] rounded-full border-2 border-[rgba(143,224,200,0.6)] bg-[rgba(22,18,31,0.7)] flex flex-col items-center justify-center pointer-events-auto shadow-md active:bg-[rgba(143,224,200,0.3)] active:scale-95 transition-transform"
+                className="absolute right-[84px] bottom-[64px] w-[66px] h-[66px] rounded-full border-2 border-[rgba(143,224,200,0.6)] bg-[rgba(22,18,31,0.7)] flex flex-col items-center justify-center pointer-events-auto shadow-md active:bg-[rgba(143,224,200,0.3)] active:scale-95 transition-transform duration-75"
                 aria-label="Defesa"
               >
                 <Shield className="w-6 h-6 text-[#8fe0c8] pointer-events-none" />
@@ -955,7 +970,7 @@ export default function App() {
                   e.stopPropagation();
                   engineRef.current?.jump();
                 }}
-                className="absolute right-[164px] bottom-1 w-[50px] h-[50px] rounded-full border border-[rgba(239,230,210,0.4)] bg-[rgba(22,18,31,0.65)] flex flex-col items-center justify-center pointer-events-auto shadow-md active:bg-[rgba(242,166,90,0.4)] active:scale-95 transition-transform"
+                className="absolute right-[164px] bottom-1 w-[50px] h-[50px] rounded-full border border-[rgba(239,230,210,0.4)] bg-[rgba(22,18,31,0.65)] flex flex-col items-center justify-center pointer-events-auto shadow-md active:bg-[rgba(242,166,90,0.4)] active:scale-95 transition-transform duration-75"
                 aria-label="Pulo"
               >
                 <ArrowUp className="w-4 h-4 text-[var(--paper)] pointer-events-none" />
@@ -969,7 +984,7 @@ export default function App() {
                   engineRef.current?.heal();
                 }}
                 disabled={heals <= 0}
-                className={`absolute right-[158px] bottom-[72px] w-[46px] h-[46px] rounded-full border flex items-center justify-center pointer-events-auto shadow-md active:scale-95 transition-transform ${
+                className={`absolute right-[158px] bottom-[72px] w-[46px] h-[46px] rounded-full border flex items-center justify-center pointer-events-auto shadow-md active:scale-95 transition-transform duration-75 ${
                   heals > 0 ? 'border-[rgba(122,255,176,0.6)] bg-[rgba(22,18,31,0.7)]' : 'border-[rgba(239,230,210,0.15)] bg-[rgba(22,18,31,0.4)] opacity-50'
                 }`}
                 aria-label="Cura"
@@ -984,9 +999,9 @@ export default function App() {
       </div>
 
       {/* Deathblow cinematic: letterbox bars and a brushed 忍殺 */}
-      <div className={`fixed inset-0 z-20 pointer-events-none transition-opacity duration-150 ${cinematic === 'full' ? 'opacity-100' : 'opacity-0'}`}>
-        <div className={`absolute left-0 right-0 top-0 bg-black transition-all duration-200 ${cinematic === 'full' ? 'h-[11vh]' : 'h-0'}`} />
-        <div className={`absolute left-0 right-0 bottom-0 bg-black transition-all duration-200 ${cinematic === 'full' ? 'h-[11vh]' : 'h-0'}`} />
+      <div className={`fixed inset-0 z-20 pointer-events-none transition-opacity duration-150 ${cinematic === 'full' || cinematic === 'duel' ? 'opacity-100' : 'opacity-0'}`}>
+        <div className={`absolute left-0 right-0 top-0 bg-black transition-all duration-200 ${cinematic === 'full' ? 'h-[11vh]' : cinematic === 'duel' ? 'h-[6vh]' : 'h-0'}`} />
+        <div className={`absolute left-0 right-0 bottom-0 bg-black transition-all duration-200 ${cinematic === 'full' ? 'h-[11vh]' : cinematic === 'duel' ? 'h-[6vh]' : 'h-0'}`} />
         {cinematic === 'full' && (
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="deathblow-kanji font-serif font-black text-[#e8231a] select-none">忍殺</div>
@@ -1357,6 +1372,20 @@ export default function App() {
                   onChange={(e) => setAutoCamera(e.target.checked)}
                   className="w-4 h-4 accent-[var(--ember)]"
                 />
+              </div>
+
+              <div className="flex items-center justify-between py-1 border-t border-[rgba(239,230,210,0.1)]">
+                <span>Cenas de defesa (aparo):</span>
+                <select
+                  value={parryScene}
+                  onChange={(e) => setParryScene(Number(e.target.value))}
+                  className="bg-[rgba(239,230,210,0.1)] border border-[rgba(239,230,210,0.3)] rounded px-2 py-1 text-xs text-[var(--paper)]"
+                >
+                  <option value={0}>Desligadas</option>
+                  <option value={1}>Raras</option>
+                  <option value={2}>Normais</option>
+                  <option value={3}>Frequentes</option>
+                </select>
               </div>
 
               <div className="flex items-center justify-between py-1 border-t border-[rgba(239,230,210,0.1)]">

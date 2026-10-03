@@ -41,6 +41,11 @@ export const TUNE = {
   arrowCone: 65,
   arrowReflect: 0, // 1: a defended arrow goes back at the archer (off: it just vanishes)
   parryZoom: 1,
+  // parry window (s): a guard pressed this long before the blow lands deflects it; the tighter one is a perfect parry
+  parryWindow: 0.28,
+  perfectWindow: 0.14,
+  // the short cut-in on a defence worth seeing: 0 off, 1 rare, 2 normal, 3 frequent
+  parryScene: 2,
   // fight camera: the frame leans toward the opponent and opens up for a crowd or the Oni (0 = off)
   fightCam: 0.7,
   // glow around the characters' silhouettes (a rim light that helps them read in the dark)
@@ -82,6 +87,9 @@ export const TUNABLES: Tunable[] = [
   { key: 'arrowDirectional', label: 'Flecha: só defende de frente ou cortando com a espada (0/1)', min: 0, max: 1, step: 1 },
   { key: 'arrowCone', label: 'Flecha: cone frontal da defesa (graus)', min: 30, max: 120, step: 5 },
   { key: 'arrowReflect', label: 'Flecha: rebater de volta no arqueiro (0/1)', min: 0, max: 1, step: 1 },
+  { key: 'parryWindow', label: 'Aparo: janela para apertar a defesa antes do golpe (s)', min: 0.1, max: 0.4, step: 0.01 },
+  { key: 'perfectWindow', label: 'Aparo perfeito: janela (s)', min: 0.04, max: 0.25, step: 0.01 },
+  { key: 'parryScene', label: 'Cenas de defesa (0 desliga, 1 rara, 2 normal, 3 frequente)', min: 0, max: 3, step: 1 },
   { key: 'parryZoom', label: 'Zoom curto em algumas defesas (0/1)', min: 0, max: 1, step: 1 },
   { key: 'fightCam', label: 'Câmera de luta: enquadra o oponente e abre com multidão (0 = desliga)', min: 0, max: 1, step: 0.05 },
   { key: 'rim', label: 'Brilho de contorno dos personagens (×, 0 = sem brilho)', min: 0, max: 1.5, step: 0.05 },
