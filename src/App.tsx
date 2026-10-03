@@ -17,6 +17,7 @@ import { Missions } from './ui/Missions';
 import { PlayerName, type NameMode } from './ui/PlayerName';
 import { Ranking } from './ui/Ranking';
 import { ModeChip, ModeScreen, modeNote, type GameMode } from './ui/ModePicker';
+import { OfflineStatus, UpdateBanner } from './ui/Offline';
 import type { RunBoard } from './ui/RunSummary';
 import { confirmedThisSession, confirmSession, fetchRanking, flushPending, loadPlayer, rankingEnabled, savePlayer, submitScore, type Player } from './game/ranking';
 import type { CardOffer } from './game/cards';
@@ -1033,6 +1034,8 @@ export default function App() {
               <ModeChip mode={gameMode ?? 'waves'} status={{ rankOn, rankActive, practice: practiceUrl }} onChange={() => setChoosingMode(true)} />
             </div>
 
+            <OfflineStatus />
+
             <Missions meta={meta} today={localDate()} />
 
             {/* Kage is hidden for now (kept in code, not deleted, in case it comes back) -
@@ -1281,6 +1284,8 @@ export default function App() {
           onRename={() => setNameMode('rename')}
         />
       )}
+
+      <UpdateBanner show={gameState !== 'play'} />
 
       {/* Level-up cards */}
       {gameState === 'play' && cardOffer && <CardPicker level={level} offer={cardOffer} onPick={(id) => engineRef.current?.pickCard(id)} />}
