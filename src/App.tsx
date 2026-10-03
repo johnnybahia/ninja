@@ -852,7 +852,7 @@ export default function App() {
 
           {/* Combo indicator com feedback de sangue e impacto */}
           {combo > 1 && (
-            <div className="absolute left-1/2 top-[calc(var(--sat)+130px)] -translate-x-1/2 text-center pointer-events-none drop-shadow-2xl transition-all short:left-[calc(var(--sal)+12px)] short:top-[calc(var(--sat)+88px)] short:translate-x-0 short:text-left">
+            <div className="absolute left-1/2 top-[calc(var(--sat)+130px)] -translate-x-1/2 text-center pointer-events-none drop-shadow-2xl transition-all short:left-[calc(var(--sal)+12px)] short:top-[calc(var(--sat)+124px)] short:translate-x-0 short:text-left">
               <div className="font-serif text-xl sm:text-2xl short:text-base font-black tracking-wider bg-linear-to-r from-[#ff4d4d] via-[#ffd166] to-[#ff2a45] bg-clip-text text-transparent drop-shadow-[0_0_16px_rgba(230,0,38,0.7)] animate-pulse">
                 {combo}× GOLPES!
               </div>
@@ -883,7 +883,7 @@ export default function App() {
 
           {/* Player posture: grows from the center; red and pulsing near a guard break */}
           <div
-            className={`absolute left-1/2 -translate-x-1/2 bottom-[calc(var(--sab)+196px)] w-[min(46vw,220px)] short:left-[calc(var(--sal)+12px)] short:translate-x-0 short:bottom-auto short:top-[calc(var(--sat)+76px)] short:w-[min(30vw,170px)] transition-opacity duration-300 pointer-events-none ${
+            className={`absolute left-1/2 -translate-x-1/2 bottom-[calc(var(--sab)+196px)] w-[min(46vw,220px)] short:left-[calc(var(--sal)+12px)] short:translate-x-0 short:bottom-auto short:top-[calc(var(--sat)+110px)] short:w-[min(30vw,170px)] transition-opacity duration-300 pointer-events-none ${
               posture > 0.02 ? 'opacity-100' : 'opacity-0'
             }`}
           >
