@@ -6506,7 +6506,7 @@ export class GameEngine {
     const dx = p.pos.x - P.pos.x;
     const dz = p.pos.z - P.pos.z;
     const d = Math.hypot(dx, dz);
-    if (d > 2.1 || d < 0.2 || p.pos.y < 0.3 || p.pos.y > 2.3) return false;
+    if (d > 2.6 || d < 0.2 || p.pos.y < 0.3 || p.pos.y > 2.3) return false;
     return (dx * Math.sin(P.yaw) + dz * Math.cos(P.yaw)) / d >= Math.cos(1.35);
   }
 
