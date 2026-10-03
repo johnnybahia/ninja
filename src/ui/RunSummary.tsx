@@ -25,7 +25,9 @@ export function RunSummary({
   onAgain,
   onBuy,
   onTemple,
-  onArsenal
+  onArsenal,
+  rank,
+  onRanking
 }: {
   result: RunResult;
   meta: MetaSave;
@@ -35,6 +37,8 @@ export function RunSummary({
   onBuy: (id: string) => void;
   onTemple: () => void;
   onArsenal: () => void;
+  rank?: { rank: number; total: number } | null; // place in the global ranking, once known
+  onRanking?: () => void;
 }) {
   const s = result.summary;
   const newRecord = s.score > result.prevBest;
@@ -66,6 +70,11 @@ export function RunSummary({
               <span>{result.prevBest > 0 ? `faltaram ${(result.prevBest - s.score + 1).toLocaleString('pt-BR')} para o recorde` : 'sem recorde ainda'}</span>
             )}
           </div>
+          {rank && (
+            <div className="text-xs text-[var(--paper)]/80 mt-0.5">
+              Ranking: <b className="text-[var(--ember)]">#{rank.rank}</b> de {rank.total.toLocaleString('pt-BR')}
+            </div>
+          )}
           {s.ranks.length > 0 && (
             <div className="flex justify-center gap-1.5 mt-2">
               {s.ranks.map((r, i) => (
@@ -180,6 +189,11 @@ export function RunSummary({
             <button onClick={onTemple} className="flex items-center gap-1.5 font-bold text-sm border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-5 py-2 rounded-md active:scale-95 transition-all cursor-pointer">
               <span className="font-serif text-[var(--ember)]">誉</span> Templo
             </button>
+            {onRanking && (
+              <button onClick={onRanking} className="flex items-center gap-1.5 font-bold text-sm border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-5 py-2 rounded-md active:scale-95 transition-all cursor-pointer">
+                <span className="font-serif text-[var(--ember)]">頂</span> Ranking
+              </button>
+            )}
             <button onClick={onArsenal} className="flex items-center gap-1.5 font-bold text-sm border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-5 py-2 rounded-md active:scale-95 transition-all cursor-pointer">
               <Swords className="w-4 h-4 text-[var(--ember)]" /> Trocar armas
             </button>
