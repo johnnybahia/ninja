@@ -181,6 +181,8 @@ const IMPACT_BLOCK = new THREE.Color(1.8, 1.5, 1.1);
 const DEFLECT_WINDOW = 0.2;
 const CUT_MIN_SPEED = 5; // m/s: the tip must be moving at least this fast to cut a shot out of the air
 const SHOT_BACK_SPEED = 26;
+const PERFECT_PARRY = 0.09; // a guard pressed this close to the blow is a perfect parry
+const CLASH_POSE_TIME = 0.2; // how long the weapon is held where the blades met
 const GHOST_DASH = new THREE.Color(0x2a2464);
 const GHOST_PERFECT = new THREE.Color(0x6a4a18);
 const DUST_BASE = new THREE.Color(0.55, 0.5, 0.44); // seconds after pressing guard that an incoming strike is deflected
@@ -481,6 +483,13 @@ export class GameEngine {
   private lastThreatKey = '';
   private threatT = 0;
   private lastParryZoom = -99;
+  // the weapon held where the blades met for a moment after a parry, and the fight camera's lean
+  private clash: { mesh: THREE.Object3D; q: THREE.Quaternion; t: number } | null = null;
+  private clashSeg = makeSeg();
+  private clashObj = new THREE.Object3D();
+  private clashQ = new THREE.Quaternion();
+  private fightLead = new THREE.Vector3();
+  private camExtra = 0;
   // enemies of the wave waiting to step in, and how many of each kind may be in the fight
   // Conquista mode (see outposts.ts): the field has enemy posts; walking up to one wakes its
   // garrison, whose captain you defeat to take it. Each post is a "wave" for scaling and Honra.
@@ -952,6 +961,7 @@ export class GameEngine {
     this.ghosts.clear();
 
     this.world.props.reset();
+    this.endClash();
     this.clearConquest();
     this.cardLv = {};
     this.cardOffer = null;
@@ -2686,6 +2696,7 @@ export class GameEngine {
   ): PlayerAct | null {
     const ctl = this.player.rig.clip;
     if (!ctl) return null;
+    this.endClash();
     const shot = ctl.play(clip, { fadeIn: 0.1, fadeOut: 0.3, ...o });
     if (!shot) return null;
     const a: PlayerAct = {
@@ -4404,22 +4415,36 @@ export class GameEngine {
       this.waveStat.deflects++;
       this.deflectsTotal++;
       this.faceEnemy(e);
-      const mid = contact ? this.tmpV.copy(contact) : this.tmpV.set(this.player.pos.x - nx * 0.75, this.player.pos.y + 1.35, this.player.pos.z - nz * 0.75);
-      this.impacts.spawn(mid, IMPACT_DEFLECT, st.kind === 'thrust' ? 2.4 : 1.9, 0.16);
-      this.emitParticles(mid.x, mid.y, mid.z, 26, 0xffb347, 9, 2.2, 18, 0.32);
-      this.hitstop = 0.075;
-      this.lastHS = performance.now();
-      this.shake = Math.max(this.shake, 0.2);
-      this.fovKick = Math.min(this.fovKick, -3);
+      // a perfect parry (guard pressed right on the blow) pays more: stamina back, the foe's posture
+      // hit harder, a longer freeze and a flash; any parry brings the weapon to where the blades meet
+      const perfect = this.time - this.player.guardPressT <= PERFECT_PARRY;
       this.playerDeflectAnim();
-      this.addPlayerPosture(3);
+      const meet = this.clashPose(e);
+      const mid = meet ? this.tmpV.copy(meet) : contact ? this.tmpV.copy(contact) : this.tmpV.set(this.player.pos.x - nx * 0.75, this.player.pos.y + 1.35, this.player.pos.z - nz * 0.75);
+      this.impacts.spawn(mid, IMPACT_DEFLECT, (st.kind === 'thrust' ? 2.4 : 1.9) * (perfect ? 1.35 : 1), perfect ? 0.22 : 0.16);
+      this.emitParticles(mid.x, mid.y, mid.z, perfect ? 40 : 26, perfect ? 0xfff0b0 : 0xffb347, perfect ? 11 : 9, 2.2, 18, 0.32);
+      this.hitstop = perfect ? 0.1 : 0.075;
+      this.lastHS = performance.now();
+      this.shake = Math.max(this.shake, perfect ? 0.3 : 0.2);
+      this.fovKick = Math.min(this.fovKick, perfect ? -4.5 : -3);
+      this.addPlayerPosture(perfect ? 0 : 3);
       sfx.clang();
-      if (st.kind === 'thrust') {
+      if (perfect) {
+        this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'APARO PERFEITO!', '#ffd166', 1.45);
+        this.triggerSlowmo(0.22, 0.38);
+        this.player.st = Math.min(this.player.maxSt, this.player.st + 10);
+        this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
+        if (this.settings.cinematicCamera) {
+          this.flashFx = Math.max(this.flashFx, 0.14);
+          this.spikeFx = Math.max(this.spikeFx, 0.3);
+        }
+        this.addEnemyPosture(e, 12);
+      } else if (st.kind === 'thrust') {
         this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'CONTRA-ATAQUE!', '#ffd166', 1.3);
         this.triggerSlowmo(0.35, 0.3);
-      }
+      } else this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.4, this.player.pos.z, 'APAROU!', '#ffb347', 1);
       // a short push-in on the defences worth seeing: the wave's first, a thrust, the Oni, a captain
-      if (st.kind === 'thrust' || this.waveStat.deflects === 1 || e.type === 'boss' || e.captain) this.parryZoom(st.kind === 'thrust');
+      if (perfect || st.kind === 'thrust' || this.waveStat.deflects === 1 || e.type === 'boss' || e.captain) this.parryZoom(perfect || st.kind === 'thrust');
       e.staggerT = e.type === 'boss' ? 0.18 : 0.32;
       e.anim = { kind: 'erecoil', t: 0, dur: 0.32, side: 0 };
       this.enemyClip(e, 'hit1', { from: 0.1, to: 0.75, speed: 1.6 });
@@ -5093,6 +5118,45 @@ export class GameEngine {
     const leadTarget = this.player.vel.clone().multiplyScalar(TUNE.camLeadAmount);
     this.camLead.lerp(leadTarget, 1 - Math.exp(-4 * dt));
     const lookTarget = camTarget.clone().add(this.camLead);
+    // fight camera: the frame leans toward the opponent (the one swinging, else the closest) and opens
+    // up for a crowd or the Oni, so the exchange is the picture and nobody hides behind the player
+    let leadX = 0;
+    let leadZ = 0;
+    let extra = 0;
+    const fc = this.state === 'play' && !this.cine && !(typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) ? TUNE.fightCam : 0;
+    if (fc > 0) {
+      let focus: EnemyInstance | null = null;
+      let best = 0;
+      let crowd = 0;
+      let bossNear = false;
+      for (const e of this.enemies) {
+        if (e.dead || e.flee) continue;
+        const d = Math.hypot(e.pos.x - this.player.pos.x, e.pos.z - this.player.pos.z);
+        if (d < 7 && !isFodder(e)) crowd++;
+        if (e.type === 'boss' && d < 14) bossNear = true;
+        if (d > 9 || isFodder(e)) continue;
+        const sc = (e.strike || e.mode === 'attack' ? 2 : 1) / (0.5 + d);
+        if (sc > best) {
+          best = sc;
+          focus = e;
+        }
+      }
+      if (focus) {
+        const dx = focus.pos.x - this.player.pos.x;
+        const dz = focus.pos.z - this.player.pos.z;
+        const d = Math.hypot(dx, dz) || 1;
+        const k = Math.min(2.2, d * 0.3) / d;
+        leadX = dx * k * fc;
+        leadZ = dz * k * fc;
+      }
+      extra = fc * ((crowd >= 3 ? 0.9 : crowd === 2 ? 0.4 : 0) + (bossNear ? 1.6 : 0));
+    }
+    const fk = 1 - Math.exp(-3.5 * dt);
+    this.fightLead.x += (leadX - this.fightLead.x) * fk;
+    this.fightLead.z += (leadZ - this.fightLead.z) * fk;
+    this.camExtra += (extra - this.camExtra) * (1 - Math.exp(-2.5 * dt));
+    lookTarget.x += this.fightLead.x;
+    lookTarget.z += this.fightLead.z;
     this.fovKick *= Math.exp(-5 * dt);
     // special-move punch-in: a quick push toward the fighter that eases back out
     let punch = 0;
@@ -5112,7 +5176,7 @@ export class GameEngine {
       Math.cos(this.camYaw) * cp
     );
 
-    const want = (this.camDistOverride ?? (this.camera.aspect < 1 ? 10.5 : 7.2)) * (1 - 0.3 * punch);
+    const want = ((this.camDistOverride ?? (this.camera.aspect < 1 ? 10.5 : 7.2)) + this.camExtra) * (1 - 0.3 * punch);
     // pull in when a trunk, pillar or pole stands between the camera and the player
     let limit = want;
     for (const so of this.solids) {
@@ -6105,6 +6169,49 @@ export class GameEngine {
     return true;
   }
 
+  // The swords really meet: the point of the enemy's blade nearest the player's chest is where the
+  // blades cross, and the player's weapon is turned (for a moment) so its blade lies across that point.
+  // Returns the meeting point (null: nothing to pose - a kick, no weapon, no blade).
+  private clashPose(e: EnemyInstance): THREE.Vector3 | null {
+    const P = this.player;
+    const w = this.weapons[this.activeWeaponIdx];
+    const mesh = P.weaponMeshes[this.activeWeaponIdx];
+    if (!P.rig.clip || !mesh || !mesh.visible || !mesh.parent || w.kind !== 'melee' || !BLADE_SEG[w.id]) return null;
+    if (e.blade?.limb === 'foot' || !this.readEnemyBlade(e, false, this.clashSeg)) return null;
+    const seg = this.clashSeg;
+    const chest = this.tmpH.set(P.pos.x, P.pos.y + 1.3, P.pos.z);
+    const ab = this.tmpV.subVectors(seg.b, seg.a);
+    const t = Math.max(0, Math.min(1, chest.clone().sub(seg.a).dot(ab) / Math.max(ab.lengthSq(), 1e-6)));
+    const meet = seg.a.clone().addScaledVector(ab, t);
+    // pose the weapon: its blade from the grip toward the meeting point, its edge facing the foe
+    P.rig.root.updateMatrixWorld(true);
+    const grip = mesh.getWorldPosition(new THREE.Vector3());
+    const dist = grip.distanceTo(meet);
+    if (dist < 0.3 || dist > 2.4) return meet;
+    const o = this.clashObj;
+    o.position.copy(grip);
+    o.up.set(e.pos.x - grip.x, 0.2, e.pos.z - grip.z).normalize();
+    o.lookAt(meet);
+    o.updateMatrixWorld(true);
+    const local = mesh.parent.getWorldQuaternion(this.clashQ).invert().multiply(o.quaternion);
+    this.endClash();
+    this.clash = { mesh, q: mesh.quaternion.clone(), t: CLASH_POSE_TIME };
+    mesh.quaternion.copy(local);
+    return meet;
+  }
+
+  private endClash() {
+    if (!this.clash) return;
+    this.clash.mesh.quaternion.copy(this.clash.q);
+    this.clash = null;
+  }
+
+  private stepClash(dt: number) {
+    if (!this.clash) return;
+    this.clash.t -= dt;
+    if (this.clash.t <= 0) this.endClash();
+  }
+
   // A short push-in on a defence: rare, brief and never a lock on the controls
   private parryZoom(strong: boolean) {
     if (!this.settings.cinematicCamera || TUNE.parryZoom < 0.5) return;
@@ -6413,6 +6520,7 @@ export class GameEngine {
     this.updateShocks(dt);
     this.updateBolts(dt);
     this.updateProjectiles(dt);
+    this.stepClash(dt);
     this.assistGuardFacing(dt);
     this.stepThreats(dt);
     this.updatePickups(dt);
