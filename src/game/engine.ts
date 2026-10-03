@@ -2529,21 +2529,43 @@ export class GameEngine {
     canvas.height = 72;
     const ctx = canvas.getContext('2d');
     if (ctx) {
-      // long words shrink to fit the label instead of being cut at its edges
-      let size = 42;
-      ctx.font = `bold ${size}px "Zen Kaku Gothic New", sans-serif`;
-      while (size > 18 && ctx.measureText(text).width > 176) {
-        size -= 2;
+      // long text shrinks to fit the label instead of being cut at its edges; a long phrase breaks in two
+      const fit = (t: string, max: number, floor: number) => {
+        let size = max;
         ctx.font = `bold ${size}px "Zen Kaku Gothic New", sans-serif`;
+        while (size > floor && ctx.measureText(t).width > 176) {
+          size -= 2;
+          ctx.font = `bold ${size}px "Zen Kaku Gothic New", sans-serif`;
+        }
+        return size;
+      };
+      let lines = [text];
+      if (fit(text, 42, 30) === 30 && ctx.measureText(text).width > 176 && text.includes(' ')) {
+        // break at the space nearest the middle
+        let cut = -1;
+        for (let i = 0; i < text.length; i++) if (text[i] === ' ' && (cut < 0 || Math.abs(i - text.length / 2) < Math.abs(cut - text.length / 2))) cut = i;
+        lines = [text.slice(0, cut), text.slice(cut + 1)];
       }
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.lineJoin = 'round';
       ctx.lineWidth = 7;
       ctx.strokeStyle = 'rgba(10,6,4,0.8)';
-      ctx.strokeText(text, 96, 38);
       ctx.fillStyle = color;
-      ctx.fillText(text, 96, 38);
+      if (lines.length === 1) {
+        fit(text, 42, 18);
+        ctx.strokeText(text, 96, 38);
+        ctx.fillText(text, 96, 38);
+      } else {
+        const size = Math.min(fit(lines[0], 30, 16), fit(lines[1], 30, 16));
+        ctx.font = `bold ${size}px "Zen Kaku Gothic New", sans-serif`;
+        ctx.lineWidth = 6;
+        lines.forEach((ln, k) => {
+          const y = 22 + k * 30;
+          ctx.strokeText(ln, 96, y);
+          ctx.fillText(ln, 96, y);
+        });
+      }
     }
     const tex = new THREE.CanvasTexture(canvas);
     const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: false });
