@@ -14,6 +14,9 @@ import { getLoadProgress, onLoadProgress } from './game/models';
 import { bankRun, bonusesFor, buyUpgrade, loadMeta, metaPersistent, saveMeta, type MetaSave, type RunSummary } from './game/meta';
 import { ensureDaily, localDate } from './game/missions';
 import { Missions } from './ui/Missions';
+import { PlayerName, type NameMode } from './ui/PlayerName';
+import { Ranking } from './ui/Ranking';
+import { confirmedThisSession, confirmSession, fetchRanking, flushPending, loadPlayer, rankingEnabled, savePlayer, submitScore, type Player } from './game/ranking';
 import type { CardOffer } from './game/cards';
 import { CardPicker } from './ui/CardPicker';
 import { Temple } from './ui/Temple';
@@ -88,6 +91,29 @@ export default function App() {
   const metaRef = useRef(meta);
   const [persistOk, setPersistOk] = useState(() => metaPersistent());
   const [showTemple, setShowTemple] = useState(false);
+  // global ranking: who is playing (saved on this browser), whether they confirmed it this
+  // session, and the place the last run earned
+  const rankOn = rankingEnabled();
+  const [player, setPlayer] = useState<Player | null>(() => (rankOn ? loadPlayer() : null));
+  const [rankActive, setRankActive] = useState(() => rankOn && !!loadPlayer() && confirmedThisSession());
+  const [nameMode, setNameMode] = useState<NameMode | null>(() => (!rankOn ? null : loadPlayer() ? (confirmedThisSession() ? null : 'confirm') : 'new'));
+  const [showRanking, setShowRanking] = useState(false);
+  const [rankRefresh, setRankRefresh] = useState(0);
+  const [runRank, setRunRank] = useState<{ rank: number; total: number } | null>(null);
+  const rankActiveRef = useRef(rankActive);
+  rankActiveRef.current = rankActive;
+  useEffect(() => {
+    // a score that couldn't be sent last time goes out now
+    if (rankActive) void flushPending();
+  }, [rankActive]);
+  const finishName = (p: Player) => {
+    savePlayer(p);
+    confirmSession();
+    setPlayer(p);
+    setRankActive(true);
+    setNameMode(null);
+    void flushPending().then(() => setRankRefresh((n) => n + 1));
+  };
   const [runHonor, setRunHonor] = useState(0);
   const [cardOffer, setCardOffer] = useState<CardOffer[] | null>(null);
   const [bossBar, setBossBar] = useState<{ hp: number; max: number; fury: boolean; name: string } | null>(null);
@@ -309,7 +335,7 @@ export default function App() {
       onCardOffer: (offer) => setCardOffer(offer),
       onBossChange: (b) => setBossBar(b),
       onWaveMod: (m) => setWaveMod(m),
-      onGameOver: (finalScore, _wave, _level, _kills, _combo, summary) => {
+      onGameOver: (finalScore, wave, _level, _kills, _combo, summary) => {
         const prevBest = bestScoreRef.current;
         if (finalScore > prevBest && !engineRef.current?.practice) {
           bestScoreRef.current = finalScore;
@@ -320,6 +346,16 @@ export default function App() {
         }
         setRunResult(bank(summary, prevBest));
         setGameState('over');
+        setRunRank(null);
+        if (rankActiveRef.current && !engineRef.current?.practice) {
+          // best-effort and off the game's path: the run screen shows the place once it arrives
+          void submitScore(finalScore, wave)
+            .then(() => fetchRanking(loadPlayer()?.id))
+            .then((d) => {
+              if (d && !d.stale && d.me) setRunRank({ rank: d.me.rank, total: d.total });
+              setRankRefresh((n) => n + 1);
+            });
+        }
       }
     });
 
@@ -932,13 +968,24 @@ export default function App() {
                 Recorde: {bestScore.toLocaleString('pt-BR')} pontos
               </p>
             )}
-            <button
-              onClick={() => setShowTemple(true)}
-              className="mb-4 inline-flex items-center gap-2 text-xs font-bold border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-4 py-1.5 rounded-full active:scale-95 transition-all cursor-pointer"
-            >
-              <span className="font-serif text-base text-[var(--ember)] leading-none">誉</span>
-              Templo da Honra · {meta.honor.toLocaleString('pt-BR')}
-            </button>
+            <div className="mb-4 flex flex-wrap items-center justify-center gap-2">
+              <button
+                onClick={() => setShowTemple(true)}
+                className="inline-flex items-center gap-2 text-xs font-bold border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-4 py-1.5 rounded-full active:scale-95 transition-all cursor-pointer"
+              >
+                <span className="font-serif text-base text-[var(--ember)] leading-none">誉</span>
+                Templo da Honra · {meta.honor.toLocaleString('pt-BR')}
+              </button>
+              {rankOn && (
+                <button
+                  onClick={() => setShowRanking(true)}
+                  className="inline-flex items-center gap-2 text-xs font-bold border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-4 py-1.5 rounded-full active:scale-95 transition-all cursor-pointer"
+                >
+                  <span className="font-serif text-base text-[var(--ember)] leading-none">頂</span>
+                  Ranking
+                </button>
+              )}
+            </div>
 
             <Missions meta={meta} today={localDate()} />
 
@@ -1135,11 +1182,32 @@ export default function App() {
           onBuy={buy}
           onTemple={() => setShowTemple(true)}
           onArsenal={() => openArsenal(charId)}
+          rank={runRank}
+          onRanking={rankOn ? () => setShowRanking(true) : undefined}
         />
       )}
 
       {/* Level-up cards */}
       {gameState === 'play' && cardOffer && <CardPicker level={level} offer={cardOffer} onPick={(id) => engineRef.current?.pickCard(id)} />}
+
+      {showRanking && (
+        <Ranking
+          playerId={player?.id ?? null}
+          playerName={player?.name ?? null}
+          active={rankActive}
+          refreshKey={rankRefresh}
+          onJoin={() => {
+            setShowRanking(false);
+            setNameMode(player ? 'confirm' : 'new');
+          }}
+          onRename={() => {
+            setShowRanking(false);
+            setNameMode('rename');
+          }}
+          onClose={() => setShowRanking(false)}
+        />
+      )}
+      {nameMode && <PlayerName mode={nameMode} current={player} onMode={setNameMode} onDone={finishName} onSkip={() => setNameMode(null)} />}
 
       {showTemple && <Temple meta={meta} persistent={persistOk} onBuy={buy} onClose={() => setShowTemple(false)} />}
 
