@@ -1,7 +1,9 @@
 /**
  * Ranking do Kage - Google Apps Script (Web App) + Planilha Google.
  *
- * Instalação: veja scripts/ranking/README.md. Guarda uma linha por jogador:
+ * Instalação: veja scripts/ranking/README.md. Funciona como projeto avulso em script.google.com
+ * (cria sozinho a planilha "Kage Ranking" no seu Drive na primeira chamada) ou colado numa
+ * planilha existente (Extensões > Apps Script). Guarda uma linha por jogador:
  *   id | nome | pontos | onda | partidas | atualizado
  *
  * POST (corpo JSON enviado como text/plain, para não gerar preflight de CORS):
@@ -56,10 +58,10 @@ function doPost(e) {
   var name = cleanName_(body.name);
   if (!name) return out_({ ok: false, error: 'bad_name' });
 
+  var sheet = sheet_(); // may create the spreadsheet (takes the script lock itself): before ours
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) return out_({ ok: false, error: 'busy' });
   try {
-    var sheet = sheet_();
     var rows = readRows_();
     var mine = null;
     var taken = false;
@@ -108,8 +110,36 @@ function out_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
 
+// A planilha: a que contém o script (se ele estiver dentro de uma) ou a que ele mesmo criou
+function spreadsheet_() {
+  var active = SpreadsheetApp.getActiveSpreadsheet();
+  if (active) return active;
+  var props = PropertiesService.getScriptProperties();
+  var id = props.getProperty('SHEET_ID');
+  if (!id) {
+    var lock = LockService.getScriptLock();
+    lock.waitLock(20000);
+    try {
+      id = props.getProperty('SHEET_ID');
+      if (!id) {
+        id = SpreadsheetApp.create('Kage Ranking').getId();
+        props.setProperty('SHEET_ID', id);
+      }
+    } finally {
+      lock.releaseLock();
+    }
+  }
+  return SpreadsheetApp.openById(id);
+}
+
+// Opcional: rode uma vez no editor para criar a planilha e ver o endereço dela no registro
+function setup() {
+  sheet_();
+  Logger.log(spreadsheet_().getUrl());
+}
+
 function sheet_() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = spreadsheet_();
   var sh = ss.getSheetByName(SHEET_NAME);
   if (!sh) {
     sh = ss.insertSheet(SHEET_NAME);
