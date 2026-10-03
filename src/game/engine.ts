@@ -176,12 +176,14 @@ const IMPACT_HURT = new THREE.Color(2.6, 0.5, 0.35);
 const IMPACT_DODGE = new THREE.Color(1.2, 2.2, 2.6);
 const IMPACT_DEFLECT = new THREE.Color(3.2, 1.7, 0.45);
 const IMPACT_BLOCK = new THREE.Color(1.8, 1.5, 1.1);
+const IMPACT_TELL = new THREE.Color(2.8, 2.5, 1.3);
 
 // Sekiro-style combat tuning
-const DEFLECT_WINDOW = 0.2;
+// (the parry windows live in TUNE: parryWindow / perfectWindow)
+const TELL_LEAD = 0.17; // the blow's flash comes this long before it lands: pressing guard now is a perfect parry
+const PARRY_SCENE_GAP = [0, 14, 7, 3.5]; // seconds between two defence scenes, by TUNE.parryScene
 const CUT_MIN_SPEED = 5; // m/s: the tip must be moving at least this fast to cut a shot out of the air
 const SHOT_BACK_SPEED = 26;
-const PERFECT_PARRY = 0.09; // a guard pressed this close to the blow is a perfect parry
 const CLASH_POSE_TIME = 0.2; // how long the weapon is held where the blades met
 const GHOST_DASH = new THREE.Color(0x2a2464);
 const GHOST_PERFECT = new THREE.Color(0x6a4a18);
@@ -252,7 +254,7 @@ export interface GameEngineCallbacks {
   onGameOver: (score: number, wave: number, level: number, kills: number, bestCombo: number, summary: RunSummary) => void;
   onQualityChange?: (setting: QualitySetting, effective: Quality) => void;
   onPostureChange?: (posture: number, max: number) => void;
-  onCinematic?: (active: boolean, kind?: 'full' | 'short') => void;
+  onCinematic?: (active: boolean, kind?: 'full' | 'short' | 'duel') => void;
   onDeathblowReady?: (ready: boolean) => void;
   onHealsChange?: (heals: number) => void;
   onCardOffer?: (offer: CardOffer[] | null) => void;
@@ -483,6 +485,12 @@ export class GameEngine {
   private lastThreatKey = '';
   private threatT = 0;
   private lastParryZoom = -99;
+  // The cut-in on a defence worth seeing: the camera swings low to the side of the two fighters, the
+  // blades hold where they met, a short slow-motion; the controls stay live and it never lasts long
+  private parryScene: { t: number; dur: number; e: EnemyInstance; mid: THREE.Vector3; side: number; camOk: boolean; spark: number } | null = null;
+  private lastParryScene = -99;
+  private parrySide = 1;
+  private parryFocus = new THREE.Vector3();
   // the weapon held where the blades met for a moment after a parry, and the fight camera's lean
   private clash: { mesh: THREE.Object3D; q: THREE.Quaternion; t: number } | null = null;
   private clashSeg = makeSeg();
@@ -1031,6 +1039,7 @@ export class GameEngine {
     this.flashFx = 0;
     this.spikeFx = 0;
     this.punchT = 1;
+    this.parryScene = null;
     this.callbacks.onCinematic?.(false);
     this.act = null;
     this.actQueued = false;
@@ -4410,14 +4419,14 @@ export class GameEngine {
     }
 
     const canAct = this.player.staggerT <= 0;
-    const deflect = canAct && st.kind !== 'sweep' && this.time - this.player.guardPressT <= DEFLECT_WINDOW;
+    const deflect = canAct && st.kind !== 'sweep' && this.time - this.player.guardPressT <= TUNE.parryWindow;
     if (deflect) {
       this.waveStat.deflects++;
       this.deflectsTotal++;
       this.faceEnemy(e);
       // a perfect parry (guard pressed right on the blow) pays more: stamina back, the foe's posture
       // hit harder, a longer freeze and a flash; any parry brings the weapon to where the blades meet
-      const perfect = this.time - this.player.guardPressT <= PERFECT_PARRY;
+      const perfect = this.time - this.player.guardPressT <= TUNE.perfectWindow;
       this.playerDeflectAnim();
       const meet = this.clashPose(e);
       const mid = meet ? this.tmpV.copy(meet) : contact ? this.tmpV.copy(contact) : this.tmpV.set(this.player.pos.x - nx * 0.75, this.player.pos.y + 1.35, this.player.pos.z - nz * 0.75);
@@ -4429,9 +4438,10 @@ export class GameEngine {
       this.fovKick = Math.min(this.fovKick, perfect ? -4.5 : -3);
       this.addPlayerPosture(perfect ? 0 : 3);
       sfx.clang();
+      const scene = this.startParryScene(e, meet, perfect, st.kind === 'thrust');
       if (perfect) {
         this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'APARO PERFEITO!', '#ffd166', 1.45);
-        this.triggerSlowmo(0.22, 0.38);
+        if (!scene) this.triggerSlowmo(0.22, 0.38);
         this.player.st = Math.min(this.player.maxSt, this.player.st + 10);
         this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
         if (this.settings.cinematicCamera) {
@@ -4444,7 +4454,7 @@ export class GameEngine {
         this.triggerSlowmo(0.35, 0.3);
       } else this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.4, this.player.pos.z, 'APAROU!', '#ffb347', 1);
       // a short push-in on the defences worth seeing: the wave's first, a thrust, the Oni, a captain
-      if (perfect || st.kind === 'thrust' || this.waveStat.deflects === 1 || e.type === 'boss' || e.captain) this.parryZoom(perfect || st.kind === 'thrust');
+      if (!scene && (perfect || st.kind === 'thrust' || this.waveStat.deflects === 1 || e.type === 'boss' || e.captain)) this.parryZoom(perfect || st.kind === 'thrust');
       e.staggerT = e.type === 'boss' ? 0.18 : 0.32;
       e.anim = { kind: 'erecoil', t: 0, dur: 0.32, side: 0 };
       this.enemyClip(e, 'hit1', { from: 0.1, to: 0.75, speed: 1.6 });
@@ -5202,6 +5212,7 @@ export class GameEngine {
     }
     this.camera.lookAt(lookTarget);
     this.applyCineCamera(dt, lookTarget);
+    this.applyParryScene(dt, lookTarget);
   }
 
   private nearSolids: { x: number; z: number; r: number; h: number }[] = [];
@@ -5551,6 +5562,11 @@ export class GameEngine {
           e.tele.position.set(e.pos.x, 0.05, e.pos.z);
           (e.tele.material as THREE.MeshBasicMaterial).opacity = 0.18 + 0.42 * k;
           if (boss) e.tele.scale.setScalar(1.6 + k * 0.8);
+        }
+        // a flash on the blade just before a parry-able blow lands: the cue for pressing guard
+        if (!st.warned && !st.feint && st.kind !== 'sweep' && !isFodder(e) && st.t >= st.windup - TELL_LEAD) {
+          st.warned = true;
+          this.tellFlash(e, st);
         }
         if (e.danger && e.danger.visible) {
           const pop = Math.min(1, st.t / 0.15);
@@ -6222,6 +6238,121 @@ export class GameEngine {
     this.punchDur = strong ? 0.5 : 0.38;
   }
 
+  // The tip of the blow's blade lights up for an instant (and ticks): guard pressed on it is a perfect parry
+  private tellFlash(e: EnemyInstance, st: EnemyStrike) {
+    const P = this.player.pos;
+    if (Math.hypot(e.pos.x - P.x, e.pos.z - P.z) > st.reach + 2.2) return;
+    const seg = this.clashSeg;
+    const p = this.tmpV;
+    if (!st.limb && this.readEnemyBlade(e, false, seg)) p.copy(seg.b);
+    else p.set(e.pos.x, e.pos.y + 1.3, e.pos.z);
+    const big = e.type === 'boss';
+    this.impacts.spawn(p, IMPACT_TELL, big ? 2 : 1.05, 0.14);
+    sfx.tell();
+  }
+
+  // Starts the defence scene when this parry is worth one (see TUNE.parryScene); false: not this time
+  private startParryScene(e: EnemyInstance, meet: THREE.Vector3 | null, perfect: boolean, thrust: boolean): boolean {
+    const lvl = Math.max(0, Math.min(3, Math.round(TUNE.parryScene)));
+    if (lvl < 1 || this.parryScene || this.cine || this.state !== 'play') return false;
+    if (!this.settings.cinematicCamera) return false;
+    if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return false;
+    const big = e.type === 'boss' || !!e.captain;
+    const worth = perfect || big || lvl >= 3 || (lvl >= 2 && (thrust || this.waveStat.deflects === 1));
+    if (!worth || this.time - this.lastParryScene < PARRY_SCENE_GAP[lvl]) return false;
+    const P = this.player.pos;
+    // a crowd on top of the two fighters would make the shot unreadable (and the pause unfair)
+    let near = 0;
+    for (const o of this.enemies) if (o !== e && !o.dead && !o.flee && !isFodder(o) && Math.hypot(o.pos.x - P.x, o.pos.z - P.z) < 4.5) near++;
+    if (near >= 2 && !big) return false;
+    let ax = e.pos.x - P.x;
+    let az = e.pos.z - P.z;
+    const ad = Math.hypot(ax, az) || 1;
+    ax /= ad;
+    az /= ad;
+    const mx = (P.x + e.pos.x) / 2;
+    const mz = (P.z + e.pos.z) / 2;
+    const dist = this.camera.aspect < 1 ? 4.3 : 3.4;
+    // the camera stands to one side of the fighters, on whichever side no trunk or pillar is in the way
+    const free = (side: number) => {
+      const cx = mx - az * side * dist - ax * 0.5;
+      const cz = mz + ax * side * dist - az * 0.5;
+      return !this.solids.some((so) => so.h > 0.9 && Math.hypot(so.x - cx, so.z - cz) < so.r + 0.7);
+    };
+    this.parrySide = -this.parrySide;
+    let side = this.parrySide;
+    if (!free(side)) side = -side;
+    const camOk = free(side);
+    const heavy = perfect || big;
+    this.parryScene = { t: 0, dur: heavy ? 0.85 : 0.65, e, mid: meet ? meet.clone() : new THREE.Vector3(mx, P.y + 1.35, mz), side, camOk, spark: 0 };
+    this.lastParryScene = this.time;
+    this.triggerSlowmo(heavy ? 0.5 : 0.36, heavy ? 0.2 : 0.3);
+    // the blades hold where they met a little longer, and the player is untouchable for the moment
+    if (this.clash) this.clash.t = Math.max(this.clash.t, 0.34);
+    this.player.inv = Math.max(this.player.inv, 0.35);
+    this.flashFx = Math.max(this.flashFx, heavy ? 0.4 : 0.22);
+    this.spikeFx = Math.max(this.spikeFx, heavy ? 0.7 : 0.4);
+    this.callbacks.onCinematic?.(true, 'duel');
+    return true;
+  }
+
+  private endParryScene() {
+    if (!this.parryScene) return;
+    this.parryScene = null;
+    if (!this.cine) this.callbacks.onCinematic?.(false);
+  }
+
+  // Runs after the normal camera: blends it into the low side shot while the scene lasts
+  private applyParryScene(real: number, look: THREE.Vector3) {
+    const s = this.parryScene;
+    if (!s) return;
+    s.t += real;
+    if (s.t >= s.dur || this.cine || this.state !== 'play') {
+      this.endParryScene();
+      return;
+    }
+    const ss = (a: number, b: number, x: number) => {
+      const k = Math.min(1, Math.max(0, (x - a) / (b - a)));
+      return k * k * (3 - 2 * k);
+    };
+    const w = ss(0, 0.14, s.t) * (1 - ss(s.dur - 0.24, s.dur, s.t));
+    // sparks stream off the crossed blades for the first part of the scene
+    s.spark -= real;
+    if (s.spark <= 0 && s.t < s.dur * 0.65) {
+      s.spark = 0.06;
+      this.emitParticles(s.mid.x, s.mid.y, s.mid.z, 6, 0xffe0a0, 7, 1.6, 12, 0.3);
+      if (Math.random() < 0.4) this.impacts.spawn(s.mid, IMPACT_DEFLECT, 0.9 + Math.random() * 0.5, 0.09);
+    }
+    if (!s.camOk || w < 0.001) return;
+    const P = this.player.pos;
+    const e = s.e;
+    let ax = e.pos.x - P.x;
+    let az = e.pos.z - P.z;
+    const ad = Math.hypot(ax, az) || 1;
+    ax /= ad;
+    az /= ad;
+    const f = this.parryFocus.set((P.x + e.pos.x) / 2, P.y + 1.3, (P.z + e.pos.z) / 2);
+    f.x += (s.mid.x - f.x) * 0.4;
+    f.z += (s.mid.z - f.z) * 0.4;
+    const portrait = this.camera.aspect < 1;
+    const dist = portrait ? 4.3 : 3.4;
+    const camX = f.x - az * s.side * dist - ax * 0.5;
+    const camZ = f.z + ax * s.side * dist - az * 0.5;
+    const camY = Math.max(0.5, P.y + 0.95);
+    this.camera.position.x += (camX - this.camera.position.x) * w;
+    this.camera.position.y += (camY - this.camera.position.y) * w;
+    this.camera.position.z += (camZ - this.camera.position.z) * w;
+    look.lerp(f, w);
+    const fov = portrait ? 52 : 44;
+    this.camera.fov += (fov - this.camera.fov) * w;
+    this.camera.updateProjectionMatrix();
+    this.camera.lookAt(look);
+    this.camera.rotateZ(0.04 * s.side * w);
+    // depth of field on the pair (high quality only, like the finisher's)
+    this.cineW = w * 0.6;
+    this.cineFocus.copy(f);
+  }
+
   // While the guard is up the player turns toward an arrow or star coming from the side, so a defence
   // isn't lost to which way the stick was last pushed (never one from behind: that one is on you)
   private assistGuardFacing(dt: number) {
@@ -6353,7 +6484,7 @@ export class GameEngine {
           const mid = this.tmpV.copy(p.pos);
           // only what is faced can be parried or blocked; from the side or behind it just hits
           const front = !ranged || this.shotComesFromFront(p);
-          if (canAct && front && this.time - this.player.guardPressT <= DEFLECT_WINDOW) {
+          if (canAct && front && this.time - this.player.guardPressT <= TUNE.parryWindow) {
             if (ranged) dead = !this.defendShot(p, 'parry', true);
             else {
               this.impacts.spawn(mid, IMPACT_DEFLECT, 1.4, 0.14);

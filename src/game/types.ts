@@ -234,6 +234,7 @@ export interface EnemyStrike {
   dmg: number;
   side: number;
   limb?: 'foot'; // a kick: the foot is the weapon
+  warned?: boolean; // the flash that tells the player the blow is about to land has been shown
 }
 
 export interface ProjectileInstance {

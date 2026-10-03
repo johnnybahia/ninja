@@ -135,6 +135,10 @@ export const sfx = {
     tone(880, 1180, 0.08, 'square', 0.06);
     setTimeout(() => tone(1180, 1560, 0.09, 'square', 0.05), 80);
   },
+  // The instant before a parry-able blow lands: a short high tick, the cue to press guard
+  tell: () => {
+    tone(1560, 1900, 0.05, 'triangle', 0.05);
+  },
   // Perilous attack warning
   danger: () => {
     tone(740, 740, 0.35, 'square', 0.07);
