@@ -23,6 +23,7 @@ async function precache() {
   const todo = rels.filter((rel) => !have.has(keyOf(rel)));
   const fresh = !self.registration.active; // first install (an update runs behind the scenes)
   let done = rels.length - todo.length;
+  tell({ type: 'progress', done, total: rels.length, fresh, reused: done });
   let last = 0;
   let i = 0;
   const worker = async () => {
