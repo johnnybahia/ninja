@@ -22,15 +22,17 @@ export interface QualityProfile {
   mistLayers: number;
   reflections: boolean;
   dof: boolean;
+  groundFx: number; // plaza detail layers (plaza.ts): 0 none, 0.5 lighter, 1 full
+  vfx: number; // share of the spark and blood pools in use (vfx.ts StreakPool)
 }
 
 export function qualityProfile(q: Quality): QualityProfile {
   const dpr = window.devicePixelRatio || 1;
   if (q === 'high')
-    return { pixelRatio: Math.min(dpr, 2), composer: true, msaa: 4, shadowMap: 2048, softShadows: true, bloom: true, grassDensity: 1, ambientParticles: 1, ink: true, rays: true, mistLayers: 2, reflections: true, dof: true };
+    return { pixelRatio: Math.min(dpr, 2), composer: true, msaa: 4, shadowMap: 2048, softShadows: true, bloom: true, grassDensity: 1, ambientParticles: 1, ink: true, rays: true, mistLayers: 2, reflections: true, dof: true, groundFx: 1, vfx: 1 };
   if (q === 'medium')
-    return { pixelRatio: Math.min(dpr, 1.5), composer: true, msaa: 2, shadowMap: 1024, softShadows: true, bloom: true, grassDensity: 0.6, ambientParticles: 0.7, ink: true, rays: false, mistLayers: 1, reflections: false, dof: false };
-  return { pixelRatio: 1, composer: false, msaa: 0, shadowMap: 1024, softShadows: false, bloom: false, grassDensity: 0, ambientParticles: 0.4, ink: false, rays: false, mistLayers: 0, reflections: false, dof: false };
+    return { pixelRatio: Math.min(dpr, 1.5), composer: true, msaa: 2, shadowMap: 1024, softShadows: true, bloom: true, grassDensity: 0.6, ambientParticles: 0.7, ink: true, rays: false, mistLayers: 1, reflections: false, dof: false, groundFx: 0.5, vfx: 0.5 };
+  return { pixelRatio: 1, composer: false, msaa: 0, shadowMap: 1024, softShadows: false, bloom: false, grassDensity: 0, ambientParticles: 0.4, ink: false, rays: false, mistLayers: 0, reflections: false, dof: false, groundFx: 0, vfx: 0.22 };
 }
 
 export function detectQuality(): Quality {

@@ -42,7 +42,7 @@ export function PlayerName({
   };
 
   return (
-    <div className="fixed inset-0 z-[55] flex items-center justify-center bg-[rgba(16,12,24,0.9)] backdrop-blur-md p-4">
+    <div className="fixed inset-0 z-[55] flex items-center justify-center bg-[rgba(16,12,24,0.94)] p-4">
       <div className="w-full max-w-sm rounded-xl border border-[rgba(239,230,210,0.25)] bg-[var(--ink)] p-5 text-center shadow-2xl">
         <div className="font-serif text-5xl font-bold text-[var(--torii)] leading-none">名</div>
         {mode === 'confirm' && current ? (

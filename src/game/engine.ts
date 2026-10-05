@@ -26,7 +26,7 @@ import { sfx } from './audio';
 import { World } from './world';
 import { ATMOSPHERES, AtmosMode, atmosphereForWave } from './atmosphere';
 import { THEMES, ThemeMode, themeForWave } from './theme';
-import { Afterimages, BladeTrail, DustPool, ImpactPool, InkDecals, softDotTexture, makeBladeGlow, makeLightning } from './vfx';
+import { Afterimages, BladeTrail, DustPool, ImpactPool, InkDecals, StreakPool, softDotTexture, makeBladeGlow, makeLightning } from './vfx';
 import { PostFX, NINJA_LOOK, Quality, QualitySetting, QualityProfile, qualityProfile, detectQuality } from './postfx';
 import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
@@ -225,6 +225,8 @@ const SHOT_BACK_SPEED = 26;
 const CLASH_POSE_TIME = 0.2; // how long the weapon is held where the blades met
 const GHOST_DASH = new THREE.Color(0x2a2464);
 const GHOST_PERFECT = new THREE.Color(0x6a4a18);
+const SNOW_DUST = new THREE.Color(0.92, 0.95, 1);
+const ASH_DUST = new THREE.Color(0.22, 0.2, 0.2);
 const DUST_BASE = new THREE.Color(0.55, 0.5, 0.44); // seconds after pressing guard that an incoming strike is deflected
 const PLAYER_MAX_POSTURE = 100;
 // Swings cost stamina on the mocap rig, so a dodge has to stay affordable after a combo
@@ -363,28 +365,11 @@ export class GameEngine {
 
   private solids: { x: number; z: number; r: number; h: number }[] = [];
 
-  // Particles (Gerais: poeira, faíscas, fumaça, magia)
-  private PN = 700;
-  private pPos = new Float32Array(this.PN * 3);
-  private pCol = new Float32Array(this.PN * 3);
-  private pVel = new Float32Array(this.PN * 3);
-  private pLife = new Float32Array(this.PN);
-  private pGrav = new Float32Array(this.PN);
-  private pGeo = new THREE.BufferGeometry();
-  private pIdx = 0;
+  // Sparks (impacts, embers, magic) and blood: streak pools stretched along their velocity, one draw
+  // call each (see StreakPool in vfx.ts)
+  private sparks!: StreakPool;
+  private blood!: StreakPool;
   private tmpC = new THREE.Color();
-
-  // Blood & Splatter Particles (Simulação visceral de sangue e impacto de corte)
-  private BLOOD_PN = 1000;
-  private bPos = new Float32Array(this.BLOOD_PN * 3);
-  private bCol = new Float32Array(this.BLOOD_PN * 3);
-  private bVel = new Float32Array(this.BLOOD_PN * 3);
-  private bLife = new Float32Array(this.BLOOD_PN);
-  private bMaxLife = new Float32Array(this.BLOOD_PN);
-  private bGrav = new Float32Array(this.BLOOD_PN);
-  private bGeo = new THREE.BufferGeometry();
-  private bIdx = 0;
-  private bloodPoints!: THREE.Points;
 
   // Shockwaves & Blood Rings
   private rings: { m: THREE.Mesh; t: number; dur: number; maxR: number; startR: number }[] = [];
@@ -726,58 +711,9 @@ export class GameEngine {
     this.camera.fov = this.baseFov;
     this.camera.updateProjectionMatrix();
 
-    // General Particle Buffer
-    for (let i = 0; i < this.PN; i++) this.pPos[i * 3 + 1] = -999;
-    this.pGeo.setAttribute('position', new THREE.BufferAttribute(this.pPos, 3));
-    this.pGeo.setAttribute('color', new THREE.BufferAttribute(this.pCol, 3));
-    const points = new THREE.Points(
-      this.pGeo,
-      new THREE.PointsMaterial({
-        size: 0.3,
-        map: softDotTexture(),
-        color: new THREE.Color(2.2, 2.2, 2.2),
-        vertexColors: true,
-        transparent: true,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending
-      })
-    );
-    points.frustumCulled = false;
-    this.scene.add(points);
-
-    // Procedural Smooth Droplet Texture for Blood
-    const bloodCanvas = document.createElement('canvas');
-    bloodCanvas.width = 32;
-    bloodCanvas.height = 32;
-    const bCtx = bloodCanvas.getContext('2d');
-    if (bCtx) {
-      const grad = bCtx.createRadialGradient(16, 16, 0, 16, 16, 16);
-      grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
-      grad.addColorStop(0.45, 'rgba(255, 255, 255, 0.95)');
-      grad.addColorStop(0.8, 'rgba(255, 255, 255, 0.45)');
-      grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
-      bCtx.fillStyle = grad;
-      bCtx.fillRect(0, 0, 32, 32);
-    }
-    const bloodTex = new THREE.CanvasTexture(bloodCanvas);
-
-    // Dedicated Blood Particles Buffer
-    for (let i = 0; i < this.BLOOD_PN; i++) this.bPos[i * 3 + 1] = -999;
-    this.bGeo.setAttribute('position', new THREE.BufferAttribute(this.bPos, 3));
-    this.bGeo.setAttribute('color', new THREE.BufferAttribute(this.bCol, 3));
-    this.bloodPoints = new THREE.Points(
-      this.bGeo,
-      new THREE.PointsMaterial({
-        size: 0.32,
-        map: bloodTex,
-        vertexColors: true,
-        transparent: true,
-        depthWrite: false,
-        blending: THREE.NormalBlending
-      })
-    );
-    this.bloodPoints.frustumCulled = false;
-    this.scene.add(this.bloodPoints);
+    // Sparks and blood
+    this.sparks = new StreakPool(this.scene, { max: 700, additive: true, stretch: 0.045 });
+    this.blood = new StreakPool(this.scene, { max: 1000, additive: false, stretch: 0.03 });
   }
 
   private initWorld() {
@@ -1007,8 +943,8 @@ export class GameEngine {
       (r.m.material as THREE.Material).dispose();
     });
     this.rings = [];
-    for (let i = 0; i < this.BLOOD_PN; i++) this.bPos[i * 3 + 1] = -999;
-    this.bGeo.attributes.position.needsUpdate = true;
+    this.sparks.clear();
+    this.blood.clear();
     this.decals.clear();
     this.dust.clear();
     this.ghosts.clear();
@@ -2279,26 +2215,29 @@ export class GameEngine {
     life = 0.6
   ) {
     this.tmpC.set(color);
+    // HDR (blooms) and thin: a spark is a sliver stretched along where it is going
+    const r = this.tmpC.r * 2.6;
+    const g = this.tmpC.g * 2.6;
+    const b = this.tmpC.b * 2.6;
     for (let k = 0; k < n; k++) {
-      const i = this.pIdx;
-      this.pIdx = (this.pIdx + 1) % this.PN;
-      this.pPos[i * 3] = x;
-      this.pPos[i * 3 + 1] = y;
-      this.pPos[i * 3 + 2] = z;
-
       const th = Math.random() * TAU;
       const ph = Math.acos(rand(-1, 1));
       const s = speed * (0.35 + Math.random() * 0.65);
-
-      this.pVel[i * 3] = Math.sin(ph) * Math.cos(th) * s;
-      this.pVel[i * 3 + 1] = Math.cos(ph) * s + up;
-      this.pVel[i * 3 + 2] = Math.sin(ph) * Math.sin(th) * s;
-
-      this.pLife[i] = life * (0.6 + Math.random() * 0.6);
-      this.pGrav[i] = grav;
-      this.pCol[i * 3] = this.tmpC.r;
-      this.pCol[i * 3 + 1] = this.tmpC.g;
-      this.pCol[i * 3 + 2] = this.tmpC.b;
+      this.sparks.emit(
+        x,
+        y,
+        z,
+        Math.sin(ph) * Math.cos(th) * s,
+        Math.cos(ph) * s + up,
+        Math.sin(ph) * Math.sin(th) * s,
+        life * (0.6 + Math.random() * 0.6),
+        grav,
+        r,
+        g,
+        b,
+        1,
+        0.07 + Math.random() * 0.045
+      );
     }
   }
 
@@ -2324,13 +2263,6 @@ export class GameEngine {
     const shades = [0x900010, 0xb30919, 0xc9182b, 0x6e030a, 0xd9162e];
 
     for (let k = 0; k < total; k++) {
-      const i = this.bIdx;
-      this.bIdx = (this.bIdx + 1) % this.BLOOD_PN;
-
-      this.bPos[i * 3] = x + (Math.random() - 0.5) * 0.28;
-      this.bPos[i * 3 + 1] = y + (Math.random() - 0.5) * 0.35;
-      this.bPos[i * 3 + 2] = z + (Math.random() - 0.5) * 0.28;
-
       let vx = 0;
       let vy = 0;
       let vz = 0;
@@ -2352,20 +2284,24 @@ export class GameEngine {
         vy = rand(1.5, 4.8) + (isHeavy ? 2.2 : 0);
       }
 
-      this.bVel[i * 3] = vx;
-      this.bVel[i * 3 + 1] = vy;
-      this.bVel[i * 3 + 2] = vz;
-
-      const life = rand(0.7, isCombo ? 1.6 : 1.1);
-      this.bLife[i] = life;
-      this.bMaxLife[i] = life;
-      this.bGrav[i] = rand(18, 28);
-
-      const colorHex = shades[Math.floor(Math.random() * shades.length)];
-      this.tmpC.set(colorHex);
-      this.bCol[i * 3] = this.tmpC.r;
-      this.bCol[i * 3 + 1] = this.tmpC.g;
-      this.bCol[i * 3 + 2] = this.tmpC.b;
+      this.tmpC.set(shades[Math.floor(Math.random() * shades.length)]);
+      // a drop is a dark sliver in the air and a small oval once it lands, where it stays a few seconds
+      this.blood.emit(
+        x + (Math.random() - 0.5) * 0.28,
+        y + (Math.random() - 0.5) * 0.35,
+        z + (Math.random() - 0.5) * 0.28,
+        vx,
+        vy,
+        vz,
+        rand(0.7, isCombo ? 1.6 : 1.1),
+        rand(18, 28),
+        this.tmpC.r,
+        this.tmpC.g,
+        this.tmpC.b,
+        0.92,
+        rand(0.045, 0.085),
+        rand(1.8, 3.2)
+      );
     }
 
     // Faíscas afiadas de impacto metálico de lâmina
@@ -2391,6 +2327,10 @@ export class GameEngine {
   // ground dust tinted by the current atmosphere; (dx, dz) biases the spread
   private puff(x: number, z: number, n: number, spd: number, dx = 0, dz = 0) {
     this.dustCol.copy(this.world.atm.fog).lerp(DUST_BASE, 0.55).multiplyScalar(0.9 + this.world.atm.hemiI * 0.15);
+    // the ground answers in the colour of the season: snow powder, ash and rising embers
+    const cv = this.world.theme.cover;
+    if (cv.snow > 0.05) this.dustCol.lerp(SNOW_DUST, Math.min(1, cv.snow));
+    if (cv.ember > 0.05) this.dustCol.lerp(ASH_DUST, cv.ember * 0.8);
     for (let i = 0; i < n; i++) {
       const a = rand(0, TAU);
       const v = spd * rand(0.4, 1);
@@ -2406,6 +2346,13 @@ export class GameEngine {
         this.dustCol,
         0.4
       );
+    }
+    // a real step, dash or slam also stirs the air: the petals, leaves or flakes around are thrown and some are lifted off the stones
+    if (n >= 6) this.world.gust(x, z, 1.6 + n * 0.18, Math.min(2.4, 0.35 + n * 0.07), Math.min(14, n));
+    if (cv.ember > 0.2 && n >= 4) {
+      for (let i = 0, m = Math.min(10, Math.ceil(n * 0.6 * cv.ember)); i < m; i++) {
+        this.sparks.emit(x + rand(-0.4, 0.4), rand(0.05, 0.3), z + rand(-0.4, 0.4), rand(-0.6, 0.6), rand(1.2, 2.8), rand(-0.6, 0.6), rand(0.8, 1.5), -0.5, 2.2, 0.95, 0.26, 1, rand(0.035, 0.06));
+      }
     }
   }
 
@@ -2445,71 +2392,8 @@ export class GameEngine {
   }
 
   private updateParticles(dt: number) {
-    const fade = Math.max(0, 1 - dt * 1.8);
-    for (let i = 0; i < this.PN; i++) {
-      if (this.pLife[i] <= 0) continue;
-      this.pLife[i] -= dt;
-      if (this.pLife[i] <= 0) {
-        this.pPos[i * 3 + 1] = -999;
-        continue;
-      }
-      this.pVel[i * 3 + 1] -= this.pGrav[i] * dt;
-      this.pPos[i * 3] += this.pVel[i * 3] * dt;
-      this.pPos[i * 3 + 1] += this.pVel[i * 3 + 1] * dt;
-      this.pPos[i * 3 + 2] += this.pVel[i * 3 + 2] * dt;
-      if (this.pPos[i * 3 + 1] < 0.05) {
-        this.pPos[i * 3 + 1] = 0.05;
-        this.pVel[i * 3 + 1] *= -0.3;
-      }
-      this.pCol[i * 3] *= fade;
-      this.pCol[i * 3 + 1] *= fade;
-      this.pCol[i * 3 + 2] *= fade;
-    }
-    this.pGeo.attributes.position.needsUpdate = true;
-    this.pGeo.attributes.color.needsUpdate = true;
-
-    // Atualização de partículas de sangue visceral
-    for (let i = 0; i < this.BLOOD_PN; i++) {
-      if (this.bLife[i] <= 0) continue;
-
-      if (this.bPos[i * 3 + 1] <= 0.05) {
-        // Ao tocar o chão: desacelera e esvanece suavemente simulando poça
-        this.bPos[i * 3 + 1] = 0.05;
-        this.bVel[i * 3] *= Math.max(0, 1 - dt * 10);
-        this.bVel[i * 3 + 2] *= Math.max(0, 1 - dt * 10);
-        this.bVel[i * 3 + 1] = 0;
-
-        this.bLife[i] -= dt * 0.75;
-        if (this.bLife[i] <= 0) {
-          this.bPos[i * 3 + 1] = -999;
-          continue;
-        }
-        const f = Math.max(0, this.bLife[i] / this.bMaxLife[i]);
-        this.bCol[i * 3] *= f;
-        this.bCol[i * 3 + 1] *= f;
-        this.bCol[i * 3 + 2] *= f;
-      } else {
-        // No ar
-        this.bLife[i] -= dt;
-        if (this.bLife[i] <= 0) {
-          this.bPos[i * 3 + 1] = -999;
-          continue;
-        }
-        this.bVel[i * 3 + 1] -= this.bGrav[i] * dt;
-        this.bPos[i * 3] += this.bVel[i * 3] * dt;
-        this.bPos[i * 3 + 1] += this.bVel[i * 3 + 1] * dt;
-        this.bPos[i * 3 + 2] += this.bVel[i * 3 + 2] * dt;
-
-        if (this.bPos[i * 3 + 1] <= 0.05) {
-          this.bPos[i * 3 + 1] = 0.05;
-          this.bVel[i * 3] *= 0.22;
-          this.bVel[i * 3 + 2] *= 0.22;
-          this.bVel[i * 3 + 1] = 0;
-        }
-      }
-    }
-    this.bGeo.attributes.position.needsUpdate = true;
-    this.bGeo.attributes.color.needsUpdate = true;
+    this.sparks.update(dt);
+    this.blood.update(dt);
 
     // Atualização de Blood Rings
     for (let i = this.rings.length - 1; i >= 0; i--) {
@@ -3924,7 +3808,7 @@ export class GameEngine {
       e.guardT = 0.9;
       e.modeT = 0;
       e.flash = 0.05;
-      this.impacts.spawn(p, IMPACT_BLOCK, 1.2, 0.12);
+      this.impacts.spawn(p, IMPACT_BLOCK, 1.2, 0.12, 'block');
       this.emitParticles(p.x, p.y, p.z, 12, 0xffc27a, 6, 1.5, 16, 0.25);
       sfx.block();
       this.spawnLabel(e.pos.x, labelY, e.pos.z, 'BLOQUEOU', '#a9bcd8', 0.9);
@@ -3937,7 +3821,7 @@ export class GameEngine {
       e.defCd = 2.5;
       this.lastHardDef = this.time;
       e.guardT = 0;
-      this.impacts.spawn(p, IMPACT_DEFLECT, 2.3, 0.2);
+      this.impacts.spawn(p, IMPACT_DEFLECT, 2.3, 0.2, 'parry', { x: nx, z: nz });
       this.emitParticles(p.x, p.y, p.z, 26, 0xffb347, 9, 2.2, 18, 0.32);
       sfx.clang();
       this.spawnLabel(e.pos.x, labelY, e.pos.z, 'APAROU!', '#ffb347', 1.15);
@@ -4008,7 +3892,7 @@ export class GameEngine {
       else this.tmpV.set(e.pos.x - (nx / nl) * e.r * 0.7, e.pos.y + 1.25 * sc, e.pos.z - (nz / nl) * e.r * 0.7);
       const crit = rolled.tier === 'crit';
       const size = (crit ? 1.9 : heavy ? 1.55 : 1.1) * (e.type === 'boss' ? 1.4 : 1);
-      this.impacts.spawn(this.tmpV, crit ? IMPACT_CRIT : heavy ? IMPACT_HEAVY : IMPACT_NORMAL, size);
+      this.impacts.spawn(this.tmpV, crit ? IMPACT_CRIT : heavy ? IMPACT_HEAVY : IMPACT_NORMAL, size, 0.14, crit ? 'crit' : heavy ? 'heavy' : 'hit', hit ? { x: hit.dirX, z: hit.dirZ } : { x: nx, z: nz });
       this.emitParticles(this.tmpV.x, this.tmpV.y, this.tmpV.z, crit ? 16 : 9, 0xffd49a, 7, 1.5, 16, 0.24);
       if (crit || heavy) this.fovKick = Math.min(this.fovKick, -3);
     }
@@ -4165,7 +4049,7 @@ export class GameEngine {
     return 3 + this.metaBonus.heals + (this.cardLv.cabaca ?? 0);
   }
 
-  private dashCost() {
+  dashCost() {
     return Math.max(8, DASH_COST - 3 * (this.cardLv.passo ?? 0));
   }
 
@@ -4426,7 +4310,7 @@ export class GameEngine {
         this.startAct('hurt', Math.random() < 0.5 ? 'hit3' : 'hit2', { speed: 1.35, to: 1.1, cancel: 0.5, end: 1.0, fadeIn: 0.06 });
       }
     }
-    this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.3, this.player.pos.z), IMPACT_HURT, 1.4, 0.18);
+    this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.3, this.player.pos.z), IMPACT_HURT, 1.4, 0.18, 'hurt');
     this.player.dashInv = false;
     this.player.killCombo = 0;
     this.player.hitCombo = 0;
@@ -4596,7 +4480,7 @@ export class GameEngine {
     // doubled over, held there until the posture recovers or a deathblow lands
     this.enemyClip(e, 'hit2', { to: 0.62, hold: true, fadeIn: 0.08 });
     sfx.postureBreak();
-    this.impacts.spawn(this.tmpV.set(e.pos.x, e.pos.y + 1.5 * this.sizeOf(e), e.pos.z), IMPACT_DEFLECT, 2.6, 0.3);
+    this.impacts.spawn(this.tmpV.set(e.pos.x, e.pos.y + 1.5 * this.sizeOf(e), e.pos.z), IMPACT_DEFLECT, 2.6, 0.3, 'parry', { x: Math.sin(this.player.yaw), z: Math.cos(this.player.yaw) });
     this.shake = Math.max(this.shake, 0.25);
     this.spawnLabel(e.pos.x, e.pos.y + 3.1 * this.sizeOf(e), e.pos.z, 'POSTURA!', '#ff5a3a', 1.2);
   }
@@ -4755,7 +4639,7 @@ export class GameEngine {
         const perfect = this.player.dash > 0;
         this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, perfect ? 'PERFEITO!' : 'ESQUIVOU!', perfect ? '#ffd166' : '#8fe0c8', perfect ? 1.55 : 1.1);
         this.triggerSlowmo(perfect ? 0.5 : 0.22, perfect ? 0.22 : 0.42);
-        this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.2, this.player.pos.z), IMPACT_DODGE, perfect ? 2.4 : 1.6, 0.3);
+        this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.2, this.player.pos.z), IMPACT_DODGE, perfect ? 2.4 : 1.6, 0.3, 'dodge');
         this.fovKick = perfect ? -5 : -2.5;
         this.ghosts.spawn(this.player.rig.root, perfect ? GHOST_PERFECT : GHOST_DASH, perfect ? 0.6 : 0.4);
         if (perfect) {
@@ -4787,7 +4671,7 @@ export class GameEngine {
       this.playerDeflectAnim();
       const meet = this.clashPose(e);
       const mid = meet ? this.tmpV.copy(meet) : contact ? this.tmpV.copy(contact) : this.tmpV.set(this.player.pos.x - nx * 0.75, this.player.pos.y + 1.35, this.player.pos.z - nz * 0.75);
-      this.impacts.spawn(mid, IMPACT_DEFLECT, (st.kind === 'thrust' ? 2.4 : 1.9) * (perfect ? 1.35 : 1), perfect ? 0.22 : 0.16);
+      this.impacts.spawn(mid, IMPACT_DEFLECT, (st.kind === 'thrust' ? 2.4 : 1.9) * (perfect ? 1.35 : 1), perfect ? 0.22 : 0.16, perfect ? 'perfect' : 'parry', { x: nx, z: nz });
       this.emitParticles(mid.x, mid.y, mid.z, perfect ? 40 : 26, perfect ? 0xfff0b0 : 0xffb347, perfect ? 11 : 9, 2.2, 18, 0.32);
       this.hitstop = perfect ? 0.1 : 0.075;
       this.lastHS = performance.now();
@@ -4824,7 +4708,7 @@ export class GameEngine {
       if (this.player.rig.clip) this.startAct('block', 'hit1', { speed: 1.25, to: 0.85, cancel: 0.4, end: 0.8, fadeIn: 0.06 });
       this.faceEnemy(e);
       const mid = contact ? this.tmpV.copy(contact) : this.tmpV.set(this.player.pos.x - nx * 0.7, this.player.pos.y + 1.3, this.player.pos.z - nz * 0.7);
-      this.impacts.spawn(mid, IMPACT_BLOCK, 1.3, 0.12);
+      this.impacts.spawn(mid, IMPACT_BLOCK, 1.3, 0.12, 'block');
       this.emitParticles(mid.x, mid.y, mid.z, 10, 0xffd49a, 5, 1.5, 16, 0.22);
       this.player.kb.x += nx * 4;
       this.player.kb.z += nz * 4;
@@ -4898,12 +4782,12 @@ export class GameEngine {
         this.emitParticles(e.pos.x + Math.cos(a) * 1.2 * sc, y, e.pos.z + Math.sin(a) * 1.2 * sc, 3, 0xffd49a, 5, 1, 4, 0.35);
       }
     } else if (c.style === 'kick') {
-      this.impacts.spawn(this.tmpV.set(e.pos.x, y, e.pos.z), IMPACT_HEAVY, 3.4 * (sc > 1 ? 1.3 : 1), 0.3);
+      this.impacts.spawn(this.tmpV.set(e.pos.x, y, e.pos.z), IMPACT_HEAVY, 3.4 * (sc > 1 ? 1.3 : 1), 0.3, 'heavy');
       this.shake = Math.max(this.shake, 0.65);
     }
     if (c.boom) {
       this.emitParticles(e.pos.x, y, e.pos.z, 70, 0xff7a20, 12, 4, 10, 0.7);
-      this.impacts.spawn(this.tmpV.set(e.pos.x, y, e.pos.z), IMPACT_HEAVY, 4.6 * (sc > 1 ? 1.3 : 1), 0.4);
+      this.impacts.spawn(this.tmpV.set(e.pos.x, y, e.pos.z), IMPACT_HEAVY, 4.6 * (sc > 1 ? 1.3 : 1), 0.4, 'heavy');
       this.shake = Math.max(this.shake, 0.85);
       sfx.boom();
     }
@@ -5043,7 +4927,7 @@ export class GameEngine {
       c.struck = true;
       const sc = this.sizeOf(e);
       const p = this.tmpV.set(e.pos.x, e.pos.y + 1.3 * sc, e.pos.z);
-      this.impacts.spawn(p, IMPACT_CRIT, (cinema ? 2 : 3.2) * (sc > 1 ? 1.4 : 1), 0.35);
+      this.impacts.spawn(p, IMPACT_CRIT, (cinema ? 2 : 3.2) * (sc > 1 ? 1.4 : 1), 0.35, 'crit', { x: Math.sin(this.player.yaw), z: Math.cos(this.player.yaw) });
       this.emitBlood(e.pos.x, e.pos.y + 1.2 * sc, e.pos.z, Math.sin(this.player.yaw), Math.cos(this.player.yaw), 70, true, true);
       this.decals.spawn(e.pos.x + Math.sin(this.player.yaw) * 1.2, e.pos.z + Math.cos(this.player.yaw) * 1.2, Math.sin(this.player.yaw), Math.cos(this.player.yaw), 2.4 * sc);
       this.emitParticles(p.x, p.y, p.z, 30, 0xff6a3a, 8, 3, 12, 0.5);
@@ -6542,7 +6426,7 @@ export class GameEngine {
       meet = this.poseAcross(seg, p.pos.x - p.vel.x, p.pos.z - p.vel.z, 0.28);
     }
     const mid = this.tmpV.copy(meet ?? p.pos);
-    this.impacts.spawn(mid, how === 'block' ? IMPACT_BLOCK : IMPACT_DEFLECT, how === 'block' ? 0.9 : 1.2, 0.14);
+    this.impacts.spawn(mid, how === 'block' ? IMPACT_BLOCK : IMPACT_DEFLECT, how === 'block' ? 0.9 : 1.2, 0.14, how === 'block' ? 'block' : 'parry', { x: p.vel.x, z: p.vel.z });
     this.emitParticles(mid.x, mid.y, mid.z, how === 'block' ? 10 : 18, 0xffb347, 7, 2, 16, 0.25);
     this.emitParticles(mid.x, mid.y, mid.z, 6, 0xd8c8a0, 3, 1.5, 14, 0.5); // splinters of the shaft
     if (how === 'block') sfx.block();
@@ -7269,7 +7153,9 @@ export class GameEngine {
       this.trailPrevOk = ok;
       if (show) {
         this.trail.setTint(this.player.special[this.activeWeaponIdx] > 0 ? TRAIL_SPECIAL : spec.tint);
-        this.trail.push(this.trailA, this.trailB, this.time);
+        // a heavy blow (third cut, thrust, overhead) leaves its crescent hanging a little longer
+        const heavy = !!this.act && (!!this.act.move?.heavy || this.act.windows.some((w) => w.heavy));
+        this.trail.push(this.trailA, this.trailB, this.time, heavy ? 0.26 : 0.17);
       }
     } else {
       this.trailPrevOk = false;
@@ -7287,7 +7173,7 @@ export class GameEngine {
     const speed = prevTip && dt > 1e-4 ? this.trailB.distanceTo(prevTip) / dt : 0;
     if (speed > 6) {
       tr.setTint(e.type === 'boss' ? ENEMY_TRAIL_BOSS : e.variant === 'shinobi' ? SHINOBI_TRAIL : e.variant === 'raio' ? RAIO_TRAIL : ENEMY_TRAIL);
-      tr.push(this.trailA, this.trailB, this.time);
+      tr.push(this.trailA, this.trailB, this.time, e.type === 'boss' ? 0.26 : 0.17);
     }
   }
 
@@ -7430,6 +7316,10 @@ export class GameEngine {
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
 
     this.world.setQuality(prof);
+    // fewer sparks and drops on weaker tiers; the rings and streaks of an impact need the post chain and calm eyes
+    this.sparks?.setLimit(700 * prof.vfx);
+    this.blood?.setLimit(1000 * prof.vfx);
+    if (this.impacts) this.impacts.fancy = prof.composer && !(typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
     const shadowType = THREE.PCFShadowMap;
     if (this.sun.shadow.map?.width !== prof.shadowMap || this.renderer.shadowMap.type !== shadowType) {
       this.renderer.shadowMap.type = shadowType;
@@ -7455,8 +7345,8 @@ export class GameEngine {
       (r.m.material as THREE.Material).dispose();
     });
     this.rings = [];
-    this.pGeo.dispose();
-    this.bGeo.dispose();
+    this.sparks.dispose();
+    this.blood.dispose();
     this.fx?.dispose();
     this.renderer.dispose();
   }

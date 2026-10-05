@@ -39,7 +39,7 @@ export function Ranking({
   const me = data?.me;
 
   return (
-    <div className="fixed inset-0 z-[45] flex items-center justify-center bg-[rgba(16,12,24,0.88)] backdrop-blur-md p-4 overflow-y-auto" onClick={onClose}>
+    <div className="fixed inset-0 z-[45] flex items-center justify-center bg-[rgba(16,12,24,0.94)] p-4 overflow-y-auto" onClick={onClose}>
       <div className="w-full max-w-md py-3 my-auto" onClick={(e) => e.stopPropagation()}>
         <div className="text-center mb-3">
           <div className="font-serif text-5xl font-bold text-[var(--torii)] leading-none">頂</div>

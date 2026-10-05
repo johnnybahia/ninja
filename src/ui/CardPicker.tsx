@@ -23,7 +23,7 @@ export function CardPicker({ level, offer, onPick }: { level: number; offer: Car
   }, [offer, armed, onPick]);
 
   return (
-    <div className="fixed inset-0 z-[50] flex flex-col items-center justify-center bg-[rgba(10,8,16,0.72)] backdrop-blur-sm p-3 overflow-auto">
+    <div className="fixed inset-0 z-[50] flex flex-col items-center justify-center bg-[rgba(10,8,16,0.82)] p-3 overflow-auto">
       <div className="font-serif text-[var(--jade)] text-sm font-bold tracking-widest mb-0.5">NÍVEL {level}</div>
       <h2 className="font-serif text-2xl sm:text-3xl font-extrabold text-[var(--paper)] mb-3 sm:mb-5 text-center">Escolha uma bênção</h2>
       <div className="flex gap-2.5 sm:gap-4 w-full max-w-3xl justify-center">

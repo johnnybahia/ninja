@@ -41,6 +41,7 @@ export interface Theme {
   forest: Tint; // distant conifers
   ridge: Tint; // mountains
   flowers: number; // 0 none .. 1 all of the lilies
+  cover: { snow: number; leaf: number; ember: number }; // what settles on the plaza stones (plaza.ts), 0..1 each
   fall: {
     color: THREE.Color;
     emissive: THREE.Color;
@@ -74,6 +75,7 @@ export const THEMES: Theme[] = [
     forest: tint(0xffffff, 0),
     ridge: tint(0xffffff, 0),
     flowers: 1,
+    cover: { snow: 0, leaf: 0, ember: 0 },
     fall: { color: C(0xf7bccb), emissive: C(0x4a1e2a), size: 1, speed: 1, drift: 1, mul: 1, min: 0 },
     leaf: SAKURA_LEAF
   },
@@ -88,6 +90,7 @@ export const THEMES: Theme[] = [
     forest: tint(0x4a3418, 0.55),
     ridge: tint(0x8a4a24, 0.28),
     flowers: 1,
+    cover: { snow: 0, leaf: 0.7, ember: 0 },
     fall: { color: C(0xe0762a), emissive: C(0x3a1204), size: 1.55, speed: 1.15, drift: 1.35, mul: 1.4, min: 0.55 },
     leaf: {
       sakura: { h: 0.06, hv: 0.035, s0: 0.7, s1: 0.9, l0: 0.38, l1: 0.55 },
@@ -106,6 +109,7 @@ export const THEMES: Theme[] = [
     forest: tint(0xa4b2c0, 0.65),
     ridge: tint(0xd2dce8, 0.6),
     flowers: 0,
+    cover: { snow: 0.9, leaf: 0, ember: 0 },
     fall: { color: C(0xffffff), emissive: C(0x303a4c), size: 0.8, speed: 0.55, drift: 0.35, mul: 1.7, min: 0.95 },
     leaf: {
       sakura: { h: 0.6, hv: 0.03, s0: 0.05, s1: 0.14, l0: 0.88, l1: 0.97 },
@@ -124,6 +128,7 @@ export const THEMES: Theme[] = [
     forest: tint(0x301412, 0.72),
     ridge: tint(0x6a2410, 0.5),
     flowers: 1,
+    cover: { snow: 0, leaf: 0, ember: 1 },
     fall: { color: C(0xff7a22), emissive: new THREE.Color(2.6, 0.8, 0.2), size: 0.65, speed: 0.55, drift: 0.8, mul: 1.3, min: 0.8 },
     leaf: {
       sakura: { h: 0.02, hv: 0.02, s0: 0.5, s1: 0.8, l0: 0.08, l1: 0.18 },
@@ -151,6 +156,7 @@ export function cloneTheme(t: Theme): Theme {
     ground: cloneTint(t.ground),
     forest: cloneTint(t.forest),
     ridge: cloneTint(t.ridge),
+    cover: { ...t.cover },
     fall: { ...t.fall, color: t.fall.color.clone(), emissive: t.fall.emissive.clone() },
     leaf: { sakura: cloneLeaf(t.leaf.sakura), green: cloneLeaf(t.leaf.green), shed: t.leaf.shed }
   };
@@ -187,6 +193,9 @@ export function blendTheme(cur: Theme, to: Theme, k: number): boolean {
   cur.pine.bare = lerp(cur.pine.bare, to.pine.bare, k);
   cur.pine.glow = lerp(cur.pine.glow, to.pine.glow, k);
   cur.flowers = lerp(cur.flowers, to.flowers, k);
+  cur.cover.snow = lerp(cur.cover.snow, to.cover.snow, k);
+  cur.cover.leaf = lerp(cur.cover.leaf, to.cover.leaf, k);
+  cur.cover.ember = lerp(cur.cover.ember, to.cover.ember, k);
   const f = cur.fall;
   const g = to.fall;
   f.color.lerp(g.color, k);
@@ -205,6 +214,9 @@ export function blendTheme(cur: Theme, to: Theme, k: number): boolean {
     Math.abs(cur.ground.k - to.ground.k) +
     Math.abs(cur.grass.k - to.grass.k) +
     Math.abs(cur.flowers - to.flowers) +
+    Math.abs(cur.cover.snow - to.cover.snow) +
+    Math.abs(cur.cover.leaf - to.cover.leaf) +
+    Math.abs(cur.cover.ember - to.cover.ember) +
     Math.abs(cur.ground.color.r - to.ground.color.r) +
     Math.abs(cur.fall.size - to.fall.size);
   return diff < 0.004;
