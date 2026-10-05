@@ -4165,7 +4165,7 @@ export class GameEngine {
     return 3 + this.metaBonus.heals + (this.cardLv.cabaca ?? 0);
   }
 
-  private dashCost() {
+  dashCost() {
     return Math.max(8, DASH_COST - 3 * (this.cardLv.passo ?? 0));
   }
 

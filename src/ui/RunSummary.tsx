@@ -82,7 +82,7 @@ export function RunSummary({
   const banner = !board || board.state === 'sending' ? '' : me ? (board.isBest ? (me.rank === 1 ? 'NOVO CAMPEÃO!' : `NOVA POSIÇÃO #${me.rank}!`) : `SUA MELHOR POSIÇÃO: #${me.rank}`) : '';
 
   return (
-    <div className="fixed inset-0 flex flex-col bg-[rgba(22,18,31,0.88)] backdrop-blur-md z-30">
+    <div className="fixed inset-0 flex flex-col bg-[rgba(22,18,31,0.94)] z-30">
       <div className="flex-1 min-h-0 overflow-y-auto px-4 pt-3">
       <div className="w-full max-w-2xl mx-auto min-h-full flex flex-col justify-center">
         <div className="text-center mb-3">

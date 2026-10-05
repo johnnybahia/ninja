@@ -7,7 +7,7 @@ import { initAudio } from './game/audio';
 import type { Quality, QualitySetting } from './game/postfx';
 import type { AtmosMode } from './game/atmosphere';
 import type { ThemeMode } from './game/theme';
-import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft, ArrowUp, SlidersHorizontal } from 'lucide-react';
+import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft, ChevronDown, ArrowUp, SlidersHorizontal, Gamepad2 } from 'lucide-react';
 import { TunePanel } from './TunePanel';
 import { TUNE, loadTune } from './game/tunables';
 import { getLoadProgress, onLoadProgress } from './game/models';
@@ -24,6 +24,7 @@ import type { CardOffer } from './game/cards';
 import { CardPicker } from './ui/CardPicker';
 import { Temple } from './ui/Temple';
 import { RunSummary as RunSummaryScreen, type RunResult } from './ui/RunSummary';
+import { BossBar, GourdIcon, PlayerBars, useHudScale } from './ui/Hud';
 
 const SLOT_COUNT = 2;
 const SLOT_LABELS = ['Principal', 'Secundária'];
@@ -68,6 +69,7 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const minimapRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<GameEngine | null>(null);
+  useHudScale();
 
   // UI State
   const [gameState, setGameState] = useState<'menu' | 'arsenal' | 'play' | 'over'>('menu');
@@ -94,6 +96,14 @@ export default function App() {
   const metaRef = useRef(meta);
   const [persistOk, setPersistOk] = useState(() => metaPersistent());
   const [showTemple, setShowTemple] = useState(false);
+  // the controls list on the menu: open for someone who has never scored, folded away after that
+  const [showHow, setShowHow] = useState(() => {
+    try {
+      return Number(localStorage.getItem('kage_best_score') || 0) === 0;
+    } catch {
+      return true;
+    }
+  });
   // global ranking: who is playing (saved on this browser), whether they confirmed it this
   // session, and the place the last run earned
   const rankOn = rankingEnabled();
@@ -703,7 +713,7 @@ export default function App() {
       {/* Floating Virtual Joystick */}
       {joyActive && (
         <div
-          className="fixed pointer-events-none rounded-full border-2 border-[rgba(239,230,210,0.45)] bg-[rgba(22,18,31,0.35)] backdrop-blur-xs transition-opacity duration-150 z-20"
+          className="fixed pointer-events-none rounded-full border-2 border-[rgba(239,230,210,0.45)] bg-[rgba(22,18,31,0.4)] transition-opacity duration-150 z-20"
           style={{
             width: 120,
             height: 120,
@@ -730,87 +740,42 @@ export default function App() {
           gameState === 'play' ? 'opacity-100 pointer-events-none' : 'opacity-0 pointer-events-none invisible'
         }`}
       >
-          {/* Top Left: Character Avatar & Health, Stamina, XP, Wave */}
-          <div className="absolute top-[calc(var(--sat)+12px)] left-[calc(var(--sal)+12px)] flex items-center gap-2.5 pointer-events-auto">
-            {/* Character Portrait Photo */}
-            <div className="relative shrink-0">
-              <img
-                src={charId === 'samurai' ? ICON_URLS.samurai_portrait : ICON_URLS.kage_portrait}
-                alt="Player Avatar"
-                className="w-12 h-12 rounded-full border-2 border-[var(--ember)] shadow-md object-cover bg-black/60"
-              />
-            </div>
-            <div className="w-[min(42vw,190px)]">
-              {/* HP Bar */}
-              <div className="h-3.5 rounded-sm bg-[rgba(22,18,31,0.75)] border border-[rgba(239,230,210,0.35)] overflow-hidden mb-1 shadow-sm">
-                <div
-                  className="h-full bg-linear-to-r from-[#8e1f28] to-[var(--torii)] transition-transform duration-100 origin-left"
-                  style={{ transform: `scaleX(${Math.max(0, hp / maxHp)})` }}
-                />
-              </div>
-              {/* Stamina Bar */}
-              <div className="h-2 rounded-sm bg-[rgba(22,18,31,0.7)] border border-[rgba(239,230,210,0.25)] overflow-hidden mb-1">
-                <div
-                  className="h-full bg-[var(--ember)] transition-transform duration-100 origin-left"
-                  style={{ transform: `scaleX(${Math.max(0, stamina / maxStamina)})` }}
-                />
-              </div>
-              {/* XP Bar */}
-              <div className="h-1 rounded-sm bg-[rgba(22,18,31,0.5)] overflow-hidden mb-1">
-                <div
-                  className="h-full bg-[var(--jade)] transition-transform duration-100 origin-left"
-                  style={{ transform: `scaleX(${Math.max(0, xp / xpNext)})` }}
-                />
-              </div>
-              {/* Wave & Level Text */}
-              <div className="flex justify-between text-xs font-bold text-[var(--paper)] drop-shadow-sm px-0.5">
-                <span>Onda {engineRef.current?.wave || 1}</span>
-                <span className="text-[var(--jade)]">Nível {level}</span>
-              </div>
-              {waveMod && (
-                <div className="mt-0.5 inline-flex items-center gap-1 rounded-full border border-[rgba(255,209,102,0.5)] bg-[rgba(22,18,31,0.7)] px-2 py-0.5 text-[10px] font-bold text-[#ffd166]" title={waveMod.desc}>
-                  <span className="font-serif text-xs leading-none">{waveMod.glyph}</span>
-                  {waveMod.name}
-                </div>
-              )}
-            </div>
-          </div>
+          {/* Top Left: portrait, health, stamina, XP, wave */}
+          <PlayerBars
+            portrait={charId === 'samurai' ? ICON_URLS.samurai_portrait : ICON_URLS.kage_portrait}
+            hp={hp}
+            maxHp={maxHp}
+            stamina={stamina}
+            maxStamina={maxStamina}
+            xp={xp}
+            xpNext={xpNext}
+            level={level}
+            wave={engineRef.current?.wave || 1}
+            mod={waveMod}
+          />
 
           {/* Top Center-Right: Score and this run's Honra */}
-          <div className="absolute top-[calc(var(--sat)+12px)] right-[calc(var(--sar)+126px)] text-right font-extrabold text-2xl font-serif text-[var(--paper)] drop-shadow-md">
+          <div className="absolute top-[calc(var(--sat)+12px)] right-[calc(var(--sar)+126px)] text-right font-extrabold text-2xl font-serif text-[var(--paper)] tabular-nums [text-shadow:0_2px_8px_rgba(0,0,0,0.85)]">
             {Math.round(score).toLocaleString('pt-BR')}
             <div className="text-xs font-bold text-[var(--ember)] leading-none mt-0.5">{runHonor} 誉</div>
           </div>
 
-          {/* Boss life bar (the notch marks where the first deathblow leaves it) */}
-          {bossBar && (
-            <div className="absolute left-1/2 -translate-x-1/2 top-[calc(var(--sat)+10px)] w-[min(38vw,380px)] pointer-events-none">
-              <div className={`text-center font-serif text-xs font-extrabold tracking-[0.3em] drop-shadow mb-0.5 ${bossBar.fury ? 'text-[#ff5a3a]' : 'text-[var(--paper)]'}`}>
-                {bossBar.name}{bossBar.fury ? ' · 怒' : ''}
-              </div>
-              <div className="relative h-2.5 rounded-sm bg-[rgba(10,8,14,0.75)] border border-[rgba(239,230,210,0.4)] overflow-hidden">
-                <div
-                  className={`absolute inset-y-0 left-0 transition-[width] duration-200 ${bossBar.fury ? 'bg-[#ff5a1a] animate-pulse' : 'bg-[#d8242a]'}`}
-                  style={{ width: `${Math.max(0, Math.min(100, (bossBar.hp / bossBar.max) * 100))}%` }}
-                />
-                <div className="absolute inset-y-0 left-1/2 w-px bg-[rgba(239,230,210,0.6)]" />
-              </div>
-            </div>
-          )}
+          {/* Boss life bar */}
+          {bossBar && <BossBar boss={bossBar} />}
 
           {/* Minimap */}
           <canvas
             ref={minimapRef}
             width={200}
             height={200}
-            className="absolute top-[calc(var(--sat)+10px)] right-[calc(var(--sar)+10px)] w-24 h-24 short:w-20 short:h-20 rounded-full border-1.5 border-[rgba(239,230,210,0.4)] bg-[rgba(22,18,31,0.55)] pointer-events-auto"
+            className="absolute top-[calc(var(--sat)+10px)] right-[calc(var(--sar)+10px)] w-24 h-24 short:w-20 short:h-20 rounded-full border-2 border-[rgba(216,179,106,0.6)] bg-[rgba(22,18,31,0.6)] shadow-[inset_0_0_14px_rgba(0,0,0,0.65),0_4px_12px_rgba(0,0,0,0.5)] pointer-events-auto"
           />
 
           {/* Camera Recenter & Settings Buttons */}
           <div className="absolute top-[calc(var(--sat)+115px)] short:top-[calc(var(--sat)+96px)] right-[calc(var(--sar)+12px)] flex flex-col gap-2 pointer-events-auto">
             <button
               onClick={handleRecenterCamera}
-              className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(239,230,210,0.3)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform duration-75"
+              className="kg-btn w-10 h-10 flex items-center justify-center active:scale-95 transition-transform duration-75"
               title="Recentralizar Câmera atrás do Ninja"
               aria-label="Recentralizar Câmera"
             >
@@ -818,7 +783,7 @@ export default function App() {
             </button>
             <button
               onClick={() => setShowSettings(!showSettings)}
-              className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(239,230,210,0.3)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform duration-75"
+              className="kg-btn w-10 h-10 flex items-center justify-center active:scale-95 transition-transform duration-75"
               title="Configurações de Câmera e Toque"
               aria-label="Configurações"
             >
@@ -827,7 +792,7 @@ export default function App() {
             {tuneEnabled && (
               <button
                 onClick={() => setShowTune(!showTune)}
-                className="w-10 h-10 rounded-full bg-[rgba(22,18,31,0.65)] border border-[rgba(239,230,210,0.3)] text-[var(--paper)] flex items-center justify-center active:scale-95 transition-transform duration-75"
+                className="kg-btn w-10 h-10 flex items-center justify-center active:scale-95 transition-transform duration-75"
                 title="Ajuste de movimento"
                 aria-label="Ajuste de movimento"
               >
@@ -841,7 +806,7 @@ export default function App() {
           {/* Banner message */}
           {banner && (
             <div className={`absolute left-0 right-0 top-[calc(var(--sat)+64px)] ${bossBar ? 'short:top-[calc(var(--sat)+44px)]' : 'short:top-[calc(var(--sat)+8px)]'} text-center pointer-events-none drop-shadow-lg transition-opacity duration-300`}>
-              <span className="block font-serif text-2xl sm:text-3xl short:text-lg font-extrabold tracking-wide text-[var(--paper)]">
+              <span className="kg-banner-main font-serif text-2xl sm:text-3xl short:text-lg font-extrabold tracking-wide text-[var(--paper)]">
                 {banner.main}
               </span>
               <span className="block text-xs sm:text-sm short:text-[10px] short:truncate short:max-w-[44vw] short:mx-auto text-[var(--ember)] font-medium mt-1 short:mt-0">
@@ -858,12 +823,12 @@ export default function App() {
               </div>
               <div className="text-[10px] sm:text-xs short:hidden font-extrabold text-[#ffd166] tracking-widest uppercase mt-0.5 drop-shadow-md">
                 {combo >= 7
-                  ? '⚔️ Massacre Sangrento!'
+                  ? '殺 Massacre Sangrento!'
                   : combo >= 5
-                  ? '🩸 Frenesi Cortante!'
+                  ? '血 Frenesi Cortante!'
                   : combo >= 3
-                  ? '⚡ Corte Triplo!'
-                  : '⚔️ Corte Duplo!'}
+                  ? '三 Corte Triplo!'
+                  : '二 Corte Duplo!'}
               </div>
             </div>
           )}
@@ -900,8 +865,11 @@ export default function App() {
           </div>
 
           {/* Bottom Right Controls: arc of action buttons around the primary attack */}
-          <div className="absolute right-[calc(var(--sar)+14px)] bottom-[calc(var(--sab)+14px)] flex flex-col items-end gap-2 pointer-events-none">
-            <div className="text-xs font-bold text-[var(--ember)] drop-shadow-md pr-1">
+          <div
+            className="absolute right-[calc(var(--sar)+14px)] bottom-[calc(var(--sab)+14px)] flex flex-col items-end gap-2 pointer-events-none"
+            style={{ transform: 'scale(var(--hud-s))', transformOrigin: 'bottom right' }}
+          >
+            <div className="font-serif text-xs font-extrabold tracking-wide text-[var(--ember)] pr-1 [text-shadow:0_1px_5px_rgba(0,0,0,0.9)]">
               {activeWeapon?.name || 'Arma'}
             </div>
 
@@ -923,12 +891,12 @@ export default function App() {
                     onPointerUp={() => handleSlotUp(s)}
                     onPointerCancel={() => handleSlotUp(s)}
                     onPointerLeave={() => handleSlotUp(s)}
-                    className={`absolute ${pos} rounded-full flex items-center justify-center pointer-events-auto shadow-lg transition-transform active:scale-95 ${
+                    className={`absolute ${pos} kg-btn flex items-center justify-center pointer-events-auto active:scale-95 transition-transform ${
                       deathblow
-                        ? 'border-2 border-[#ff3b24] bg-[rgba(200,20,10,0.45)] shadow-[0_0_18px_rgba(255,40,20,0.8)]'
+                        ? 'border-2 border-[#ff3b24] bg-[radial-gradient(circle_at_32%_26%,rgba(255,90,60,0.75),rgba(110,10,8,0.9)_70%)] shadow-[0_0_18px_rgba(255,40,20,0.8)]'
                         : isActive
-                        ? 'border-2 border-[var(--ember)] bg-[rgba(242,166,90,0.25)]'
-                        : 'border border-[rgba(239,230,210,0.4)] bg-[rgba(22,18,31,0.7)]'
+                        ? 'kg-btn-ember'
+                        : ''
                     } ${hasSpecial && !deathblow ? 'ring-2 ring-[#ffd166] animate-pulse' : ''}`}
                     aria-label={deathblow ? 'Golpe final' : `Atacar com ${w?.name}`}
                     title={w?.name}
@@ -963,20 +931,22 @@ export default function App() {
                 onPointerUp={() => engineRef.current?.guardUp()}
                 onPointerCancel={() => engineRef.current?.guardUp()}
                 onPointerLeave={() => engineRef.current?.guardUp()}
-                className="absolute right-[84px] bottom-[64px] w-[66px] h-[66px] rounded-full border-2 border-[rgba(143,224,200,0.6)] bg-[rgba(22,18,31,0.7)] flex flex-col items-center justify-center pointer-events-auto shadow-md active:bg-[rgba(143,224,200,0.3)] active:scale-95 transition-transform duration-75"
+                className="absolute right-[84px] bottom-[64px] w-[66px] h-[66px] kg-btn kg-btn-guard flex flex-col items-center justify-center pointer-events-auto active:scale-95 transition-transform duration-75"
                 aria-label="Defesa"
               >
                 <Shield className="w-6 h-6 text-[#8fe0c8] pointer-events-none" />
                 <span className="text-[10px] font-bold text-[var(--paper)] leading-none mt-0.5 pointer-events-none">Defesa</span>
               </button>
 
-              {/* Dash */}
+              {/* Dash: dims while there is not enough stamina for it */}
               <button
                 onPointerDown={(e) => {
                   e.stopPropagation();
                   engineRef.current?.dash();
                 }}
-                className="absolute right-[96px] bottom-0 w-14 h-14 rounded-full border border-[rgba(239,230,210,0.4)] bg-[rgba(22,18,31,0.65)] text-[11px] font-bold text-[var(--paper)] pointer-events-auto active:bg-[rgba(242,166,90,0.4)] shadow-md transition-transform active:scale-95"
+                className={`absolute right-[96px] bottom-0 w-14 h-14 kg-btn text-[11px] font-bold pointer-events-auto active:scale-95 transition-transform duration-75 ${
+                  stamina < (engineRef.current?.dashCost() ?? 22) ? 'kg-btn-off' : ''
+                }`}
                 aria-label="Esquiva"
               >
                 Esquiva
@@ -988,7 +958,7 @@ export default function App() {
                   e.stopPropagation();
                   engineRef.current?.jump();
                 }}
-                className="absolute right-[164px] bottom-1 w-[50px] h-[50px] rounded-full border border-[rgba(239,230,210,0.4)] bg-[rgba(22,18,31,0.65)] flex flex-col items-center justify-center pointer-events-auto shadow-md active:bg-[rgba(242,166,90,0.4)] active:scale-95 transition-transform duration-75"
+                className="absolute right-[164px] bottom-1 w-[50px] h-[50px] kg-btn flex flex-col items-center justify-center pointer-events-auto active:scale-95 transition-transform duration-75"
                 aria-label="Pulo"
               >
                 <ArrowUp className="w-4 h-4 text-[var(--paper)] pointer-events-none" />
@@ -1002,12 +972,12 @@ export default function App() {
                   engineRef.current?.heal();
                 }}
                 disabled={heals <= 0}
-                className={`absolute right-[158px] bottom-[72px] w-[46px] h-[46px] rounded-full border flex items-center justify-center pointer-events-auto shadow-md active:scale-95 transition-transform duration-75 ${
-                  heals > 0 ? 'border-[rgba(122,255,176,0.6)] bg-[rgba(22,18,31,0.7)]' : 'border-[rgba(239,230,210,0.15)] bg-[rgba(22,18,31,0.4)] opacity-50'
+                className={`absolute right-[158px] bottom-[72px] w-[46px] h-[46px] kg-btn flex items-center justify-center pointer-events-auto active:scale-95 transition-transform duration-75 ${
+                  heals > 0 ? 'border-[rgba(122,255,176,0.65)]' : 'kg-btn-off'
                 }`}
                 aria-label="Cura"
               >
-                <span className="text-lg leading-none pointer-events-none">🍶</span>
+                <GourdIcon className={`w-6 h-6 pointer-events-none ${heals > 0 ? 'text-[#9dffc4]' : 'text-[var(--paper)]'}`} />
                 <span className="absolute -top-1 -right-1 min-w-4 text-[10px] bg-[#7affb0] text-[#16121f] font-bold rounded-full px-1 pointer-events-none">
                   {heals}
                 </span>
@@ -1027,93 +997,119 @@ export default function App() {
         )}
       </div>
 
-      {/* Main Start Menu */}
+      {/* Main Start Menu: title, one clear way in, then the day's missions and the controls. Two
+          columns on short landscape phones so the way in never scrolls out of sight. */}
       {gameState === 'menu' && (
-        <div id="menu-overlay" className="fixed inset-0 flex items-center justify-center bg-[radial-gradient(ellipse_at_center,rgba(16,12,24,0.78),rgba(16,12,24,0.42))] backdrop-blur-[2px] p-6 z-30 overflow-auto">
-          <div className="max-w-md w-full text-center py-4">
-            <div className="kanji-title font-serif text-8xl font-bold text-[var(--torii)] leading-none mb-2">
-              影
-            </div>
-            <h1 className="font-serif text-4xl font-extrabold text-[var(--paper)] mb-2">Kage</h1>
-            <p className="text-sm text-[var(--paper)]/80 mb-4 px-4 leading-relaxed">
-              Defenda o templo ao entardecer. Enfrente samurais, arqueiros e o temido Oni com armas ninjas lendárias.
-            </p>
-
-            {bestScore > 0 && (
-              <p className="text-xs text-[var(--ember)] font-bold mb-2">
-                Recorde: {bestScore.toLocaleString('pt-BR')} pontos
+        <div id="menu-overlay" className="kg-menu-bg fixed inset-0 z-30 overflow-auto">
+          <div className="mx-auto flex min-h-full w-full max-w-md flex-col justify-center gap-5 px-5 py-8 short:max-w-4xl short:flex-row short:items-center short:gap-8 short:py-3 lg:max-w-4xl lg:flex-row lg:items-center lg:gap-10">
+            <section className="flex flex-col items-center text-center short:w-[44%] short:shrink-0 lg:w-[44%] lg:shrink-0">
+              <div className="relative mt-3 mb-1 short:mt-0 short:mb-0">
+                <div className="kg-enso" aria-hidden="true" />
+                <div className="kg-title-glyph text-[6.5rem] short:text-[4.25rem]">影</div>
+              </div>
+              <h1 className="font-serif text-3xl short:text-2xl font-extrabold tracking-[0.4em] pl-[0.4em] text-[var(--paper)] [text-shadow:0_2px_12px_rgba(0,0,0,0.85)]">KAGE</h1>
+              <p className="mt-1.5 mb-4 short:hidden max-w-[19rem] text-[13px] leading-relaxed text-[var(--paper)]/80">
+                Defenda o templo ao entardecer contra samurais, arqueiros e o temido Oni.
               </p>
-            )}
-            <div className="mb-4 flex flex-wrap items-center justify-center gap-2">
-              <button
-                onClick={() => setShowTemple(true)}
-                className="inline-flex items-center gap-2 text-xs font-bold border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-4 py-1.5 rounded-full active:scale-95 transition-all cursor-pointer"
-              >
-                <span className="font-serif text-base text-[var(--ember)] leading-none">誉</span>
-                Templo da Honra · {meta.honor.toLocaleString('pt-BR')}
-              </button>
-              {rankOn && (
-                <button
-                  onClick={() => setShowRanking(true)}
-                  className="inline-flex items-center gap-2 text-xs font-bold border border-[rgba(239,230,210,0.3)] text-[var(--paper)] px-4 py-1.5 rounded-full active:scale-95 transition-all cursor-pointer"
-                >
-                  <span className="font-serif text-base text-[var(--ember)] leading-none">頂</span>
-                  Ranking
-                </button>
-              )}
-            </div>
 
-            <div className="mb-4 flex justify-center">
-              <ModeChip mode={gameMode ?? 'waves'} status={{ rankOn, rankActive, practice: practiceUrl }} onChange={() => setChoosingMode(true)} />
-            </div>
-
-            <OfflineStatus />
-
-            <Missions meta={meta} today={localDate()} />
-
-            {/* Kage is hidden for now (kept in code, not deleted, in case it comes back) -
-                O Rōnin is the only selectable character while it's the one being tuned. */}
-            <div className="flex flex-col items-center gap-3 mb-6">
-              <button
-                onClick={() => handleCharSelect('samurai')}
-                className="char-card on flex items-center gap-3 w-64 py-3 px-4 rounded-xl border-2 border-[var(--ember)] bg-[rgba(242,166,90,0.2)] shadow-[0_0_16px_rgba(242,166,90,0.35)] transition-all cursor-pointer active:scale-95"
-              >
+              <button onClick={() => handleCharSelect('samurai')} className="kg-cta" aria-label="Jogar">
                 <img
                   src={ICON_URLS.samurai_portrait}
-                  alt="O Rōnin"
-                  className="w-14 h-14 rounded-full border-2 border-[var(--torii)] object-cover shadow-md"
+                  alt=""
+                  className="w-12 h-12 shrink-0 rounded-full border-2 border-[rgba(255,214,160,0.7)] object-cover bg-black/50"
                 />
-                <span className="flex flex-col items-start text-left">
-                  <span className="text-sm font-bold text-[var(--paper)]">{CHAR_NAME.samurai}</span>
-                  <span className="text-[11px] text-[var(--ember)] font-medium">
-                    {loadouts.samurai.map((i) => WEAPONS_KAGE[i].name).join(' & ')}
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="font-serif text-xl font-extrabold leading-tight">Jogar</span>
+                  <span className="truncate text-[11px] font-medium text-[var(--paper)]/85">
+                    {CHAR_NAME.samurai} · {loadouts.samurai.map((i) => WEAPONS_KAGE[i].name).join(' & ')}
                   </span>
                 </span>
+                <span className="font-serif text-2xl font-extrabold leading-none opacity-90" aria-hidden="true">
+                  戦
+                </span>
               </button>
-            </div>
 
-            {/* Instructions list with touch camera explanation */}
-            <div className="text-left text-xs bg-[rgba(22,18,31,0.6)] border border-[rgba(239,230,210,0.15)] rounded-lg p-3.5 mb-6 max-w-sm mx-auto space-y-1.5 text-[var(--paper)]/85">
-              <div className="text-[var(--ember)] font-bold mb-1">🎮 Controles & Rotação Automática:</div>
-              <div>• <b>Mover:</b> arraste no analógico esquerdo. O personagem vira para onde você apontar e a câmera acompanha o trajeto.</div>
-              <div>• <b>Câmera:</b> gira junto automaticamente ao mover, ou arraste com o polegar direito para ajuste livre.</div>
-              <div>• <b>Armas:</b> antes de entrar você escolhe 2 armas no Arsenal. Elas ficam fixas até morrer.</div>
-              <div>• <b>Atacar:</b> toque no botão da arma (segure para disparo contínuo).</div>
-              <div>• <b>Defesa:</b> segure para defender. Toque no instante do golpe inimigo para <b>aparar</b> (faíscas) e quebrar a postura dele.</div>
-              <div>• <b>忍殺 Golpe final:</b> com a postura quebrada (ponto vermelho), ataque de perto para executar.</div>
-              <div>• <b>危 Perigo:</b> rasteira = pule; estocada = apare no tempo certo ou esquive.</div>
-              <div>• <b>Cura:</b> 3 goles da cabaça por onda.</div>
-              <div>• <b>Recentralizar:</b> toque no ícone da bússola para virar a câmera para frente.</div>
-              <div>• <b>No PC:</b> WASD move, mouse gira a câmera, clique esquerdo ataca, clique direito ou F defende, Espaço pula, Shift esquiva, R cura, 1/2 ou Q/E trocam a arma, C recentraliza.</div>
-            </div>
+              <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+                <button onClick={() => setShowTemple(true)} className="kg-chip">
+                  <span className="font-serif text-base text-[var(--ember)] leading-none">誉</span>
+                  Templo da Honra · {meta.honor.toLocaleString('pt-BR')}
+                </button>
+                {rankOn && (
+                  <button onClick={() => setShowRanking(true)} className="kg-chip">
+                    <span className="font-serif text-base text-[var(--ember)] leading-none">頂</span>
+                    Ranking
+                  </button>
+                )}
+              </div>
 
+              <div className="mt-2 flex justify-center">
+                <ModeChip mode={gameMode ?? 'waves'} status={{ rankOn, rankActive, practice: practiceUrl }} onChange={() => setChoosingMode(true)} />
+              </div>
+
+              {bestScore > 0 && (
+                <p className="mt-2.5 text-xs text-[var(--ember)] font-bold">Recorde: {bestScore.toLocaleString('pt-BR')} pontos</p>
+              )}
+              <div className="mt-2">
+                <OfflineStatus />
+              </div>
+            </section>
+
+            <section className="flex flex-col gap-3 short:flex-1 short:min-w-0 lg:flex-1 lg:min-w-0">
+              <Missions meta={meta} today={localDate()} />
+
+              {/* Kage is hidden for now (kept in code, not deleted, in case it comes back) -
+                  O Rōnin is the only selectable character while it's the one being tuned. */}
+              <div className="kg-panel p-3 text-left text-xs">
+                <button
+                  onClick={() => setShowHow((v) => !v)}
+                  className="flex w-full items-center justify-between font-serif text-sm font-extrabold text-[var(--paper)] cursor-pointer"
+                  aria-expanded={showHow}
+                >
+                  <span className="flex items-center gap-2">
+                    <Gamepad2 className="w-4 h-4 text-[var(--ember)]" /> Como jogar
+                  </span>
+                  <ChevronDown className={`w-4 h-4 text-[var(--paper)]/70 transition-transform ${showHow ? 'rotate-180' : ''}`} />
+                </button>
+                {showHow && (
+                  <ul className="mt-2.5 space-y-1.5 text-[var(--paper)]/85 leading-snug">
+                    <li>
+                      <b>Mover:</b> arraste no analógico esquerdo. O personagem vira para onde você apontar e a câmera acompanha o trajeto.
+                    </li>
+                    <li>
+                      <b>Câmera:</b> gira junto automaticamente ao mover, ou arraste com o polegar direito para ajuste livre.
+                    </li>
+                    <li>
+                      <b>Armas:</b> antes de entrar você escolhe 2 armas no Arsenal. Elas ficam fixas até morrer.
+                    </li>
+                    <li>
+                      <b>Atacar:</b> toque no botão da arma (segure para disparo contínuo).
+                    </li>
+                    <li>
+                      <b>Defesa:</b> segure para defender. Toque no instante do golpe inimigo para <b>aparar</b> (faíscas) e quebrar a postura dele.
+                    </li>
+                    <li>
+                      <b>忍殺 Golpe final:</b> com a postura quebrada (ponto vermelho), ataque de perto para executar.
+                    </li>
+                    <li>
+                      <b>危 Perigo:</b> rasteira = pule; estocada = apare no tempo certo ou esquive.
+                    </li>
+                    <li>
+                      <b>Cura:</b> 3 goles da cabaça por onda. <b>Bússola:</b> recentraliza a câmera.
+                    </li>
+                    <li className="pt-1.5 border-t border-[rgba(239,230,210,0.12)]">
+                      <b>No PC:</b> <span className="kg-key">WASD</span> move, mouse gira a câmera, clique esquerdo ataca, clique direito ou <span className="kg-key">F</span> defende, <span className="kg-key">Espaço</span> pula, <span className="kg-key">Shift</span> esquiva, <span className="kg-key">R</span> cura, <span className="kg-key">1</span>/<span className="kg-key">2</span> ou <span className="kg-key">Q</span>/<span className="kg-key">E</span> trocam a arma, <span className="kg-key">C</span> recentraliza.
+                    </li>
+                  </ul>
+                )}
+              </div>
+            </section>
           </div>
         </div>
       )}
 
       {/* Arsenal: pick the 2 weapons for the run (Axelay-style pre-mission loadout) */}
       {gameState === 'arsenal' && (
-        <div id="menu-overlay" className="fixed inset-0 flex justify-center bg-[rgba(22,18,31,0.88)] backdrop-blur-md p-4 z-30 overflow-y-auto">
+        <div id="menu-overlay" className="fixed inset-0 flex justify-center bg-[rgba(22,18,31,0.95)] p-4 z-30 overflow-y-auto">
           <div className="max-w-md w-full my-auto py-2">
             <div className="flex items-center justify-between mb-2">
               <button
@@ -1346,7 +1342,7 @@ export default function App() {
 
       {/* Settings Modal */}
       {showSettings && (
-        <div className="fixed inset-0 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 z-40">
+        <div className="fixed inset-0 flex items-center justify-center bg-black/70 p-4 z-40">
           <div className="bg-[var(--ink)] border border-[rgba(239,230,210,0.3)] rounded-xl max-w-sm w-full p-5 shadow-2xl">
             <h3 className="font-serif text-lg font-bold text-[var(--ember)] mb-4 flex items-center gap-2">
               <Settings className="w-5 h-5" /> Configurações

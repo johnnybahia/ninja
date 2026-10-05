@@ -9,7 +9,7 @@ export function Missions({ meta, today }: { meta: MetaSave; today: string }) {
   const count = alive ? meta.streak.count : 0;
   const played = meta.streak.last === today;
   return (
-    <div className="text-left max-w-sm mx-auto mb-5 rounded-lg border border-[rgba(239,230,210,0.18)] bg-[rgba(22,18,31,0.6)] p-3">
+    <div className="kg-panel text-left w-full p-3">
       <div className="flex items-center justify-between mb-1.5">
         <span className="font-serif text-sm font-extrabold text-[var(--paper)]">Missões do dia</span>
         <span className={`text-[11px] font-bold ${count > 0 ? 'text-[var(--ember)]' : 'text-[var(--paper)]/50'}`}>
