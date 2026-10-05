@@ -193,7 +193,8 @@ export function foliageMaterial(url: string, mesh: () => THREE.Object3D | undefi
 }
 
 // Distant conifer: stacked drooping tiers with a noisy rim, so the silhouette reads as
-// needled boughs instead of a clean cone. Unit height, base at y = 0.
+// needled boughs instead of a clean cone. Unit height, base at y = 0. `aEdge` is 0 at a tier's tip
+// and 1 along its lower rim (0 on the trunk): the forest shader frays the rim with it.
 export function coniferGeometry(seed: number) {
   const parts: THREE.BufferGeometry[] = [];
   const tiers = 5;
@@ -204,11 +205,13 @@ export function coniferGeometry(seed: number) {
     const y0 = 0.12 + t * 0.78;
     const g = new THREE.ConeGeometry(r, h, 16, 2, true);
     const p = g.attributes.position as THREE.BufferAttribute;
+    const edge = new Float32Array(p.count);
     for (let i = 0; i < p.count; i++) {
       const x = p.getX(i);
       const y = p.getY(i);
       const z = p.getZ(i);
       const rad = Math.hypot(x, z);
+      edge[i] = 0.5 - y / h;
       if (rad < 1e-4) continue;
       const a = Math.atan2(z, x);
       // jagged rim: the lower the vertex, the more it is pushed around
@@ -218,9 +221,12 @@ export function coniferGeometry(seed: number) {
     }
     g.translate(0, y0 + h / 2, 0);
     g.deleteAttribute('uv');
+    g.setAttribute('aEdge', new THREE.BufferAttribute(edge, 1));
     parts.push(g);
   }
-  parts.push(new THREE.CylinderGeometry(0.03, 0.05, 0.2, 6).translate(0, 0.1, 0).deleteAttribute('uv') as THREE.BufferGeometry);
+  const trunk = new THREE.CylinderGeometry(0.03, 0.05, 0.2, 6).translate(0, 0.1, 0).deleteAttribute('uv') as THREE.BufferGeometry;
+  trunk.setAttribute('aEdge', new THREE.BufferAttribute(new Float32Array(trunk.attributes.position.count), 1));
+  parts.push(trunk);
   const g = mergeGeometries(parts, false)!;
   g.computeVertexNormals();
   return g;

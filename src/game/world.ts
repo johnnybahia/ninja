@@ -5,11 +5,12 @@ import { TAU, rand } from './constants';
 import type { QualityProfile } from './postfx';
 import { ATMOSPHERES, Atmos, blendAtmos, cloneAtmos } from './atmosphere';
 import { Garden } from './garden';
-import { Lobe, coniferGeometry, foliageCards, foliageMaterial, makeRng, rockGeometry, sweep } from './shapes';
+import { Lobe, coniferGeometry, fbm3, foliageCards, foliageMaterial, makeRng, rockGeometry, sweep } from './shapes';
 import { applySurface, initSurfaces, neutralize } from './surfaces';
 import { detectQuality } from './postfx';
 import { PropSystem, Seg } from './props';
 import { THEMES, Theme, ThemeUniforms, addThemeTint, blendTheme, cloneTheme, themeUniforms } from './theme';
+import { PlazaUniforms, addPlazaFx, plazaUniforms } from './plaza';
 
 export type Solid = { x: number; z: number; r: number; h: number };
 
@@ -172,6 +173,22 @@ function bannerTexture() {
   return t;
 }
 
+// Soft glow for lamp halos: bright core, long gentle falloff
+function haloTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d')!;
+  const gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  gr.addColorStop(0, 'rgba(255,255,255,1)');
+  gr.addColorStop(0.14, 'rgba(255,255,255,0.55)');
+  gr.addColorStop(0.38, 'rgba(255,255,255,0.17)');
+  gr.addColorStop(0.7, 'rgba(255,255,255,0.04)');
+  gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr;
+  g.fillRect(0, 0, 128, 128);
+  return new THREE.CanvasTexture(c);
+}
+
 function roundSpriteTexture() {
   const c = document.createElement('canvas');
   c.width = c.height = 64;
@@ -310,24 +327,50 @@ function curvedBeam(len: number, hgt: number, dep: number, rise: number) {
   return g;
 }
 
-function bladeGeometry() {
-  const segs = 4;
-  const h = 0.46;
-  const w = 0.095;
+// A tuft of grass: a handful of tapering blades fanned out around a point, each one curving out
+// of its own plane. One instance is five blades, so the field needs far fewer instances than single
+// blades and still reads fuller. uv.y runs 0 (root) to 1 (tip) along every blade; the normal leans
+// away from the tuft's centre, so the outer blades catch the light differently from the inner ones.
+function tuftGeometry() {
+  const rng = makeRng(777);
+  const BLADES = 5;
+  const SEGS = 2;
   const pos: number[] = [];
   const nor: number[] = [];
   const uv: number[] = [];
   const idx: number[] = [];
-  for (let i = 0; i <= segs; i++) {
-    const t = i / segs;
-    const half = (w * (1 - t) + 0.004) * 0.5;
-    const bend = t * t * 0.14;
-    pos.push(-half, t * h, bend, half, t * h, bend);
-    nor.push(0, 1, 0, 0, 1, 0);
-    uv.push(0, t, 1, t);
-    if (i < segs) {
-      const b = i * 2;
-      idx.push(b, b + 1, b + 2, b + 1, b + 3, b + 2);
+  for (let b = 0; b < BLADES; b++) {
+    const heading = (b / BLADES) * TAU + rng() * 0.8;
+    const spread = b === 0 ? 0 : 0.045 + rng() * 0.05;
+    const rx = Math.cos(heading) * spread;
+    const rz = Math.sin(heading) * spread;
+    const h = b === 0 ? 0.5 : 0.27 + rng() * 0.2;
+    const wid = 0.07 + rng() * 0.03;
+    const lean = 0.09 + rng() * 0.17;
+    const dx = Math.cos(heading);
+    const dz = Math.sin(heading);
+    // the strip's width runs across the lean, so the blade bends out of its own plane
+    const sx = -dz;
+    const sz = dx;
+    const base = pos.length / 3;
+    for (let i = 0; i <= SEGS; i++) {
+      const t = i / SEGS;
+      const half = Math.max(0.003, wid * 0.5 * Math.pow(1 - t, 0.85));
+      const cx = rx + dx * lean * t * t;
+      const cz = rz + dz * lean * t * t;
+      const cy = h * t * (1 - 0.1 * t);
+      for (const side of [-1, 1]) {
+        const px = cx + sx * half * side;
+        const pz = cz + sz * half * side;
+        pos.push(px, cy, pz);
+        const nl = Math.hypot(px * 0.9, 1, pz * 0.9);
+        nor.push((px * 0.9) / nl, 1 / nl, (pz * 0.9) / nl);
+        uv.push(side < 0 ? 0 : 1, t);
+      }
+      if (i < SEGS) {
+        const a = base + i * 2;
+        idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+      }
     }
   }
   const g = new THREE.BufferGeometry();
@@ -476,7 +519,7 @@ export class World {
   private root = new THREE.Group();
   private sky: THREE.Mesh;
   private grass: THREE.InstancedMesh;
-  private grassMax = 16000;
+  private grassMax = 7500; // tufts (five blades each)
   private petals: THREE.InstancedMesh;
   private petalData: Petal[] = [];
   private petalMax = 420;
@@ -487,6 +530,10 @@ export class World {
   private flames: { outer: THREE.Mesh; inner: THREE.Mesh; ph: number; light: THREE.PointLight }[] = [];
   private lanternLights: THREE.PointLight[] = [];
   private emberSources: THREE.Vector3[] = [];
+  // soft additive halos around every lamp: p position, size in metres, k strength, on (a broken lantern goes dark)
+  private haloSpots: { p: THREE.Vector3; size: number; k: number; on: boolean }[] = [];
+  private halos: THREE.Sprite[] = [];
+  private haloGain = 1; // without bloom (low quality) the halos are the only glow around a lamp
   private dummy = new THREE.Object3D();
   private shojiMat: THREE.MeshBasicMaterial;
   private hemi: THREE.HemisphereLight;
@@ -505,6 +552,7 @@ export class World {
   private groundMat!: THREE.MeshStandardMaterial;
   private groundBase = new THREE.Color();
   private plazaMat!: THREE.MeshStandardMaterial;
+  private plazaU: PlazaUniforms = plazaUniforms(WIND_TIME);
   private plazaBase = new THREE.Color();
   private forestMat!: THREE.MeshLambertMaterial;
   private forestBase = new THREE.Color();
@@ -575,6 +623,7 @@ export class World {
     this.buildDistantForest();
     this.buildBanners(batch);
     this.buildTorches(batch);
+    this.buildHalos();
     batch.build(this.root);
 
     this.garden = new Garden(this.root, atm, WIND_TIME, (x, z, pad) => this.isFree(x, z, pad), this.themeU);
@@ -630,6 +679,7 @@ export class World {
 
     const plazaMat = new THREE.MeshStandardMaterial({ roughness: 0.8, color: new THREE.Color(0.12, 0.12, 0.125) });
     applySurface(plazaMat, 'cobble', { mode: 'top', scale: 0.6, normal: 1.1, breakup: true });
+    addPlazaFx(plazaMat, this.plazaU);
     this.plazaMat = plazaMat;
     this.plazaBase.copy(plazaMat.color);
     const plaza = new THREE.Mesh(new THREE.CircleGeometry(13, 64).rotateX(-Math.PI / 2), plazaMat);
@@ -712,9 +762,23 @@ export class World {
     b.add(box(7.5, 1.3, 4.4), WM.wood, at(mtx(0, 10.6, 0)));
     b.add(curvedRoof(10.5, 6.8, 2.1, 2.6, 0.7), WM.roof, at(mtx(0, 11.15, 0)));
     b.add(box(5.6, 0.3, 0.4), WM.dark, at(mtx(0, 13.28, 0)));
-    // hanging lanterns at the entrance
-    const lanternG = new THREE.CylinderGeometry(0.32, 0.32, 0.62, 20);
-    for (const x of [-3.2, 3.2]) b.add(lanternG, MAT.glow, at(mtx(x, 4.9, 4.7)));
+    // paper lanterns (chōchin) along the eave: glowing body, dark lacquer caps and ribs, a cord
+    const bodyG = new THREE.SphereGeometry(1, 20, 14);
+    const capG = new THREE.CylinderGeometry(0.2, 0.24, 0.07, 14);
+    const ribG = new THREE.TorusGeometry(1, 0.035, 6, 24).rotateX(Math.PI / 2);
+    const cordG = new THREE.CylinderGeometry(0.012, 0.012, 0.5, 4);
+    for (const x of [-6.3, -3.2, 0, 3.2, 6.3]) {
+      const y = 5;
+      b.add(bodyG, MAT.glow, at(mtx(x, y, 4.7, 0, 0, 0, 0.33, 0.44, 0.33)));
+      b.add(capG, WM.dark, at(mtx(x, y + 0.45, 4.7)));
+      b.add(capG, WM.dark, at(mtx(x, y - 0.45, 4.7)));
+      b.add(cordG, WM.dark, at(mtx(x, y + 0.72, 4.7)));
+      for (const yo of [-0.27, -0.09, 0.09, 0.27]) {
+        const rr = 0.33 * Math.sqrt(1 - (yo / 0.44) ** 2) + 0.01;
+        b.add(ribG, WM.dark, at(mtx(x, y + yo, 4.7, 0, 0, 0, rr, 1, rr)));
+      }
+      this.haloSpots.push({ p: new THREE.Vector3(x, y, -29 + 4.7), size: 2.6, k: 0.8, on: true });
+    }
     b.noShadow(MAT.glow);
 
     this.addSolid(-4.5, -29, 6.2, 12);
@@ -916,6 +980,8 @@ export class World {
       const solid = this.addSolid(lx, lz, 0.5, 2.3);
       const ember = new THREE.Vector3(lx, 1.5, lz);
       this.emberSources.push(ember);
+      const halo = { p: new THREE.Vector3(lx, 1.55, lz), size: 3.4, k: 1, on: true };
+      this.haloSpots.push(halo);
       let light: THREE.PointLight | undefined;
       if (lit.has(`${lx},${lz}`)) {
         light = new THREE.PointLight(0xff9a48, 5, 10, 1.6);
@@ -932,9 +998,11 @@ export class World {
         onBreak: () => {
           const i = this.emberSources.indexOf(ember);
           if (i >= 0) this.emberSources.splice(i, 1);
+          halo.on = false;
         },
         onRestore: () => {
           if (!this.emberSources.includes(ember)) this.emberSources.push(ember);
+          halo.on = true;
         }
       });
     }
@@ -955,26 +1023,71 @@ export class World {
     });
   }
 
-  // Dark pine silhouettes between the arena and the mountains for depth
+  // Dark pine silhouettes between the arena and the mountains for depth: three bands (nearer ones
+  // darker and crisper, farther ones left to the fog), each tree a little different in tint, with
+  // frayed tier rims (alpha to coverage) and a foot that dissolves into the ground mist
   private buildDistantForest() {
-    const n = 150;
     const g = coniferGeometry(9);
-    this.forestMat = new THREE.MeshLambertMaterial({ color: 0x1a2a22, side: THREE.DoubleSide });
-    this.forestBase.copy(this.forestMat.color);
-    const m = new THREE.InstancedMesh(g, this.forestMat, n);
+    const mat = new THREE.MeshLambertMaterial({ color: 0x1a2a22, side: THREE.DoubleSide });
+    mat.alphaTest = 0.5;
+    mat.alphaToCoverage = true;
+    mat.onBeforeCompile = (shader) => {
+      shader.vertexShader =
+        'attribute float aEdge;\nvarying float vEdge;\nvarying vec3 vTreeP;\n' +
+        shader.vertexShader.replace(
+          '#include <begin_vertex>',
+          `#include <begin_vertex>
+          vEdge = aEdge;
+          vTreeP = position;`
+        );
+      shader.fragmentShader =
+        'varying float vEdge;\nvarying vec3 vTreeP;\n' +
+        shader.fragmentShader
+          .replace(
+            '#include <color_fragment>',
+            `#include <color_fragment>
+            diffuseColor.rgb *= mix(0.55, 1.25, smoothstep(0.05, 1.0, vTreeP.y));
+            float tFray = smoothstep(0.3, 1.0, vEdge);
+            vec2 tCell = floor(vec2(atan(vTreeP.z, vTreeP.x) * 90.0, vTreeP.y * 26.0));
+            float tN = fract(sin(dot(tCell, vec2(12.9898, 78.233))) * 43758.5453);
+            diffuseColor.a = tN > 1.0 - tFray * 0.8 ? 0.0 : 1.0;`
+          )
+          .replace(
+            '#include <emissivemap_fragment>',
+            `#include <emissivemap_fragment>
+            totalEmissiveRadiance += fogColor * (1.0 - smoothstep(0.0, 0.42, vTreeP.y)) * 0.3;`
+          );
+    };
+    mat.customProgramCacheKey = () => 'forest';
+    this.forestMat = mat;
+    this.forestBase.copy(mat.color);
+    const bands: [number, number, number][] = [
+      [46, 62, 70],
+      [62, 80, 80],
+      [80, 98, 60]
+    ];
+    const n = bands.reduce((a, b) => a + b[2], 0);
+    const m = new THREE.InstancedMesh(g, mat, n);
     const d = this.dummy;
-    for (let i = 0; i < n; i++) {
-      const a = rand(0, TAU);
-      const r = rand(52, 95);
-      const s = rand(3.5, 8);
-      d.position.set(Math.sin(a) * r, -0.2, Math.cos(a) * r);
-      d.rotation.set(0, rand(0, TAU), 0);
-      const hh = s * rand(1.6, 2.4);
-      d.scale.set(s * 0.85, hh, s * 0.85);
-      d.updateMatrix();
-      m.setMatrixAt(i, d.matrix);
+    const c = new THREE.Color();
+    let i = 0;
+    for (const [r0, r1, count] of bands) {
+      for (let k = 0; k < count; k++, i++) {
+        const a = rand(0, TAU);
+        const r = rand(r0, r1);
+        const s = rand(3.5, 8);
+        d.position.set(Math.sin(a) * r, -0.2, Math.cos(a) * r);
+        d.rotation.set(0, rand(0, TAU), 0);
+        const hh = s * rand(1.6, 2.4);
+        d.scale.set(s * 0.85, hh, s * 0.85);
+        d.updateMatrix();
+        m.setMatrixAt(i, d.matrix);
+        // each tree leans a little toward blue, green or brown so the wall of trees is not one colour
+        m.setColorAt(i, c.setRGB(rand(0.82, 1.15), rand(0.85, 1.2), rand(0.82, 1.1)));
+      }
     }
     m.instanceMatrix.needsUpdate = true;
+    if (m.instanceColor) m.instanceColor.needsUpdate = true;
     this.root.add(m);
   }
 
@@ -1056,6 +1169,20 @@ export class World {
       this.flames.push({ outer, inner, ph: rand(0, 10), light });
       this.addSolid(tx, tz, 0.35, 2.5);
       this.emberSources.push(new THREE.Vector3(tx, 2.6, tz));
+      this.haloSpots.push({ p: new THREE.Vector3(tx, 2.75, tz), size: 4.2, k: 1.1, on: true });
+    }
+  }
+
+  // One additive sprite per lamp: a warm haze in the air that holds up even where there is no bloom
+  private buildHalos() {
+    const map = haloTexture();
+    for (const h of this.haloSpots) {
+      const mat = new THREE.SpriteMaterial({ map, color: new THREE.Color(1, 0.55, 0.2), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, fog: false, opacity: 0 });
+      const sp = new THREE.Sprite(mat);
+      sp.position.copy(h.p);
+      sp.scale.setScalar(h.size);
+      this.root.add(sp);
+      this.halos.push(sp);
     }
   }
 
@@ -1070,7 +1197,7 @@ export class World {
         shader.vertexShader.replace(
           '#include <begin_vertex>',
           `#include <begin_vertex>
-          vBladeH = position.y / 0.46;
+          vBladeH = uv.y;
           vec3 wOrigin = instanceMatrix[3].xyz;
           float wPh = uWindTime * 2.0 + wOrigin.x * 0.31 + wOrigin.z * 0.23;
           float gust = 0.6 + 0.4 * sin(uWindTime * 0.5 + wOrigin.x * 0.05);
@@ -1093,17 +1220,23 @@ export class World {
     };
     mat.customProgramCacheKey = () => 'grass';
     addThemeTint(mat, this.themeU.grass, null);
-    const m = new THREE.InstancedMesh(bladeGeometry(), mat, this.grassMax);
+    const m = new THREE.InstancedMesh(tuftGeometry(), mat, this.grassMax);
     const d = this.dummy;
+    const rng = makeRng(31337);
     const cA = new THREE.Color(0x7a9a48);
     const cB = new THREE.Color(0xaab85c);
     const cC = new THREE.Color(0x587a38);
     const col = new THREE.Color();
+    const sstep = (a: number, b: number, x: number) => {
+      const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+      return t * t * (3 - 2 * t);
+    };
     let i = 0;
     let guard = 0;
-    while (i < this.grassMax && guard++ < this.grassMax * 6) {
-      const a = rand(0, TAU);
-      const r = Math.sqrt(rand(13.6 * 13.6, 48 * 48));
+    while (i < this.grassMax && guard++ < this.grassMax * 12) {
+      const a = rng() * TAU;
+      // a third of the tufts crowd the first metres past the plaza, so the stone is framed by grass
+      const r = rng() < 0.3 ? 13.5 + rng() * rng() * 5.5 : Math.sqrt(13.6 * 13.6 + rng() * (48 * 48 - 13.6 * 13.6));
       const x = Math.sin(a) * r;
       const z = Math.cos(a) * r;
       if (z < -21.5 && Math.abs(x) < 10) continue; // temple podium
@@ -1111,14 +1244,16 @@ export class World {
       if (Math.abs(x) < 2 && z > 13 && z < 17) continue;
       if (this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r * 0.8)) continue;
       if (Garden.blocked(x, z)) continue;
-      const s = rand(0.7, 1.35) * (r > 36 ? 1.2 : 1);
+      // meadow patches: tufts gather where a slow noise runs high and thin out where it runs low
+      const patch = fbm3(x * 0.11, 0, z * 0.11, 5, 3);
+      if (rng() > 0.25 + 0.75 * sstep(0.32, 0.6, patch)) continue;
+      const s = (0.75 + rng() * 0.6) * (r > 36 ? 1.2 : 1) * (rng() < 0.08 ? 1.45 : 1);
       d.position.set(x, 0, z);
-      d.rotation.set(rand(-0.15, 0.15), rand(0, TAU), rand(-0.15, 0.15));
-      d.scale.set(s, s * rand(0.8, 1.3), s);
+      d.rotation.set((rng() - 0.5) * 0.24, rng() * TAU, (rng() - 0.5) * 0.24);
+      d.scale.set(s, s * (0.8 + rng() * 0.5), s);
       d.updateMatrix();
       m.setMatrixAt(i, d.matrix);
-      const t = Math.random();
-      col.copy(cA).lerp(t < 0.5 ? cB : cC, Math.random() * 0.8);
+      col.copy(cA).lerp(rng() < 0.5 ? cB : cC, rng() * 0.8).multiplyScalar(0.88 + 0.24 * patch);
       m.setColorAt(i, col);
       i++;
     }
@@ -1270,6 +1405,9 @@ export class World {
     put(this.themeU.lily, { color: th.grass.color, k: 0 }, 1 - th.flowers, 0);
     this.groundMat.color.copy(this.groundBase).lerp(th.ground.color, th.ground.k);
     this.plazaMat.color.copy(this.plazaBase).lerp(th.ground.color, th.ground.k * 0.45);
+    this.plazaU.snow.value = th.cover.snow;
+    this.plazaU.leaf.value = th.cover.leaf;
+    this.plazaU.ember.value = th.cover.ember;
     this.forestMat.color.copy(this.forestBase).lerp(th.forest.color, th.forest.k);
     this.petalMat.color.copy(th.fall.color);
     this.petalMat.emissive.copy(th.fall.emissive);
@@ -1343,6 +1481,8 @@ export class World {
       (this.grass.material as THREE.Material).needsUpdate = true;
     }
     this.petalQuality = p.ambientParticles;
+    this.plazaU.fx.value = p.groundFx;
+    this.haloGain = p.bloom ? 1 : 1.8;
     this.garden.setReflections(p.reflections);
     this.mist.forEach((m, i) => (m.visible = i < p.mistLayers));
     this.petals.count = Math.floor(this.petalMax * p.ambientParticles);
@@ -1430,6 +1570,15 @@ export class World {
     const glowK = 0.94 + Math.sin(time * 7.3) * 0.03 + Math.sin(time * 13.1) * 0.03;
     const lamp = this.atm.lantern;
     this.lanternLights.forEach((l, i) => (l.intensity = lamp * (glowK + Math.sin(time * 5 + i) * 0.04)));
+    const haloK = Math.min(1.5, Math.max(0.35, this.atm.glow / 3)) * glowK * 0.42 * this.haloGain;
+    for (let i = 0; i < this.halos.length; i++) {
+      const h = this.haloSpots[i];
+      const sp = this.halos[i];
+      sp.visible = h.on;
+      // gone as the camera comes close, so a lamp never veils the picture from a few steps away
+      const dist = sp.position.distanceTo(camPos);
+      (sp.material as THREE.SpriteMaterial).opacity = h.on ? haloK * h.k * Math.min(1, Math.max(0, (dist - 1.5) / 3)) : 0;
+    }
     const sj = this.atm.shoji * glowK;
     this.shojiMat.color.setRGB(1.05 * sj, 0.82 * sj, 0.56 * sj);
 
