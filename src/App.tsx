@@ -85,6 +85,8 @@ export default function App() {
   const [score, setScore] = useState(0);
   const [combo, setCombo] = useState<ComboInfo | null>(null);
   const [callouts, setCallouts] = useState<Callout[]>([]);
+  // the slot index of the weapon whose hook just landed: the other button lights up for a moment
+  const [followUp, setFollowUp] = useState<number | null>(null);
   const [banner, setBanner] = useState<{ main: string; sub: string } | null>(null);
   const [activeWeaponIdx, setActiveWeaponIdx] = useState(0);
   const [activeWeapon, setActiveWeapon] = useState<WeaponDef | null>(null);
@@ -391,6 +393,7 @@ export default function App() {
       onScoreChange: (s) => setScore(s),
       onComboChange: (c) => setCombo(c),
       onCallout: (c) => setCallouts((cur) => [...cur.slice(-2), c]),
+      onFollowUp: (i) => setFollowUp(i),
       onWaveChange: (_w, text, sub) => showBanner(text, sub),
       onWeaponChange: (idx, w) => {
         setActiveWeaponIdx(idx);
@@ -868,6 +871,7 @@ export default function App() {
                 const isActive = activeWeaponIdx === weaponIdx;
                 const hasSpecial = specials[weaponIdx] > 0;
                 const deathblow = s === 0 && dbReady;
+                const nudge = followUp !== null && weaponIdx !== followUp && !deathblow;
                 // Big primary in the corner, secondary right above it
                 const pos = ['right-0 bottom-0 w-20 h-20', 'right-1 bottom-[92px] w-15 h-15'][s];
                 return (
@@ -886,7 +890,7 @@ export default function App() {
                         : isActive
                         ? 'kg-btn-ember'
                         : ''
-                    } ${hasSpecial && !deathblow ? 'ring-2 ring-[#ffd166] animate-pulse' : ''}`}
+                    } ${hasSpecial && !deathblow ? 'ring-2 ring-[#ffd166] animate-pulse' : ''} ${nudge ? 'kg-nudge' : ''}`}
                     aria-label={deathblow ? 'Golpe final' : `Atacar com ${w?.name}`}
                     title={w?.name}
                   >

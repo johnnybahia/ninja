@@ -287,6 +287,17 @@ html, body, #root {
   }
 }
 
+/* the other weapon's button right after a hook: a gold ring that beats */
+@keyframes kgNudge {
+  0%,
+  100% {
+    box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.35), 0 0 0 2px rgba(255, 209, 102, 0.9), 0 0 12px rgba(255, 209, 102, 0.5);
+  }
+  50% {
+    box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.35), 0 0 0 4px #ffd166, 0 0 26px rgba(255, 209, 102, 0.95);
+  }
+}
+
 @keyframes kgFadeOnly {
   0%,
   70% {
@@ -565,6 +576,10 @@ html, body, #root {
   .kg-shout-in {
     animation: kgShoutIn 1.2s cubic-bezier(0.2, 0.9, 0.3, 1) forwards;
   }
+  .kg-nudge {
+    border-color: #ffd166;
+    animation: kgNudge 0.5s ease-in-out infinite;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -578,6 +593,10 @@ html, body, #root {
   .kg-combo-broke,
   .kg-shout-in {
     animation-name: kgFadeOnly !important;
+  }
+  .kg-nudge {
+    animation: none !important;
+    box-shadow: 0 0 0 3px #ffd166 !important;
   }
   .kg-cta::after,
   .kg-low {

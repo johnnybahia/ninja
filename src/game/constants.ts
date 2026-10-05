@@ -28,7 +28,7 @@ export const WEAPONS_KAGE: WeaponDef[] = [
 export const WEAPON_INFO: Record<string, { tag: string; desc: string }> = {
   katana: { tag: 'Corpo a corpo', desc: 'Cortes rápidos em arco; o 3º golpe da sequência causa quase o dobro de dano.' },
   bo: { tag: 'Corpo a corpo · 360°', desc: 'Golpe horizontal, empurrão que afasta quem está à frente e giro de 360° que atinge todos ao redor. Lento, ótimo quando cercado.' },
-  kama: { tag: 'Médio alcance', desc: 'Corrente longa que puxa o inimigo até você.' },
+  kama: { tag: 'Gancho · Médio alcance', desc: 'A corrente prende o inimigo à frente e o arrasta até você, atordoado (o Oni e o Brutamontes são pesados: é você quem vai até eles). Aproveite a janela para atacar com a outra arma: o primeiro golpe dela sai mais forte. Sem gancho, vira um chicote em arco.' },
   shuriken: { tag: 'Distância', desc: 'Três estrelas em leque. Cobre uma área larga, dano baixo por estrela.' },
   kunai: { tag: 'Distância', desc: 'Lâmina rápida e forte que atravessa vários inimigos em linha.' },
   bomb: { tag: 'Explosivo · Área', desc: 'Explosão com dano alto em área. Consome vigor.' },
