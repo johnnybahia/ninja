@@ -532,7 +532,7 @@ export class World {
   private emberSources: THREE.Vector3[] = [];
   // soft additive halos around every lamp: p position, size in metres, k strength, on (a broken lantern goes dark)
   private haloSpots: { p: THREE.Vector3; size: number; k: number; on: boolean }[] = [];
-  private halos: THREE.Sprite[] = [];
+  private haloAlpha!: THREE.InstancedBufferAttribute;
   private haloGain = 1; // without bloom (low quality) the halos are the only glow around a lamp
   private dummy = new THREE.Object3D();
   private shojiMat: THREE.MeshBasicMaterial;
@@ -1173,18 +1173,61 @@ export class World {
     }
   }
 
-  // One additive sprite per lamp: a warm haze in the air that holds up even where there is no bloom
+  // One instanced billboard per lamp (a single draw call): a warm haze in the air that holds up even
+  // where there is no bloom. Position, size and strength are per-instance attributes.
   private buildHalos() {
-    const map = haloTexture();
-    for (const h of this.haloSpots) {
-      const mat = new THREE.SpriteMaterial({ map, color: new THREE.Color(1, 0.55, 0.2), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, fog: false, opacity: 0 });
-      const sp = new THREE.Sprite(mat);
-      sp.position.copy(h.p);
-      sp.scale.setScalar(h.size);
-      this.root.add(sp);
-      this.halos.push(sp);
-    }
+    const n = this.haloSpots.length;
+    const quad = new THREE.PlaneGeometry(1, 1);
+    const geo = new THREE.InstancedBufferGeometry();
+    geo.index = quad.index;
+    geo.setAttribute('position', quad.attributes.position);
+    geo.setAttribute('uv', quad.attributes.uv);
+    const pos = new Float32Array(n * 3);
+    const size = new Float32Array(n);
+    this.haloSpots.forEach((h, i) => {
+      pos.set([h.p.x, h.p.y, h.p.z], i * 3);
+      size[i] = h.size;
+    });
+    geo.setAttribute('aPos', new THREE.InstancedBufferAttribute(pos, 3));
+    geo.setAttribute('aSize', new THREE.InstancedBufferAttribute(size, 1));
+    this.haloAlpha = new THREE.InstancedBufferAttribute(new Float32Array(n), 1);
+    this.haloAlpha.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('aAlpha', this.haloAlpha);
+    geo.instanceCount = n;
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { map: { value: haloTexture() }, color: { value: new THREE.Color(1, 0.55, 0.2) } },
+      vertexShader: /* glsl */ `
+        attribute vec3 aPos; attribute float aSize; attribute float aAlpha;
+        varying vec2 vUv; varying float vA;
+        void main() {
+          vUv = uv;
+          vA = aAlpha;
+          vec4 mv = modelViewMatrix * vec4(aPos, 1.0);
+          mv.z += aSize * 0.3; // a little toward the camera, so the floor and walls around the lamp sit inside the haze
+          mv.xy += position.xy * aSize;
+          gl_Position = projectionMatrix * mv;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform sampler2D map; uniform vec3 color;
+        varying vec2 vUv; varying float vA;
+        void main() {
+          gl_FragColor = vec4(color, texture2D(map, vUv).a * vA);
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      fog: false
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 4;
+    this.root.add(mesh);
   }
+
 
   private buildGrass() {
     const mat = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
@@ -1571,14 +1614,14 @@ export class World {
     const lamp = this.atm.lantern;
     this.lanternLights.forEach((l, i) => (l.intensity = lamp * (glowK + Math.sin(time * 5 + i) * 0.04)));
     const haloK = Math.min(1.5, Math.max(0.35, this.atm.glow / 3)) * glowK * 0.42 * this.haloGain;
-    for (let i = 0; i < this.halos.length; i++) {
+    const halo = this.haloAlpha.array as Float32Array;
+    for (let i = 0; i < this.haloSpots.length; i++) {
       const h = this.haloSpots[i];
-      const sp = this.halos[i];
-      sp.visible = h.on;
       // gone as the camera comes close, so a lamp never veils the picture from a few steps away
-      const dist = sp.position.distanceTo(camPos);
-      (sp.material as THREE.SpriteMaterial).opacity = h.on ? haloK * h.k * Math.min(1, Math.max(0, (dist - 1.5) / 3)) : 0;
+      const dist = h.p.distanceTo(camPos);
+      halo[i] = h.on ? haloK * h.k * Math.min(1, Math.max(0, (dist - 1.5) / 3)) : 0;
     }
+    this.haloAlpha.needsUpdate = true;
     const sj = this.atm.shoji * glowK;
     this.shojiMat.color.setRGB(1.05 * sj, 0.82 * sj, 0.56 * sj);
 
