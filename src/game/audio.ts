@@ -168,6 +168,22 @@ export const sfx = {
   special: () => {
     [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => tone(f, f, 0.22, 'triangle', 0.14), i * 70));
   },
+  // Kusarigama hook: the chain rattling out, then biting into the foe
+  hook: () => {
+    noise(0.16, 0.3, 4200, 'highpass');
+    tone(1800, 900, 0.12, 'triangle', 0.08);
+  },
+  hookHit: () => {
+    tone(220, 60, 0.2, 'square', 0.16);
+    noise(0.12, 0.35, 1500);
+    tone(1500, 1000, 0.12, 'triangle', 0.08);
+  },
+  // The streak reaches a new word: a bright pair of notes, higher for each rank
+  rank: (n = 1) => {
+    const f = 520 * Math.pow(1.122, Math.min(n, 6));
+    tone(f, f, 0.16, 'triangle', 0.1);
+    setTimeout(() => tone(f * 1.5, f * 1.5, 0.22, 'triangle', 0.1), 70);
+  },
   levelup: () => {
     [392, 494, 587, 784].forEach((f, i) => setTimeout(() => tone(f, f, 0.3, 'sine', 0.15), i * 90));
   },

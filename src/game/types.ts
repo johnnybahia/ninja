@@ -220,6 +220,7 @@ export interface EnemyInstance {
   postureBar?: THREE.Mesh;
   danger?: THREE.Sprite;
   dbMark?: THREE.Sprite;
+  hookImmune?: number; // game time until which the Kusarigama's hook cannot catch it again
 }
 
 export type StrikeKind = 'slash' | 'thrust' | 'sweep' | 'smash';

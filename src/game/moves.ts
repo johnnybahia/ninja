@@ -143,3 +143,23 @@ export const FINISHERS: Record<string, Finisher[]> = {
   bomb: [{ ...THROW, name: 'Bomba no alvo', boom: true }, { ...SLAM, boom: true }, { ...SLIDE, boom: true }],
   karate: [{ ...SLAM, name: 'Voadora' }, KICK, { ...SLIDE, name: 'Rasteira' }]
 };
+
+// Kusarigama hook: the chain catches the foe in front and drags it in, dazed - the opening for the
+// other weapon (the first hit it lands inside `window` seconds does `bonus` times the damage).
+// Heavy foes (the Oni, the Brutamontes) are not dragged: the player is dragged to them instead.
+export const HOOK = {
+  range: 8.5, // reach, edge to edge
+  cone: 0.6, // half-angle of what the chain can catch (rad)
+  speed: 55, // chain flight (m/s)
+  pull: 0.24, // seconds to drag the foe in
+  retract: 0.14, // seconds for the chain to snap back
+  stop: 0.75, // gap left between the two bodies
+  stagger: 1.35, // seconds the foe stays dazed
+  posture: 0.38, // share of its posture bar the hook takes (the Oni: 0.12)
+  dmg: 0.6, // of the Kusarigama's damage
+  immune: 3, // seconds before the same foe can be caught again
+  cooldown: 1.7, // seconds before the next hook (the chain whips as before in the meantime)
+  window: 1.6, // the follow-up window
+  bonus: 1.25, // damage of the first hit of the follow-up
+  comboWindow: 2.2 // the hit streak stays alive this long after the catch
+};

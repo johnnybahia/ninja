@@ -24,7 +24,8 @@ import type { CardOffer } from './game/cards';
 import { CardPicker } from './ui/CardPicker';
 import { Temple } from './ui/Temple';
 import { RunSummary as RunSummaryScreen, type RunResult } from './ui/RunSummary';
-import { BossBar, GourdIcon, PlayerBars, useHudScale } from './ui/Hud';
+import { BossBar, CalloutHud, ComboHud, GourdIcon, PlayerBars, useHudScale } from './ui/Hud';
+import type { Callout, ComboInfo } from './game/combo';
 
 const SLOT_COUNT = 2;
 const SLOT_LABELS = ['Principal', 'Secundária'];
@@ -82,7 +83,10 @@ export default function App() {
   const [xpNext, setXpNext] = useState(800);
   const [level, setLevel] = useState(1);
   const [score, setScore] = useState(0);
-  const [combo, setCombo] = useState(0);
+  const [combo, setCombo] = useState<ComboInfo | null>(null);
+  const [callouts, setCallouts] = useState<Callout[]>([]);
+  // the slot index of the weapon whose hook just landed: the other button lights up for a moment
+  const [followUp, setFollowUp] = useState<number | null>(null);
   const [banner, setBanner] = useState<{ main: string; sub: string } | null>(null);
   const [activeWeaponIdx, setActiveWeaponIdx] = useState(0);
   const [activeWeapon, setActiveWeapon] = useState<WeaponDef | null>(null);
@@ -388,6 +392,8 @@ export default function App() {
       },
       onScoreChange: (s) => setScore(s),
       onComboChange: (c) => setCombo(c),
+      onCallout: (c) => setCallouts((cur) => [...cur.slice(-2), c]),
+      onFollowUp: (i) => setFollowUp(i),
       onWaveChange: (_w, text, sub) => showBanner(text, sub),
       onWeaponChange: (idx, w) => {
         setActiveWeaponIdx(idx);
@@ -815,23 +821,9 @@ export default function App() {
             </div>
           )}
 
-          {/* Combo indicator com feedback de sangue e impacto */}
-          {combo > 1 && (
-            <div className="absolute left-1/2 top-[calc(var(--sat)+130px)] -translate-x-1/2 text-center pointer-events-none drop-shadow-2xl transition-all short:left-[calc(var(--sal)+12px)] short:top-[calc(var(--sat)+124px)] short:translate-x-0 short:text-left">
-              <div className="font-serif text-xl sm:text-2xl short:text-base font-black tracking-wider bg-linear-to-r from-[#ff4d4d] via-[#ffd166] to-[#ff2a45] bg-clip-text text-transparent drop-shadow-[0_0_16px_rgba(230,0,38,0.7)] animate-pulse">
-                {combo}× GOLPES!
-              </div>
-              <div className="text-[10px] sm:text-xs short:hidden font-extrabold text-[#ffd166] tracking-widest uppercase mt-0.5 drop-shadow-md">
-                {combo >= 7
-                  ? '殺 Massacre Sangrento!'
-                  : combo >= 5
-                  ? '血 Frenesi Cortante!'
-                  : combo >= 3
-                  ? '三 Corte Triplo!'
-                  : '二 Corte Duplo!'}
-              </div>
-            </div>
-          )}
+          {/* Hit counter (left edge) and the big shout-outs (upper middle) */}
+          <ComboHud info={combo} />
+          <CalloutHud items={callouts} onDone={(id) => setCallouts((cur) => cur.filter((c) => c.id !== id))} />
 
           {toast && (
             <div className="absolute left-1/2 -translate-x-1/2 bottom-[calc(var(--sab)+120px)] px-3 py-1 rounded-full text-xs font-bold bg-[rgba(22,18,31,0.85)] border border-[rgba(239,230,210,0.3)] text-[var(--ember)] pointer-events-none">
@@ -879,6 +871,7 @@ export default function App() {
                 const isActive = activeWeaponIdx === weaponIdx;
                 const hasSpecial = specials[weaponIdx] > 0;
                 const deathblow = s === 0 && dbReady;
+                const nudge = followUp !== null && weaponIdx !== followUp && !deathblow;
                 // Big primary in the corner, secondary right above it
                 const pos = ['right-0 bottom-0 w-20 h-20', 'right-1 bottom-[92px] w-15 h-15'][s];
                 return (
@@ -897,7 +890,7 @@ export default function App() {
                         : isActive
                         ? 'kg-btn-ember'
                         : ''
-                    } ${hasSpecial && !deathblow ? 'ring-2 ring-[#ffd166] animate-pulse' : ''}`}
+                    } ${hasSpecial && !deathblow ? 'ring-2 ring-[#ffd166] animate-pulse' : ''} ${nudge ? 'kg-nudge' : ''}`}
                     aria-label={deathblow ? 'Golpe final' : `Atacar com ${w?.name}`}
                     title={w?.name}
                   >

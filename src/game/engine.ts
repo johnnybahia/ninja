@@ -23,6 +23,7 @@ import {
   KARATE
 } from './constants';
 import { sfx } from './audio';
+import { COMBO_RANKS, COMBO_WINDOW, KILL_CHAINS, comboRank, type Callout, type CalloutTone, type ComboInfo } from './combo';
 import { World } from './world';
 import { ATMOSPHERES, AtmosMode, atmosphereForWave } from './atmosphere';
 import { THEMES, ThemeMode, themeForWave } from './theme';
@@ -32,7 +33,7 @@ import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
 import { createClipRig, Grip, OneShot, PlayOptions } from './clipRig';
 import { loadCharacter, loadWeapons, loadLazyWeapons, weaponsReady, preloadModels, characterIfReady, CharacterTemplate, LAZY_CHARACTERS, type CharacterModel } from './models';
-import { COMBOS, SPECIAL_MOVES, RUSH, ENEMY_STRIKES, BOSS_STRIKES, FINISHERS, FINISHER_CLIP_LEN, Finisher, ClipMove } from './moves';
+import { COMBOS, SPECIAL_MOVES, RUSH, ENEMY_STRIKES, BOSS_STRIKES, FINISHERS, FINISHER_CLIP_LEN, HOOK, Finisher, ClipMove } from './moves';
 import { BladeSeg, makeSeg, segSegDist, sweepVsCapsule, BLADE_SEG, MAGNET_REACH, HURT_BOTTOM, HURT_TOP } from './combat';
 import { DebugDraw } from './debugdraw';
 import { animateCharacter, animateDeath } from './animation';
@@ -287,7 +288,7 @@ export interface GameEngineCallbacks {
   onStaminaChange: (st: number, maxSt: number) => void;
   onXpChange: (xp: number, xpNext: number, level: number) => void;
   onScoreChange: (score: number) => void;
-  onComboChange: (combo: number) => void;
+  onComboChange: (combo: ComboInfo | null) => void;
   onWaveChange: (wave: number, text: string, sub: string) => void;
   onWeaponChange: (weaponIdx: number, weapon: WeaponDef) => void;
   onSpecialsUpdate: (specials: Record<number, number>) => void;
@@ -295,6 +296,10 @@ export interface GameEngineCallbacks {
   onQualityChange?: (setting: QualitySetting, effective: Quality) => void;
   onPostureChange?: (posture: number, max: number) => void;
   onCinematic?: (active: boolean, kind?: 'full' | 'short' | 'duel') => void;
+  // a big word on screen for the moments worth shouting about (a perfect parry, a kill chain)
+  onCallout?: (c: Callout) => void;
+  // a hook just landed: the slot of the weapon that threw it (the HUD lights the other one), or null once the window closes
+  onFollowUp?: (weaponIdx: number | null) => void;
   onDeathblowReady?: (ready: boolean) => void;
   onHealsChange?: (heals: number) => void;
   onCardOffer?: (offer: CardOffer[] | null) => void;
@@ -303,6 +308,24 @@ export interface GameEngineCallbacks {
   onWaveMod?: (mod: { id: string; name: string; glyph: string; desc: string } | null) => void;
   // shots being drawn or in flight toward the player from outside the view: angle from the camera's forward (rad, + = right)
   onThreats?: (threats: { a: number; u: number }[]) => void;
+}
+
+// The Kusarigama hook in progress (see stepHook): which foe, who gets dragged, the clock and the
+// geometry of the drag
+interface HookState {
+  e: EnemyInstance;
+  self: boolean; // the foe is too heavy: the player is dragged to it
+  t: number;
+  delay: number; // chain flight
+  dur: number; // the drag
+  caught: boolean;
+  settled: boolean; // the dazed pose after the drag has been played
+  dmg: number;
+  x0: number; // where the dragged body starts
+  z0: number;
+  ux: number; // unit vector from the player to the foe at the catch
+  uz: number;
+  stop: number; // distance left between the two bodies' centres
 }
 
 // A committed move or reaction on the mocap rig. Times are clip seconds (see moves.ts).
@@ -405,6 +428,7 @@ export class GameEngine {
     killComboT: 0,
     hitCombo: 0,
     hitComboT: 0,
+    comboDmg: 0,
     bestCombo: 0,
     tookDamage: false,
     jumps: 0,
@@ -473,6 +497,20 @@ export class GameEngine {
   private spHit = false;
   private ptMult = 1;
   private lastHS = 0;
+  // hit counter (see combo.ts): bumped on every hit so the HUD pops the number, the rank last
+  // announced, and when each shout-out was last sent
+  private comboTick = 0;
+  private comboRankShown = 0;
+  private calloutId = 0;
+  private calloutAt = new Map<string, number>();
+  private comboWin = COMBO_WINDOW; // how long the last hit kept the streak alive (the HUD bar follows it)
+  private comboWinNext = 0; // a longer window for the next hit only (the hook)
+  // Kusarigama hook (HOOK in moves.ts): the chain in flight or dragging, its cooldown, the dust along the
+  // drag, and the window it opens for the other weapon
+  private hook: HookState | null = null;
+  private hookCd = 0;
+  private hookDust = 0;
+  private followUp: { e: EnemyInstance; t: number; weapon: number } | null = null;
   private lastMove = new THREE.Vector3(0, 0, -1);
   private slowmoT = 0;
   private attackQueueT = 0;
@@ -997,6 +1035,8 @@ export class GameEngine {
     this.player.killComboT = 0;
     this.player.hitCombo = 0;
     this.player.hitComboT = 0;
+    this.player.comboDmg = 0;
+    this.comboRankShown = 0;
     this.player.bestCombo = 0;
     this.player.kills = 0;
     this.player.special = {};
@@ -1046,7 +1086,11 @@ export class GameEngine {
     this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
     this.callbacks.onXpChange(this.player.xp, this.player.xpNext, this.player.level);
     this.callbacks.onScoreChange(0);
-    this.callbacks.onComboChange(0);
+    this.callbacks.onComboChange(null);
+    this.hook = null;
+    this.hookCd = 0;
+    this.followUp = null;
+    this.callbacks.onFollowUp?.(null);
     this.callbacks.onSpecialsUpdate({});
     this.setWeapon(this.loadout?.[0] ?? 0);
   }
@@ -2645,6 +2689,7 @@ export class GameEngine {
     this.player.st -= this.dashCost();
     this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
     this.cancelAct(0.08);
+    this.hook = null;
     this.player.dash = 0.2;
     this.player.inv = Math.max(this.player.inv, 0.3 + 0.04 * (this.cardLv.sombra ?? 0));
     this.player.dashInv = true;
@@ -2758,9 +2803,7 @@ export class GameEngine {
       this.slash.rotation.set(0, this.player.yaw, 0);
       heavy ? sfx.heavy() : sfx.swing();
     } else if (w.kind === 'chain') {
-      this.meleeHit(w.range || 6.5, w.arc || 1.15, w.dmg[0], w.kb || -7, true);
-      this.chainT = 0;
-      sfx.swing();
+      this.chainStrike(w.range || 6.5, w.arc || 1.15, w.dmg[0], w.kb || -7);
     } else if (w.kind === 'proj') {
       const n = w.count || 1;
       for (let i = 0; i < n; i++) {
@@ -3032,7 +3075,7 @@ export class GameEngine {
     this.player.comboT = 0;
     this.ptMult = w.pointMult || 1;
     this.actQueued = false;
-    if (step === 0) this.autoFaceNearestEnemyForAttack(Math.max(2.5, m.range));
+    if (step === 0) this.autoFaceNearestEnemyForAttack(Math.max(2.5, w.kind === 'chain' ? HOOK.range : m.range));
     const sweepable = w.kind === 'melee' || w.kind === 'karate';
     const target = sweepable ? this.pickAttackTarget(m.range, chaining) : null;
 
@@ -3072,9 +3115,7 @@ export class GameEngine {
   // a move's hit frame
   private soulsStrike(w: WeaponDef, m: ClipMove, step: number) {
     if (w.kind === 'chain') {
-      this.meleeHit(m.range, m.arc, m.dmg, m.kb, true);
-      this.chainT = 0;
-      sfx.swing();
+      this.chainStrike(m.range, m.arc, m.dmg, m.kb);
       return;
     }
     this.meleeHit(m.range, m.arc, m.dmg, m.kb, !!m.heavy);
@@ -3751,6 +3792,192 @@ export class GameEngine {
     return any;
   }
 
+  // ---- Kusarigama hook (HOOK in moves.ts) --------------------------------------------------
+  // The chain catches one foe in front, drags it in dazed (the Oni and the Brutamontes are too heavy:
+  // the player is dragged to them) and opens a window in which the first hit of the other weapon lands
+  // harder. With the hook resting, or nothing to catch, the swing is the whip it always was.
+
+  // is the straight line between two ground points free of anything solid a chain cannot clear?
+  private lineClear(ax: number, az: number, bx: number, bz: number, minH = 0.9): boolean {
+    const vx = bx - ax;
+    const vz = bz - az;
+    const l2 = vx * vx + vz * vz || 1;
+    for (const s of this.solids) {
+      if (s.h < minH) continue;
+      const t = clamp(((s.x - ax) * vx + (s.z - az) * vz) / l2, 0, 1);
+      const px = ax + vx * t - s.x;
+      const pz = az + vz * t - s.z;
+      const r = s.r * 0.85;
+      if (px * px + pz * pz < r * r) return false;
+    }
+    return true;
+  }
+
+  /** The foe the chain can catch: in front, within reach, in the clear, not caught a moment ago. */
+  private pickHookTarget(): EnemyInstance | null {
+    const P = this.player;
+    let best: EnemyInstance | null = null;
+    let bestScore = Infinity;
+    for (const e of this.enemies) {
+      if (e.dead || (e.vanishT ?? 0) > 0 || (e.hookImmune ?? 0) > this.time) continue;
+      const dx = e.pos.x - P.pos.x;
+      const dz = e.pos.z - P.pos.z;
+      const d = Math.hypot(dx, dz) || 0.001;
+      if (d - e.r > HOOK.range) continue;
+      const off = Math.abs(wrap(Math.atan2(dx, dz) - P.yaw));
+      if (off > HOOK.cone) continue;
+      // what the player is aiming at first, then the nearer one; an archer is the natural prey
+      const score = off * 8 + d * 0.4 - (e.type === 'archer' ? 2 : 0);
+      if (score >= bestScore || !this.lineClear(P.pos.x, P.pos.z, e.pos.x, e.pos.z)) continue;
+      bestScore = score;
+      best = e;
+    }
+    return best;
+  }
+
+  private chainStrike(range: number, arc: number, dmg: number, kb: number) {
+    const e = this.hookCd <= 0 && !this.hook ? this.pickHookTarget() : null;
+    if (e) {
+      this.throwHook(e, dmg);
+      return;
+    }
+    this.meleeHit(range, arc, dmg, kb, true);
+    this.chainT = 0;
+    sfx.swing();
+  }
+
+  private throwHook(e: EnemyInstance, dmg: number) {
+    const P = this.player;
+    const dx = e.pos.x - P.pos.x;
+    const dz = e.pos.z - P.pos.z;
+    P.yaw = Math.atan2(dx, dz);
+    const gap = Math.max(0.5, Math.hypot(dx, dz) - e.r);
+    this.hook = {
+      e,
+      self: e.type === 'boss' || e.variant === 'brute',
+      t: 0,
+      delay: clamp(gap / HOOK.speed, 0.08, 0.22),
+      dur: HOOK.pull,
+      caught: false,
+      settled: false,
+      dmg: Math.round(dmg * HOOK.dmg),
+      x0: 0,
+      z0: 0,
+      ux: 0,
+      uz: 0,
+      stop: 0
+    };
+    this.hookCd = HOOK.cooldown;
+    sfx.hook();
+  }
+
+  // The chain bites: the blow, the daze, the posture it costs, and the window it opens
+  private hookCatch(h: HookState) {
+    const e = h.e;
+    const P = this.player;
+    h.caught = true;
+    const dx = e.pos.x - P.pos.x;
+    const dz = e.pos.z - P.pos.z;
+    const d = Math.hypot(dx, dz) || 0.001;
+    h.ux = dx / d;
+    h.uz = dz / d;
+    h.stop = Math.min(d, 0.45 + e.r + (h.self ? 0.9 : HOOK.stop));
+    if (d - h.stop < 0.3) h.dur = 0.06; // already in reach: nothing to drag
+    h.x0 = h.self ? P.pos.x : e.pos.x;
+    h.z0 = h.self ? P.pos.z : e.pos.z;
+    // a chain around the arm cannot be parried, and the streak stays alive through the drag
+    this.spHit = true;
+    this.comboWinNext = HOOK.comboWindow;
+    this.hitEnemy(e, h.dmg, h.ux, h.uz, 0, false);
+    this.spHit = false;
+    if (e.dead) {
+      this.hook = null;
+      return;
+    }
+    e.hookImmune = this.time + HOOK.immune;
+    if (!h.self) {
+      // dazed: whatever it was doing is over
+      this.cancelStrike(e);
+      e.blade = undefined;
+      e.bow = undefined;
+      e.kick = undefined;
+      e.castT = 0;
+      e.dodgeT = 0;
+      e.comboLeft = 0;
+      e.token = false;
+      e.mode = 'recover';
+      e.modeT = 0;
+      e.staggerT = Math.max(e.staggerT, HOOK.stagger);
+      if (e.type === 'archer') this.updateBowFx(e);
+    } else {
+      P.inv = Math.max(P.inv, 0.3);
+      this.fovKick = Math.max(this.fovKick, 6);
+    }
+    this.addEnemyPosture(e, e.maxPosture * (e.type === 'boss' ? 0.12 : HOOK.posture));
+    this.faceEnemy(e);
+    this.shake = Math.max(this.shake, 0.2);
+    sfx.hookHit();
+    this.callout('VEM CÁ!', 'ember', '引');
+    this.followUp = { e, t: HOOK.window, weapon: this.activeWeaponIdx };
+    this.callbacks.onFollowUp?.(this.activeWeaponIdx);
+  }
+
+  private stepHook(dt: number) {
+    this.hookCd = Math.max(0, this.hookCd - dt);
+    const f = this.followUp;
+    if (f) {
+      f.t -= dt;
+      if (f.t <= 0 || f.e.dead) {
+        this.followUp = null;
+        this.callbacks.onFollowUp?.(null);
+      }
+    }
+    const h = this.hook;
+    if (!h) return;
+    const e = h.e;
+    const P = this.player;
+    if (this.cine || P.hp <= 0 || (!h.caught && (e.dead || (e.vanishT ?? 0) > 0))) {
+      this.hook = null;
+      return;
+    }
+    h.t += dt;
+    if (!h.caught && h.t >= h.delay) {
+      this.hookCatch(h);
+      if (this.hook !== h) return;
+    }
+    const end = h.delay + h.dur;
+    if (h.caught && h.t < end) {
+      // the drag: quick at first, settling into place
+      const k = Math.min(1, (h.t - h.delay) / h.dur);
+      const s = 1 - (1 - k) ** 3;
+      if (h.self) {
+        P.pos.x = h.x0 + (e.pos.x - h.ux * h.stop - h.x0) * s;
+        P.pos.z = h.z0 + (e.pos.z - h.uz * h.stop - h.z0) * s;
+        P.vel.set(0, 0, 0);
+        P.kb.set(0, 0, 0);
+        this.collide(P.pos, 0.45);
+      } else {
+        e.pos.x = h.x0 + (P.pos.x + h.ux * h.stop - h.x0) * s;
+        e.pos.z = h.z0 + (P.pos.z + h.uz * h.stop - h.z0) * s;
+        e.kb.set(0, 0, 0);
+      }
+      this.hookDust -= dt;
+      if (this.hookDust <= 0) {
+        this.hookDust = 0.05;
+        const m = h.self ? P.pos : e.pos;
+        this.puff(m.x, m.z, 3, 2.4, -h.ux, -h.uz);
+      }
+    } else if (h.caught && !h.settled) {
+      // the drag is over: the foe doubles over
+      h.settled = true;
+      if (!h.self && e.brokenT <= 0) {
+        this.enemyClip(e, 'hit2', { from: 0.1, to: 0.8, speed: 0.85, fadeIn: 0.08, fadeOut: 0.35 });
+        e.anim = { kind: 'erecoil', t: 0, dur: 0.6, side: 0 };
+      }
+    }
+    if (h.t >= end + HOOK.retract || e.dead) this.hook = null;
+  }
+
   // What an enemy does about a blow that just connected. Blocks (guard up, only builds its
   // posture) were always there; parries (the blade is turned aside, the swing bounces and
   // the enemy answers) and sidesteps (the blow cuts air, then it comes back) are new.
@@ -3871,6 +4098,54 @@ export class GameEngine {
     this.player.atkCd += 0.2;
   }
 
+  /** One more hit on the streak: its clock renews and the damage adds up. */
+  private registerHit(dmg: number) {
+    const P = this.player;
+    if (P.hitComboT > 0) P.hitCombo++;
+    else {
+      P.hitCombo = 1;
+      P.comboDmg = 0;
+      this.comboRankShown = 0;
+    }
+    this.comboWin = this.comboWinNext || COMBO_WINDOW;
+    this.comboWinNext = 0;
+    P.hitComboT = this.comboWin;
+    P.comboDmg += dmg;
+    P.bestCombo = Math.max(P.bestCombo, P.hitCombo);
+    this.comboTick++;
+  }
+
+  /** Sends the streak to the HUD: nothing under two hits; a finished one (3+) stays a moment as a result. */
+  private emitCombo(state: ComboInfo['state'] = 'live') {
+    const P = this.player;
+    const hits = P.hitCombo;
+    if (hits < (state === 'live' ? 2 : 3)) return void this.callbacks.onComboChange(null);
+    const rank = comboRank(hits);
+    const r = rank > 0 ? COMBO_RANKS[rank - 1] : null;
+    if (state === 'live') {
+      if (rank > this.comboRankShown) sfx.rank(rank);
+      this.comboRankShown = rank;
+    }
+    this.callbacks.onComboChange({ hits, damage: P.comboDmg, win: this.comboWin, rank, word: r?.word ?? '', glyph: r?.glyph ?? '', tick: this.comboTick, state });
+  }
+
+  /** The streak is over: the clock ran out ('done') or a blow got through ('broken'). */
+  private endCombo(state: 'done' | 'broken') {
+    const P = this.player;
+    if (P.hitCombo > 0) this.emitCombo(state);
+    P.hitCombo = 0;
+    P.hitComboT = 0;
+    P.comboDmg = 0;
+    this.comboRankShown = 0;
+  }
+
+  /** A big word on the HUD. The same word is not sent twice within a second (a crowd breaking at once). */
+  private callout(word: string, tone: CalloutTone, glyph?: string, sub?: string) {
+    if (this.time - (this.calloutAt.get(word) ?? -9) < 1) return;
+    this.calloutAt.set(word, this.time);
+    this.callbacks.onCallout?.({ id: ++this.calloutId, word, glyph, sub, tone });
+  }
+
   public hitEnemy(e: EnemyInstance, dmg: number, nx: number, nz: number, kb: number, heavy: boolean, hit?: HitInfo) {
     if (e.dead) return;
     // Samurai (and, rarely, the Oni) fight back: a blow that connects may be blocked,
@@ -3881,6 +4156,14 @@ export class GameEngine {
       return;
     }
     e.dry = (e.dry ?? 0) + 1;
+    // the opening a hook made: the first hit of the other weapon on the dazed foe lands harder
+    const fu = this.followUp;
+    if (fu && fu.e === e && this.activeWeaponIdx !== fu.weapon && !this.spHit) {
+      dmg *= HOOK.bonus;
+      this.followUp = null;
+      this.callbacks.onFollowUp?.(null);
+      this.callout('SEQUÊNCIA!', 'gold', '連');
+    }
     const rolled = this.rollDamage(dmg * this.player.dmgMult, true);
     dmg = rolled.dmg;
     e.hp -= dmg;
@@ -3929,12 +4212,7 @@ export class GameEngine {
     }
 
     // Atualiza sequência de golpes (Hit Combo Streak)
-    if (this.player.hitComboT > 0) {
-      this.player.hitCombo++;
-    } else {
-      this.player.hitCombo = 1;
-    }
-    this.player.hitComboT = 1.6;
+    this.registerHit(dmg);
 
     const isCombo = this.player.combo >= 1 || this.player.hitCombo >= 2 || this.player.killCombo > 0;
     const isComboFinisher = this.player.combo === 2 || this.player.hitCombo % 3 === 0 || heavy;
@@ -3972,7 +4250,7 @@ export class GameEngine {
       sfx.hit();
     }
 
-    this.callbacks.onComboChange(Math.max(this.player.hitCombo, this.player.killCombo));
+    this.emitCombo();
 
     if (e.hp <= 0) this.killEnemy(e);
     else {
@@ -4009,8 +4287,9 @@ export class GameEngine {
 
     this.player.killCombo = this.player.killComboT > 0 ? this.player.killCombo + 1 : 1;
     this.player.killComboT = 2.2;
-    this.player.bestCombo = Math.max(this.player.bestCombo, Math.max(this.player.killCombo, this.player.hitCombo));
-    this.callbacks.onComboChange(Math.max(this.player.killCombo, this.player.hitCombo));
+    this.player.bestCombo = Math.max(this.player.bestCombo, this.player.killCombo, this.player.hitCombo);
+    const chain = KILL_CHAINS[this.player.killCombo];
+    if (chain) this.callout(chain.word, chain.tone, chain.glyph);
 
     this.addXp(pts);
 
@@ -4294,6 +4573,7 @@ export class GameEngine {
     this.player.hp = Math.max(0, this.player.hp - dmg);
     this.player.inv = 0.6;
     this.hurtFx = 1;
+    this.hook = null; // a blow taken cuts the chain loose
     if (this.player.healT > 0 && !this.player.healDone) {
       // interrupted mid-drink: the sip is lost
       this.player.healT = 0;
@@ -4313,9 +4593,7 @@ export class GameEngine {
     this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.3, this.player.pos.z), IMPACT_HURT, 1.4, 0.18, 'hurt');
     this.player.dashInv = false;
     this.player.killCombo = 0;
-    this.player.hitCombo = 0;
-    this.player.hitComboT = 0;
-    this.callbacks.onComboChange(0);
+    this.endCombo('broken');
     this.player.tookDamage = true;
     this.player.kb.x += nx * 9;
     this.player.kb.z += nz * 9;
@@ -4482,7 +4760,7 @@ export class GameEngine {
     sfx.postureBreak();
     this.impacts.spawn(this.tmpV.set(e.pos.x, e.pos.y + 1.5 * this.sizeOf(e), e.pos.z), IMPACT_DEFLECT, 2.6, 0.3, 'parry', { x: Math.sin(this.player.yaw), z: Math.cos(this.player.yaw) });
     this.shake = Math.max(this.shake, 0.25);
-    this.spawnLabel(e.pos.x, e.pos.y + 3.1 * this.sizeOf(e), e.pos.z, 'POSTURA!', '#ff5a3a', 1.2);
+    this.callout('POSTURA QUEBRADA!', 'blood', '崩');
   }
 
   private cancelStrike(e: EnemyInstance) {
@@ -4637,7 +4915,8 @@ export class GameEngine {
     if (this.player.inv > 0) {
       if (this.player.dashInv) {
         const perfect = this.player.dash > 0;
-        this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, perfect ? 'PERFEITO!' : 'ESQUIVOU!', perfect ? '#ffd166' : '#8fe0c8', perfect ? 1.55 : 1.1);
+        if (perfect) this.callout('ESQUIVA PERFEITA!', 'jade', '見切');
+        else this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'ESQUIVOU!', '#8fe0c8', 1.1);
         this.triggerSlowmo(perfect ? 0.5 : 0.22, perfect ? 0.22 : 0.42);
         this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.2, this.player.pos.z), IMPACT_DODGE, perfect ? 2.4 : 1.6, 0.3, 'dodge');
         this.fovKick = perfect ? -5 : -2.5;
@@ -4681,7 +4960,7 @@ export class GameEngine {
       sfx.clang();
       const scene = this.startParryScene(e, meet, perfect, st.kind === 'thrust');
       if (perfect) {
-        this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'APARO PERFEITO!', '#ffd166', 1.45);
+        this.callout('APARO PERFEITO!', 'gold', '弾');
         if (!scene) this.triggerSlowmo(0.22, 0.38);
         this.player.st = Math.min(this.player.maxSt, this.player.st + 10);
         this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
@@ -4691,7 +4970,7 @@ export class GameEngine {
         }
         this.addEnemyPosture(e, 12);
       } else if (st.kind === 'thrust') {
-        this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'CONTRA-ATAQUE!', '#ffd166', 1.3);
+        this.callout('CONTRA-ATAQUE!', 'ember', '返');
         this.triggerSlowmo(0.35, 0.3);
       } else this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.4, this.player.pos.z, 'APAROU!', '#ffb347', 1);
       // a short push-in on the defences worth seeing: the wave's first, a thrust, the Oni, a captain
@@ -4944,6 +5223,9 @@ export class GameEngine {
         else this.triggerSlowmo(c.full ? 0.5 : 0.25, c.full ? 0.28 : 0.45);
       }
       sfx.deathblow();
+      // the finishing blow is the last hit of the streak
+      this.registerHit(Math.round(e.type === 'boss' && (e.dbCount || 0) === 0 && e.hp > e.maxHp * 0.5 ? e.maxHp * 0.5 : Math.max(0, e.hp)));
+      this.emitCombo();
       this.finishers++;
       this.waveStat.finishers++;
       this.addHonor('finish', HONOR.finisher);
@@ -5184,12 +5466,7 @@ export class GameEngine {
     this.player.killComboT -= dt;
     if (this.player.hitComboT > 0) {
       this.player.hitComboT -= dt;
-      if (this.player.hitComboT <= 0) {
-        this.player.hitCombo = 0;
-        if (this.player.killComboT <= 0) {
-          this.callbacks.onComboChange(0);
-        }
-      }
+      if (this.player.hitComboT <= 0) this.endCombo('done');
     }
 
     // Special items timers
@@ -6948,6 +7225,7 @@ export class GameEngine {
   private stepPlay(dt: number) {
     this.stepProgress(dt);
     this.updatePlayerMovementAndCamera(dt);
+    this.stepHook(dt);
     this.stepBuffer();
     this.updateEnemies(dt);
     this.updateShocks(dt);
@@ -7074,12 +7352,39 @@ export class GameEngine {
   // Kusarigama chain: shoots out from the hand to full reach and snaps back; during the
   // special it whirls around the player
   private updateChain(dt: number) {
+    const hk = this.hook;
     const striking = this.chainT < 0.36;
     const spinning = this.chainSpin > 0;
-    if (!striking && !spinning) {
+    if (!hk && !striking && !spinning) {
       this.chain.visible = false;
       return;
     }
+    if (hk) {
+      // the hook: from the hand to the foe's chest - out, taut while the drag lasts, then snapping back
+      this.player.rig.root.updateMatrixWorld(true);
+      this.player.rig.hand.getWorldPosition(this.tmpH);
+      const e = hk.e;
+      const tx = e.pos.x - this.tmpH.x;
+      const ty = e.pos.y + 1.15 * this.sizeOf(e) - this.tmpH.y;
+      const tz = e.pos.z - this.tmpH.z;
+      const hz = Math.hypot(tx, tz);
+      const end = hk.delay + hk.dur;
+      const k = hk.t < hk.delay ? hk.t / hk.delay : hk.t > end ? 1 - (hk.t - end) / HOOK.retract : 1;
+      const len = Math.hypot(hz, ty) * clamp(k, 0, 1);
+      this.chain.visible = len > 0.05;
+      this.chain.position.copy(this.tmpH);
+      this.chain.rotation.order = 'YXZ';
+      this.chain.rotation.set(-Math.atan2(ty, hz), Math.atan2(tx, tz), 0);
+      // thicker and brighter than the whip's chain: it has to read from the chase camera
+      this.chainLink.scale.set(2.4, 2.4, len);
+      (this.chainLink.material as THREE.MeshStandardMaterial).emissive.setHex(0x6a7078);
+      this.chainTip.scale.setScalar(2.4);
+      this.chainTip.position.set(0, 0, len);
+      this.chainTip.rotation.set(0, 0, this.time * 20);
+      return;
+    }
+    (this.chainLink.material as THREE.MeshStandardMaterial).emissive.setHex(0x2a2c30);
+    this.chainTip.scale.setScalar(1.6);
     this.chainT += dt;
     if (spinning) this.chainSpin = Math.max(0, this.chainSpin - dt);
     this.player.rig.root.updateMatrixWorld(true);

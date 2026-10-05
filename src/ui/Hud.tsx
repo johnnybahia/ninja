@@ -1,7 +1,8 @@
-import { useEffect } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
+import type { Callout, CalloutTone, ComboInfo } from '../game/combo';
 
 // In-run HUD pieces that carry the lacquer look (classes in index.css): the player's bars, the boss
-// bar, the healing gourd icon, and the scale the touch controls follow.
+// bar, the healing gourd icon, the hit counter with its shout-outs, and the scale the touch controls follow.
 
 // The HUD was drawn for a ~400 px short side: smaller screens shrink it a little, big ones grow it.
 // Published as --hud-s on <html> so every HUD block can scale itself from its own corner.
@@ -115,6 +116,102 @@ export function PlayerBars({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// colours of the lettering: top and bottom of the fill, and the glow
+const TONES: Record<CalloutTone | 'paper', { a: string; b: string; g: string }> = {
+  paper: { a: '#fffaf0', b: '#d9cfb8', g: 'rgba(239,230,210,0.35)' },
+  gold: { a: '#fff4c2', b: '#ffc83d', g: 'rgba(255,200,60,0.65)' },
+  jade: { a: '#e2fff3', b: '#5fe0b0', g: 'rgba(95,224,176,0.55)' },
+  ember: { a: '#ffe6c4', b: '#f2a65a', g: 'rgba(242,166,90,0.6)' },
+  blood: { a: '#ffb9a8', b: '#ff3b2a', g: 'rgba(255,60,44,0.65)' },
+  steel: { a: '#f4f8ff', b: '#a9bcd8', g: 'rgba(160,190,230,0.5)' }
+};
+type Tone = keyof typeof TONES;
+const toneVars = (t: Tone) => ({ '--s1': TONES[t].a, '--s2': TONES[t].b, '--sg': TONES[t].g }) as CSSProperties;
+
+/** Slanted lettering with a dark outline: the outline is a copy behind the gradient-filled text, so it
+ *  never eats into the letters. */
+function Shout({ text, tone, className = '' }: { text: string; tone: Tone; className?: string }) {
+  return (
+    <span className={`kg-shout ${className}`} style={toneVars(tone)}>
+      <span className="kg-shout-back" aria-hidden="true">
+        {text}
+      </span>
+      <span className="kg-shout-front">{text}</span>
+    </span>
+  );
+}
+
+// a red-stamp square holding the kanji of the word
+const Seal = ({ glyph, tone }: { glyph: string; tone: Tone }) => (
+  <span className="kg-seal" style={toneVars(tone)} aria-hidden="true">
+    {glyph}
+  </span>
+);
+
+// the colour of the number as the streak climbs: index = rank
+const RANK_TONE: Tone[] = ['paper', 'gold', 'gold', 'ember', 'ember', 'blood', 'blood'];
+
+/** The hit counter at the left edge, in the manner of a fighting game: the number pops on every hit, a
+ *  thin bar shows how long the streak survives, the damage adds up, and from 3 hits it earns a word.
+ *  When it ends the result lingers a moment (or shakes apart if the player was hit). */
+export function ComboHud({ info }: { info: ComboInfo | null }) {
+  const [gone, setGone] = useState<ComboInfo | null>(null);
+  if (!info || info === gone) return null;
+  const live = info.state === 'live';
+  const broken = info.state === 'broken';
+  const tone: Tone = broken ? 'steel' : RANK_TONE[info.rank];
+  return (
+    <div
+      className="absolute left-[calc(var(--sal)+14px)] top-[34%] short:top-[calc(var(--sat)+138px)] pointer-events-none select-none"
+      style={{ transform: 'scale(var(--hud-s))', transformOrigin: 'top left' }}
+    >
+      <div
+        className={live ? '' : broken ? 'kg-combo-broke' : 'kg-combo-done'}
+        onAnimationEnd={(e) => {
+          if (!live && e.target === e.currentTarget) setGone(info);
+        }}
+      >
+        <div className="flex items-end gap-2 leading-none">
+          <span key={info.tick} className="kg-hitpop inline-block">
+            <Shout text={String(info.hits)} tone={tone} className="font-serif font-black text-[3.6rem] short:text-[2.8rem] leading-[0.9]" />
+          </span>
+          <span className="pb-1 font-serif text-[11px] font-extrabold tracking-[0.32em] text-[var(--paper)] [text-shadow:0_1px_4px_#000]">HITS</span>
+        </div>
+        {live && <div key={info.tick} className="kg-combo-win" style={{ animationDuration: `${info.win}s` }} />}
+        <div className="mt-1 text-[11px] font-bold tracking-[0.18em] tabular-nums text-[var(--paper)]/90 [text-shadow:0_1px_4px_#000]">
+          DANO <b className="text-[var(--ember)]">{info.damage}</b>
+        </div>
+        {(broken || info.rank > 0) && (
+          <div key={broken ? 'broken' : info.rank} className="kg-wordpop mt-1.5 flex items-center gap-2">
+            <Seal glyph={broken ? '崩' : info.glyph} tone={tone} />
+            <Shout text={broken ? 'QUEBRADO!' : info.word} tone={tone} className="font-serif font-black text-[1.35rem] short:text-[1.1rem] tracking-[0.03em]" />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Big words in the upper middle of the screen (APARO PERFEITO!, MATANÇA!...). Each one slams in, holds
+ *  and floats away; its own animation's end removes it. */
+export function CalloutHud({ items, onDone }: { items: Callout[]; onDone: (id: number) => void }) {
+  if (items.length === 0) return null;
+  return (
+    <div
+      className="absolute left-1/2 -translate-x-1/2 top-[calc(var(--sat)+150px)] short:top-[calc(var(--sat)+84px)] max-w-[96vw] flex flex-col items-center gap-1 pointer-events-none select-none"
+      style={{ transform: 'scale(var(--hud-s))', transformOrigin: 'top center' }}
+    >
+      {items.map((c) => (
+        <div key={c.id} className="kg-shout-in flex items-center gap-2.5" onAnimationEnd={() => onDone(c.id)}>
+          {c.glyph && <Seal glyph={c.glyph} tone={c.tone} />}
+          <Shout text={c.word} tone={c.tone} className="font-serif font-black text-[length:clamp(1.2rem,5.6vw,2.5rem)] short:text-[1.45rem] tracking-[0.04em]" />
+          {c.sub && <span className="text-[11px] font-bold tracking-[0.2em] text-[var(--paper)]/85 [text-shadow:0_1px_4px_#000]">{c.sub}</span>}
+        </div>
+      ))}
     </div>
   );
 }
