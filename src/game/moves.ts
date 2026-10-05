@@ -68,25 +68,6 @@ export const COMBOS: Record<string, ClipMove[]> = {
   bomb: [{ clip: 'cast', hit: [], release: 0.35, chain: 99, cancel: 0.55, end: 0.95, speed: 1.6, dmg: 53, range: 0, arc: 0, kb: 8, stamina: 0 }]
 };
 
-// Special attacks (scroll pick-ups), one move each
-export const SPECIAL_MOVES: Record<string, ClipMove> = {
-  katana: { clip: 'slash2', hit: [0.95], chain: 99, cancel: 1.25, end: 1.6, from: 0.5, speed: 1.9, dmg: 39, range: 2.9, arc: 2.1, kb: 6, heavy: true, stamina: 0 },
-  bo: { clip: 'spin', hit: [], chain: 99, cancel: 1.6, end: 1.85, speed: 1.5, root: 0.45, dmg: 12, range: 3.4, arc: Math.PI * 2, kb: 5, stamina: 0 },
-  kama: { clip: 'spin', hit: [0.47], chain: 99, cancel: 1.2, end: 1.6, speed: 1.5, dmg: 39, range: 7, arc: Math.PI * 2, kb: 6, heavy: true, stamina: 0 },
-  shuriken: { clip: 'cast', hit: [], release: 0.35, chain: 99, cancel: 0.6, end: 0.95, speed: 1.6, dmg: 10, range: 0, arc: 0, kb: 3, stamina: 0 },
-  kunai: { clip: 'eSwordAttack', hit: [0.62], chain: 99, cancel: 0.85, end: 1.1, from: 0.35, speed: 1.6, dmg: 105, range: 3, arc: 3, kb: 8, heavy: true, stamina: 0 },
-  karate: { clip: 'jabL', eff: 'LH', hit: [0.33], chain: 99, cancel: 99, end: 0.9, speed: 1.75, dmg: 18, range: 3, arc: 3, kb: 2, stamina: 0 },
-  bomb: { clip: 'cast', hit: [], release: 0.35, chain: 99, cancel: 0.6, end: 0.95, speed: 1.6, dmg: 30, range: 0, arc: 0, kb: 8, stamina: 0 }
-};
-
-// Karatê special flurry (Punho do Dragão): each step starts at the previous one's `chain`
-export const RUSH: ClipMove[] = [
-  { clip: 'jabL', eff: 'LH', hit: [0.33], chain: 0.42, cancel: 99, end: 0.9, speed: 1.75, dmg: 18, range: 3, arc: 3, kb: 2, stamina: 0 },
-  { clip: 'jabR', eff: 'RH', hit: [0.25], chain: 0.36, cancel: 99, end: 0.9, speed: 1.75, dmg: 18, range: 3, arc: 3, kb: 2, stamina: 0 },
-  { clip: 'cross', eff: 'RH', hit: [0.28], chain: 0.4, cancel: 99, end: 1.2, speed: 1.7, dmg: 21, range: 3, arc: 3, kb: 3, stamina: 0 },
-  { clip: 'kick2', eff: 'LF', hit: [0.9], chain: 99, cancel: 1.2, end: 1.6, from: 0.2, speed: 1.6, dmg: 48, range: 3.2, arc: 3, kb: 10, heavy: true, stamina: 0 }
-];
-
 // Enemy samurai strikes: clip + its own hit frame. The AI's wind-up then simply IS the
 // clip up to that frame, played a touch faster on combo follow-ups.
 export const ENEMY_STRIKES: Record<string, { clip: string; hit: number; from?: number }[]> = {
