@@ -18,7 +18,7 @@ export const CARDS: CardDef[] = [
   { id: 'sombra', name: 'Passo Sombrio', glyph: '影', max: 3, desc: () => 'A esquiva protege por mais tempo' },
   { id: 'ferro', name: 'Postura de Ferro', glyph: '鉄', max: 3, desc: () => 'A postura se recupera 20% mais rápido' },
   { id: 'sede', name: 'Sede de Sangue', glyph: '血', max: 3, desc: (l) => `Cada golpe final cura ${6 * l} de vida` },
-  { id: 'pergaminho', name: 'Pergaminho Longo', glyph: '巻', max: 3, desc: () => 'Especiais duram 5 s a mais' },
+  { id: 'pergaminho', name: 'Pergaminho Longo', glyph: '巻', max: 3, desc: () => 'O botão do Ougi dura 5 s a mais' },
   { id: 'cabaca', name: 'Cabaça Cheia', glyph: '瓢', max: 2, desc: () => '+1 gole de cura por onda' },
   { id: 'espolio', name: 'Espólio', glyph: '誉', max: 3, desc: () => '+15% de Honra ganha' }
 ];

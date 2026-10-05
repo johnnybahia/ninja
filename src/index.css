@@ -298,6 +298,45 @@ html, body, #root {
   }
 }
 
+/* the Ougi button: a gold glow that beats while a foe stands in front, the ring that drains with the
+   scroll's time, and the title card slashed in over the letterbox */
+@keyframes kgOugiPulse {
+  0%,
+  100% {
+    box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.35), 0 0 0 2px rgba(255, 209, 102, 0.85), 0 0 14px rgba(255, 190, 70, 0.55);
+  }
+  50% {
+    box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.35), 0 0 0 4px #ffd166, 0 0 28px rgba(255, 200, 80, 0.95);
+  }
+}
+
+@keyframes kgOugiRing {
+  to {
+    stroke-dashoffset: 100;
+  }
+}
+
+@keyframes kgOugiTitle {
+  0% {
+    opacity: 0;
+    transform: translateX(-70px) skewX(-10deg);
+    clip-path: inset(0 100% 0 0);
+  }
+  10% {
+    opacity: 1;
+    transform: translateX(0) skewX(-10deg);
+    clip-path: inset(0 0 0 0);
+  }
+  82% {
+    opacity: 1;
+    transform: translateX(0) skewX(-10deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(24px) skewX(-10deg);
+  }
+}
+
 @keyframes kgFadeOnly {
   0%,
   70% {
@@ -580,6 +619,20 @@ html, body, #root {
     border-color: #ffd166;
     animation: kgNudge 0.5s ease-in-out infinite;
   }
+  .kg-ougi {
+    border-color: #ffd166;
+    background: radial-gradient(circle at 32% 26%, rgba(150, 40, 48, 0.95), rgba(40, 12, 20, 0.95) 70%);
+  }
+  .kg-ougi-ready {
+    animation: kgOugiPulse 0.9s ease-in-out infinite;
+  }
+  .kg-ougi-ring {
+    stroke-dashoffset: 0;
+    animation: kgOugiRing linear forwards;
+  }
+  .kg-ougi-title {
+    animation: kgOugiTitle 3.2s ease-out forwards;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -594,9 +647,14 @@ html, body, #root {
   .kg-shout-in {
     animation-name: kgFadeOnly !important;
   }
-  .kg-nudge {
+  .kg-nudge,
+  .kg-ougi-ready {
     animation: none !important;
     box-shadow: 0 0 0 3px #ffd166 !important;
+  }
+  .kg-ougi-title {
+    animation-name: kgFadeOnly !important;
+    animation-duration: 3.2s !important;
   }
   .kg-cta::after,
   .kg-low {

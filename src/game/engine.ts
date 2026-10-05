@@ -19,11 +19,11 @@ import {
   turnTo,
   rand,
   WEAPONS_KAGE,
-  SPECIALS,
   KARATE
 } from './constants';
 import { sfx } from './audio';
 import { COMBO_RANKS, COMBO_WINDOW, KILL_CHAINS, comboRank, type Callout, type CalloutTone, type ComboInfo } from './combo';
+import { newPose, ougiById, pickOugi, resolveOugi, shotPose, type OugiDef, type OugiFx, type OugiShot, type OugiStep } from './ougi';
 import { World } from './world';
 import { ATMOSPHERES, AtmosMode, atmosphereForWave } from './atmosphere';
 import { THEMES, ThemeMode, themeForWave } from './theme';
@@ -33,7 +33,7 @@ import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
 import { createClipRig, Grip, OneShot, PlayOptions } from './clipRig';
 import { loadCharacter, loadWeapons, loadLazyWeapons, weaponsReady, preloadModels, characterIfReady, CharacterTemplate, LAZY_CHARACTERS, type CharacterModel } from './models';
-import { COMBOS, SPECIAL_MOVES, RUSH, ENEMY_STRIKES, BOSS_STRIKES, FINISHERS, FINISHER_CLIP_LEN, HOOK, Finisher, ClipMove } from './moves';
+import { COMBOS, ENEMY_STRIKES, BOSS_STRIKES, FINISHERS, FINISHER_CLIP_LEN, HOOK, Finisher, ClipMove } from './moves';
 import { BladeSeg, makeSeg, segSegDist, sweepVsCapsule, BLADE_SEG, MAGNET_REACH, HURT_BOTTOM, HURT_TOP } from './combat';
 import { DebugDraw } from './debugdraw';
 import { animateCharacter, animateDeath } from './animation';
@@ -166,6 +166,12 @@ const Z_AXIS = new THREE.Vector3(0, 0, 1);
 // Scroll drop chance per kill for each loaded weapon (2 weapons -> 7.5% per kill).
 const SCROLL_RATE_PER_WEAPON = 0.0375;
 const SPECIAL_DURATION = 20;
+// Ougi (ougi.ts): how far in front a foe can be chosen, the cone it must be in, and the length of the
+// attacker's pose before the first blow and of the pull-back after the last
+const OUGI_RANGE = 9;
+const OUGI_CONE = 1.3;
+const OUGI_INTRO = 0.9;
+const OUGI_OUTRO = 0.6;
 
 // Pseudo-random distribution: the chance on the n-th kill since the last scroll is C·n.
 // Solves for C so the long-run rate still averages `p`, but without long droughts or streaks.
@@ -291,11 +297,15 @@ export interface GameEngineCallbacks {
   onComboChange: (combo: ComboInfo | null) => void;
   onWaveChange: (wave: number, text: string, sub: string) => void;
   onWeaponChange: (weaponIdx: number, weapon: WeaponDef) => void;
-  onSpecialsUpdate: (specials: Record<number, number>) => void;
+  // the Ougi scroll: the button's name and time (null once it is used or runs out), whether a foe is in front
+  // to use it on, and the title card shown while the sequence plays
+  onOugiState?: (o: { id: number; name: string; glyph: string; secs: number } | null) => void;
+  onOugiAim?: (inFront: boolean) => void;
+  onOugiTitle?: (t: { name: string; glyph: string; sub: string } | null) => void;
   onGameOver: (score: number, wave: number, level: number, kills: number, bestCombo: number, summary: RunSummary) => void;
   onQualityChange?: (setting: QualitySetting, effective: Quality) => void;
   onPostureChange?: (posture: number, max: number) => void;
-  onCinematic?: (active: boolean, kind?: 'full' | 'short' | 'duel') => void;
+  onCinematic?: (active: boolean, kind?: 'full' | 'short' | 'duel' | 'ougi') => void;
   // a big word on screen for the moments worth shouting about (a perfect parry, a kill chain)
   onCallout?: (c: Callout) => void;
   // a hook just landed: the slot of the weapon that threw it (the HUD lights the other one), or null once the window closes
@@ -326,6 +336,28 @@ interface HookState {
   ux: number; // unit vector from the player to the foe at the catch
   uz: number;
   stop: number; // distance left between the two bodies' centres
+}
+
+// The Ougi sequence in progress (see stepOugi): the foe, the phase, the blow being played and where the
+// attacker and the camera stand for it
+interface OugiRun {
+  def: OugiDef;
+  steps: OugiStep[];
+  e: EnemyInstance;
+  phase: 'intro' | 'steps' | 'outro';
+  i: number; // the blow being played
+  t: number; // game seconds into the phase (or the blow)
+  delay: number; // when this blow lands
+  dur: number; // when the next one starts
+  hit: boolean; // this blow has landed
+  base: number; // the angle, from the foe, the attacker started at
+  angle: number; // where he stands now
+  ring: number; // how far from the foe
+  side: number; // which side of the pair the camera takes
+  shot: OugiShot;
+  weaponBefore: number;
+  dealt: number; // damage done so far
+  budget: number; // the most of its life the foe can lose (the Oni: a quarter)
 }
 
 // A committed move or reaction on the mocap rig. Times are clip seconds (see moves.ts).
@@ -446,10 +478,6 @@ export class GameEngine {
     phase: 0,
     kills: 0,
     weaponMeshes: [] as THREE.Group[],
-    special: {} as Record<number, number>,
-    tornado: 0,
-    torTick: 0,
-    rush: null as { t: number; hits: number; kicked: boolean } | null,
     attackHeldT: 0,
     guardPressT: -99,
     posture: 0,
@@ -479,10 +507,9 @@ export class GameEngine {
   private enemies: EnemyInstance[] = [];
   private projectiles: ProjectileInstance[] = [];
   private pickups: { m: THREE.Mesh; x: number; z: number; t: number }[] = [];
-  private scrolls: { g: THREE.Group; ring: THREE.Mesh; glyph: THREE.Sprite; x: number; z: number; t: number; w: number }[] = [];
+  private scrolls: { g: THREE.Group; ring: THREE.Mesh; glyph: THREE.Sprite; x: number; z: number; t: number }[] = [];
   private glyphTex = new Map<string, THREE.CanvasTexture>();
   private killsSinceScroll = 0;
-  private scrollsGiven: Record<number, number> = {};
 
   private projPools: Record<string, THREE.Group[]> = {};
 
@@ -511,6 +538,15 @@ export class GameEngine {
   private hookCd = 0;
   private hookDust = 0;
   private followUp: { e: EnemyInstance; t: number; weapon: number } | null = null;
+  // Ougi: the scroll's charge (its sequence and time left), whether a foe is in front, the last sequence
+  // used, the camera pose being computed, and a dev hook to force one
+  private ougiCharge: { def: OugiDef; t: number; max: number; id: number } | null = null;
+  private ougiSeq = 0;
+  private ougiAim = false;
+  private ougiPollT = 0;
+  private lastOugi: string | undefined;
+  private ougiPose = newPose();
+  public ougiForce: string | null = null;
   private lastMove = new THREE.Vector3(0, 0, -1);
   private slowmoT = 0;
   private attackQueueT = 0;
@@ -671,6 +707,7 @@ export class GameEngine {
     hitAt: number; // game-seconds from the start to the blow (set by the finisher)
     style: Finisher['style'];
     boom: boolean;
+    ougi?: OugiRun; // an Ougi sequence rides on the same cinematic (everything that waits for a finisher waits for it too)
   } | null = null;
   // finisher chosen last for each weapon (so it never repeats back to back); dev hook to force one
   private lastFinisher: Record<string, number> = {};
@@ -1039,9 +1076,6 @@ export class GameEngine {
     this.comboRankShown = 0;
     this.player.bestCombo = 0;
     this.player.kills = 0;
-    this.player.special = {};
-    this.player.tornado = 0;
-    this.player.rush = null;
     this.player.dash = 0;
     this.player.dashInv = false;
     this.player.posture = 0;
@@ -1071,7 +1105,6 @@ export class GameEngine {
     this.input.attackHeld = false;
     this.input.guardHeld = false;
     this.killsSinceScroll = 0;
-    this.scrollsGiven = {};
     this.player.pos.set(0, 0, 5);
     this.player.vel.set(0, 0, 0);
     this.player.kb.set(0, 0, 0);
@@ -1091,7 +1124,11 @@ export class GameEngine {
     this.hookCd = 0;
     this.followUp = null;
     this.callbacks.onFollowUp?.(null);
-    this.callbacks.onSpecialsUpdate({});
+    this.ougiCharge = null;
+    this.ougiAim = false;
+    this.callbacks.onOugiState?.(null);
+    this.callbacks.onOugiAim?.(false);
+    this.callbacks.onOugiTitle?.(null);
     this.setWeapon(this.loadout?.[0] ?? 0);
   }
 
@@ -2578,7 +2615,7 @@ export class GameEngine {
   private updateReticle(dt: number) {
     const w = this.weapons[this.activeWeaponIdx];
     const straight = w && w.kind === 'proj';
-    if (!straight || this.player.hp <= 0) {
+    if (!straight || this.player.hp <= 0 || this.cine) {
       this.reticle.visible = false;
       return;
     }
@@ -2694,8 +2731,6 @@ export class GameEngine {
     this.player.inv = Math.max(this.player.inv, 0.3 + 0.04 * (this.cardLv.sombra ?? 0));
     this.player.dashInv = true;
     this.player.comboT = 0;
-    this.player.tornado = 0;
-    this.player.rush = null;
 
     if (this.lastMove.lengthSq() > 0.01 && this.player.moveAmt > 0.1) {
       this.player.dashDir.copy(this.lastMove).normalize();
@@ -2726,16 +2761,10 @@ export class GameEngine {
     if (this.player.atkCd > 0 || this.state !== 'play') return;
     if (this.player.staggerT > 0 || this.cine || this.input.guardHeld || this.player.healT > 0) return;
     const w = this.weapons[this.activeWeaponIdx];
-    if (this.player.rush || this.player.tornado > 0) return;
 
     const db = this.findDeathblowTarget();
     if (db) {
       this.performDeathblow(db);
-      return;
-    }
-
-    if (this.player.special[this.activeWeaponIdx] > 0) {
-      this.trySpecial(w);
       return;
     }
 
@@ -2835,125 +2864,6 @@ export class GameEngine {
     }
   }
 
-  private trySpecial(w: WeaponDef) {
-    const S = SPECIALS[w.id];
-    if (!S) return;
-    if (this.player.rig.clip) {
-      this.soulsSpecial(w);
-      return;
-    }
-    this.player.atkCd = S.cd;
-    this.fovKick = Math.min(this.fovKick, -4);
-    const fx = Math.sin(this.player.yaw);
-    const fz = Math.cos(this.player.yaw);
-    this.player.rig.root.updateMatrixWorld(true);
-    this.player.rig.hand.getWorldPosition(this.tmpH);
-
-    switch (w.id) {
-      case 'katana':
-        this.player.anim = { kind: 'slash', t: 0, dur: 0.24, side: 0 };
-        this.slash.geometry = this.slashGeos.katana;
-        this.slashT = 0;
-        this.slashDur = 0.2;
-        this.spHit = true;
-        this.meleeHit(2.9, 2.1, 40, 6, true);
-        this.spHit = false;
-        this.spawnProj({
-          type: 'wave',
-          friendly: true,
-          sp: true,
-          pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y - 0.3, this.tmpH.z),
-          vel: new THREE.Vector3(fx * 22, 0, fz * 22),
-          dmg: 45,
-          pierce: true,
-          life: 0.8,
-          r: 1.5,
-          kb: 6,
-          noSolid: true
-        });
-        sfx.heavy();
-        break;
-      case 'bo':
-        this.player.tornado = 1.5;
-        this.player.torTick = 0;
-        this.player.anim = { kind: 'spin', t: 0, dur: 1.5, side: 0 };
-        sfx.dash();
-        break;
-      case 'kama':
-        this.player.anim = { kind: 'spin', t: 0, dur: 0.45, side: 0 };
-        this.chainSpin = 0.45;
-        this.spHit = true;
-        for (const e of this.enemies) {
-          if (e.dead) continue;
-          const dx = e.pos.x - this.player.pos.x;
-          const dz = e.pos.z - this.player.pos.z;
-          const d = Math.hypot(dx, dz) || 0.001;
-          if (d < 7 + e.r) this.hitEnemy(e, 48, -dx / d, -dz / d, 6, true);
-        }
-        this.spHit = false;
-        sfx.heavy();
-        break;
-      case 'shuriken':
-        for (let i = 0; i < 12; i++) {
-          const a = this.player.yaw + (i / 12) * TAU;
-          this.spawnProj({
-            type: 'shuriken',
-            friendly: true,
-            sp: true,
-            homing: true,
-            speed: 18,
-            pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y, this.tmpH.z),
-            vel: new THREE.Vector3(Math.sin(a) * 18, 0, Math.cos(a) * 18),
-            dmg: 11,
-            life: 2.2
-          });
-        }
-        sfx.throw();
-        break;
-      case 'kunai': {
-        const tg = this.findTarget(14);
-        if (tg) {
-          const dx = tg.pos.x - this.player.pos.x;
-          const dz = tg.pos.z - this.player.pos.z;
-          const d = Math.hypot(dx, dz) || 0.001;
-          this.player.pos.x = tg.pos.x + (dx / d) * (tg.r + 0.9);
-          this.player.pos.z = tg.pos.z + (dz / d) * (tg.r + 0.9);
-          this.player.yaw = Math.atan2(-dx, -dz);
-          this.spHit = true;
-          this.hitEnemy(tg, 130, -dx / d, -dz / d, 8, true);
-          this.spHit = false;
-          sfx.dash();
-        }
-        break;
-      }
-      case 'karate':
-        this.player.rush = { t: 0, hits: 0, kicked: false };
-        break;
-      case 'bomb': {
-        // Chuva de Fogo: a scatter of grenades arcing down across an area instead of one throw
-        const n = 5;
-        for (let i = 0; i < n; i++) {
-          const a = this.player.yaw + (i - (n - 1) / 2) * 0.3 + rand(-0.05, 0.05);
-          this.spawnProj({
-            type: 'bomb',
-            friendly: true,
-            sp: true,
-            bomb: true,
-            pos: new THREE.Vector3(this.tmpH.x, this.tmpH.y + 0.2, this.tmpH.z),
-            vel: new THREE.Vector3(Math.sin(a) * 13, 7 + rand(-1, 2), Math.cos(a) * 13),
-            grav: 16,
-            dmg: 36,
-            aoeR: 3.2,
-            kb: 8,
-            life: 2.5
-          });
-        }
-        sfx.throw();
-        break;
-      }
-    }
-  }
-
   // ---------------------------------------------------------------------------
   // Mocap rig: Souls-style moves (see moves.ts). A move commits: damage lands on the
   // clip's own hit frame, the next combo step only starts inside its chain window, and a
@@ -3037,7 +2947,6 @@ export class GameEngine {
   private soulsAttack() {
     if (this.state !== 'play' || this.player.hp <= 0) return;
     if (this.player.staggerT > 0 || this.cine || this.player.healT > 0) return;
-    if (this.player.rush || this.player.tornado > 0) return;
     const a = this.act;
     if (a) {
       const counter = (a.kind === 'deflect' || a.kind === 'block' || a.kind === 'hurt') && a.shot.t >= a.cancelAt;
@@ -3057,10 +2966,6 @@ export class GameEngine {
       return;
     }
     const w = this.weapons[this.activeWeaponIdx];
-    if (this.player.special[this.activeWeaponIdx] > 0) {
-      this.trySpecial(w);
-      return;
-    }
     const combo = COMBOS[w.id];
     if (!combo) return;
     const chaining = !!a && a.kind === 'attack' && this.player.comboW === this.activeWeaponIdx;
@@ -3109,7 +3014,7 @@ export class GameEngine {
     } else {
       for (const t of m.hit) act.events.push({ t, fn: () => this.soulsStrike(w, m, step) });
     }
-    if (m.release !== undefined) act.events.push({ t: m.release, fn: () => this.throwWeapon(w, false) });
+    if (m.release !== undefined) act.events.push({ t: m.release, fn: () => this.throwWeapon(w) });
   }
 
   // a move's hit frame
@@ -3292,14 +3197,14 @@ export class GameEngine {
     this.hitEnemy(e, win.dmg * mult, nx, nz, win.kb, win.heavy, { point: this.hitPt, dirX: kx, dirZ: kz });
   }
 
-  // Throwables leave the off hand (normal throw or the weapon's special volley)
-  private throwWeapon(w: WeaponDef, special: boolean) {
+  // Throwables leave the off hand
+  private throwWeapon(w: WeaponDef) {
     this.player.rig.root.updateMatrixWorld(true);
     (this.player.rig.clip ? this.player.rig.handL : this.player.rig.hand).getWorldPosition(this.tmpH);
     const h = this.tmpH;
     const fx = Math.sin(this.player.yaw);
     const fz = Math.cos(this.player.yaw);
-    if (w.kind === 'proj' && !special) {
+    if (w.kind === 'proj') {
       const n = w.count || 1;
       const dmg = COMBOS[w.id]?.[0]?.dmg ?? w.dmg[0];
       for (let i = 0; i < n; i++) {
@@ -3315,7 +3220,7 @@ export class GameEngine {
           life: w.life || 1.2
         });
       }
-    } else if (w.kind === 'bomb' && !special) {
+    } else if (w.kind === 'bomb') {
       this.spawnProj({
         type: 'bomb',
         friendly: true,
@@ -3326,167 +3231,8 @@ export class GameEngine {
         life: 3,
         bomb: true
       });
-    } else if (w.id === 'shuriken') {
-      for (let i = 0; i < 12; i++) {
-        const a = this.player.yaw + (i / 12) * TAU;
-        this.spawnProj({
-          type: 'shuriken',
-          friendly: true,
-          sp: true,
-          homing: true,
-          speed: 18,
-          pos: new THREE.Vector3(h.x, h.y, h.z),
-          vel: new THREE.Vector3(Math.sin(a) * 18, 0, Math.cos(a) * 18),
-          dmg: SPECIAL_MOVES.shuriken.dmg,
-          life: 2.2
-        });
-      }
-    } else if (w.id === 'bomb') {
-      const n = 5;
-      for (let i = 0; i < n; i++) {
-        const a = this.player.yaw + (i - (n - 1) / 2) * 0.3 + rand(-0.05, 0.05);
-        this.spawnProj({
-          type: 'bomb',
-          friendly: true,
-          sp: true,
-          bomb: true,
-          pos: new THREE.Vector3(h.x, h.y + 0.2, h.z),
-          vel: new THREE.Vector3(Math.sin(a) * 13, 7 + rand(-1, 2), Math.cos(a) * 13),
-          grav: 16,
-          dmg: SPECIAL_MOVES.bomb.dmg,
-          aoeR: 3.2,
-          kb: 8,
-          life: 2.5
-        });
-      }
     }
     sfx.throw();
-  }
-
-  private soulsSpecial(w: WeaponDef) {
-    const m = SPECIAL_MOVES[w.id];
-    if (!m) return;
-    this.actQueued = false;
-    this.fovKick = Math.min(this.fovKick, -4);
-    if (this.settings.cinematicCamera && w.id !== 'bo' && w.id !== 'shuriken' && w.id !== 'bomb') {
-      this.punchT = 0;
-      this.punchDur = 0.6;
-    }
-    const speed = (m.speed ?? 1) * TUNE.attackSpeed;
-    const opts = { speed, from: m.from, rootMotion: !!m.root, chain: m.chain, cancel: m.cancel, end: m.end, turnUntil: m.hit[0] ?? m.release ?? 0 };
-    if (w.id === 'karate') {
-      this.playRush(0);
-      return;
-    }
-    if (w.id === 'kunai') {
-      // Relâmpago: blink to the target, then cut
-      const tg = this.findTarget(14);
-      if (!tg) return;
-      const dx = tg.pos.x - this.player.pos.x;
-      const dz = tg.pos.z - this.player.pos.z;
-      const d = Math.hypot(dx, dz) || 0.001;
-      this.player.pos.x = tg.pos.x - (dx / d) * (tg.r + 1.1);
-      this.player.pos.z = tg.pos.z - (dz / d) * (tg.r + 1.1);
-      this.player.yaw = Math.atan2(dx, dz);
-      this.ghosts.spawn(this.player.rig.root, GHOST_DASH);
-      sfx.dash();
-      const act = this.startAct('special', m.clip, opts, m);
-      act?.events.push({
-        t: m.hit[0],
-        fn: () => {
-          if (tg.dead) return;
-          const ex = tg.pos.x - this.player.pos.x;
-          const ez = tg.pos.z - this.player.pos.z;
-          const ed = Math.hypot(ex, ez) || 0.001;
-          this.spHit = true;
-          this.hitEnemy(tg, m.dmg, ex / ed, ez / ed, m.kb, true);
-          this.spHit = false;
-          sfx.heavy();
-        }
-      });
-      this.player.atkCd += 0.05;
-      return;
-    }
-    const act = this.startAct('special', m.clip, opts, m);
-    if (!act) return;
-    this.player.atkCd += 0.05;
-    if (w.id === 'bo') {
-      // Tornado: the spin clip whirls while updatePlayer ticks the AoE
-      this.player.tornado = (m.end - (m.from ?? 0) - 0.1) / speed;
-      this.player.torTick = 0;
-      sfx.dash();
-      return;
-    }
-    if (m.release !== undefined) {
-      act.events.push({ t: m.release, fn: () => this.throwWeapon(w, true) });
-      return;
-    }
-    act.events.push({
-      t: m.hit[0],
-      fn: () => {
-        this.spHit = true;
-        if (w.id === 'kama') {
-          this.chainSpin = 0.45;
-          for (const e of this.enemies) {
-            if (e.dead) continue;
-            const dx = e.pos.x - this.player.pos.x;
-            const dz = e.pos.z - this.player.pos.z;
-            const d = Math.hypot(dx, dz) || 0.001;
-            if (d < m.range + e.r) this.hitEnemy(e, m.dmg, -dx / d, -dz / d, m.kb, true);
-          }
-        } else {
-          // katana: Corte do Vento - the cut plus a travelling wave
-          this.meleeHit(m.range, m.arc, m.dmg, m.kb, true);
-          this.slash.geometry = this.slashGeos.katana;
-          this.slash.rotation.set(0, this.player.yaw, 0);
-          this.slashT = 0;
-          this.slashDur = 0.2;
-          this.player.rig.root.updateMatrixWorld(true);
-          this.player.rig.hand.getWorldPosition(this.tmpH);
-          const fx = Math.sin(this.player.yaw);
-          const fz = Math.cos(this.player.yaw);
-          this.spawnProj({
-            type: 'wave',
-            friendly: true,
-            sp: true,
-            pos: new THREE.Vector3(this.tmpH.x, Math.max(0.6, this.tmpH.y - 0.3), this.tmpH.z),
-            vel: new THREE.Vector3(fx * 22, 0, fz * 22),
-            dmg: 41,
-            pierce: true,
-            life: 0.8,
-            r: 1.5,
-            kb: 6,
-            noSolid: true
-          });
-        }
-        this.spHit = false;
-        sfx.heavy();
-      }
-    });
-  }
-
-  // Punho do Dragão: a flurry of jabs into a spinning kick, each step starting in the
-  // previous one's chain window
-  private playRush(i: number) {
-    const m = RUSH[i];
-    const act = this.startAct('special', m.clip, { speed: (m.speed ?? 1) * TUNE.attackSpeed, from: m.from, chain: m.chain, cancel: m.cancel, end: m.end, turnUntil: m.hit[0] }, m);
-    if (!act) return;
-    this.player.atkCd += 0.05;
-    act.events.push({
-      t: m.hit[0],
-      fn: () => {
-        const tg = this.findTarget(3.2);
-        if (tg) {
-          const dx = tg.pos.x - this.player.pos.x;
-          const dz = tg.pos.z - this.player.pos.z;
-          const d = Math.hypot(dx, dz) || 0.001;
-          this.player.yaw = Math.atan2(dx, dz);
-          this.hitEnemy(tg, m.dmg, dx / d, dz / d, m.kb, !!m.heavy);
-        }
-        m.heavy ? sfx.heavy() : sfx.swing();
-      }
-    });
-    if (i + 1 < RUSH.length) act.onChain = () => this.playRush(i + 1);
   }
 
   // Runs every frame on the mocap rig: fires due hit frames, starts a buffered combo
@@ -3978,13 +3724,406 @@ export class GameEngine {
     if (h.t >= end + HOOK.retract || e.dead) this.hook = null;
   }
 
+  // ---- Ougi (ougi.ts) ------------------------------------------------------------------------
+  // A scroll grants a charge for a while; the button on the HUD uses it on the foe in front. The
+  // sequence is a cinematic of its own: time stops for everyone but the foe, the attacker flashes around
+  // it swapping weapons from blow to blow, and the camera cuts from shot to shot. It runs on the
+  // director's clock, the same game time the clips use, so a hit stop or a slow motion stretches both.
+
+  private equippedIds(): string[] {
+    return this.loadoutPool().map((i) => this.weapons[i]?.id).filter(Boolean);
+  }
+
+  /** An Ougi scroll: the button shows for `secs` seconds (a second scroll only renews the time). */
+  private grantOugi(secs: number) {
+    const def = this.ougiCharge?.def ?? (this.ougiForce ? ougiById(this.ougiForce) : undefined) ?? pickOugi(this.equippedIds(), this.lastOugi);
+    this.ougiCharge = { def, t: secs, max: secs, id: ++this.ougiSeq };
+    this.callbacks.onOugiState?.({ id: this.ougiSeq, name: def.name, glyph: def.glyph, secs });
+    this.ougiPollT = 0;
+  }
+
+  /** The foe in front the Ougi would be used on: in the cone, within reach, the bigger threats first. */
+  private pickOugiTarget(): EnemyInstance | null {
+    const P = this.player;
+    let best: EnemyInstance | null = null;
+    let bestScore = Infinity;
+    for (const e of this.enemies) {
+      if (e.dead || e.flee || (e.vanishT ?? 0) > 0) continue;
+      const dx = e.pos.x - P.pos.x;
+      const dz = e.pos.z - P.pos.z;
+      const d = Math.hypot(dx, dz);
+      if (d - e.r > OUGI_RANGE) continue;
+      const off = Math.abs(wrap(Math.atan2(dx, dz) - P.yaw));
+      if (off > OUGI_CONE) continue;
+      const score = off * 2 + d * 0.35 - (e.type === 'boss' ? 3 : isFodder(e) ? 0 : 1.5);
+      if (score < bestScore) {
+        bestScore = score;
+        best = e;
+      }
+    }
+    return best;
+  }
+
+  /** The Ougi button. Nothing happens without a charge; without a foe in front it says so and keeps the charge. */
+  public ougi() {
+    const P = this.player;
+    if (!this.ougiCharge || this.state !== 'play' || this.cine || P.hp <= 0 || P.staggerT > 0 || P.healT > 0 || this.cardOffer) return;
+    const e = this.pickOugiTarget();
+    if (!e) {
+      this.callout('SEM ALVO!', 'steel', '空');
+      return;
+    }
+    this.startOugi(e);
+  }
+
+  private startOugi(e: EnemyInstance) {
+    const ch = this.ougiCharge;
+    const P = this.player;
+    if (!ch) return;
+    this.ougiCharge = null;
+    this.ougiAim = false;
+    this.lastOugi = ch.def.id;
+    this.callbacks.onOugiState?.(null);
+    this.callbacks.onOugiAim?.(false);
+    const steps = resolveOugi(ch.def, this.equippedIds());
+    this.cancelAct(0.05);
+    this.actQueued = false;
+    this.buffered = null;
+    this.hook = null;
+    this.followUp = null;
+    this.callbacks.onFollowUp?.(null);
+    P.dash = 0;
+    P.dashInv = false;
+    P.inv = Math.max(P.inv, 2);
+    this.input.guardHeld = false;
+    this.input.attackHeld = false;
+    // the foe is held where it stands: whatever it was doing is over
+    this.cancelStrike(e);
+    e.blade = undefined;
+    e.bow = undefined;
+    e.kick = undefined;
+    e.castT = 0;
+    e.dodgeT = 0;
+    e.comboLeft = 0;
+    e.token = false;
+    e.mode = 'recover';
+    e.modeT = 0;
+    e.staggerT = 99;
+    if (e.type === 'archer') this.updateBowFx(e);
+    this.cineSide = -this.cineSide;
+    const run: OugiRun = {
+      def: ch.def,
+      steps,
+      e,
+      phase: 'intro',
+      i: -1,
+      t: 0,
+      delay: 0,
+      dur: 0,
+      hit: false,
+      base: Math.atan2(P.pos.x - e.pos.x, P.pos.z - e.pos.z),
+      angle: 0,
+      ring: e.r + 1.25,
+      side: this.cineSide,
+      shot: 'hero',
+      weaponBefore: this.activeWeaponIdx,
+      dealt: 0,
+      budget: e.type === 'boss' ? e.maxHp * 0.25 : Infinity
+    };
+    this.cine = { t: 0, after: 0, e, struck: false, full: true, boss: e.type === 'boss', side: 1, dist: 4, hitAt: 99, style: 'slam', boom: false, ougi: run };
+    this.faceEnemy(e);
+    // the pose before the first blow
+    this.startAct('special', 'powerUp', { from: 0.3, speed: 2.3, cancel: 99, end: 1.2, fadeIn: 0.08, fadeOut: 0.2 });
+    this.flashFx = Math.max(this.flashFx, 0.35);
+    this.spikeFx = Math.max(this.spikeFx, 0.6);
+    this.callbacks.onCinematic?.(true, 'ougi');
+    this.callbacks.onOugiTitle?.({ name: ch.def.name, glyph: ch.def.glyph, sub: ch.def.sub });
+    sfx.special();
+  }
+
+  // the nearest free spot around the foe to the wanted angle (a trunk or a lantern may stand on it)
+  private ougiSpot(e: EnemyInstance, ring: number, want: number): number {
+    for (const off of [0, 0.7, -0.7, 1.4, -1.4, 2.1, -2.1, Math.PI]) {
+      const a = want + off;
+      const x = e.pos.x + Math.sin(a) * ring;
+      const z = e.pos.z + Math.cos(a) * ring;
+      if (Math.hypot(x, z) > R_ARENA - 1) continue;
+      if (this.solids.some((s) => s.h > 0.4 && Math.hypot(s.x - x, s.z - z) < s.r + 0.6)) continue;
+      return a;
+    }
+    return want;
+  }
+
+  // keeps the attacker at his spot around the foe (which a blow may push back) and facing it
+  private placeOugiAttacker(r: OugiRun) {
+    const P = this.player;
+    const e = r.e;
+    P.pos.x = e.pos.x + Math.sin(r.angle) * r.ring;
+    P.pos.z = e.pos.z + Math.cos(r.angle) * r.ring;
+    this.collide(P.pos, 0.45);
+    P.vel.set(0, 0, 0);
+    P.kb.set(0, 0, 0);
+    P.yaw = Math.atan2(e.pos.x - P.pos.x, e.pos.z - P.pos.z);
+  }
+
+  // is the camera's whole path for a shot clear of the tall solids (trunks, pillars)?
+  private ougiCamFree(r: OugiRun, shot: OugiShot, side: number): boolean {
+    const e = r.e;
+    const P = this.player.pos;
+    const portrait = this.camera.aspect < 1;
+    for (const k of [0, 1]) {
+      const p = shotPose(this.ougiPose, shot, P.x, P.z, e.pos.x, e.pos.z, this.sizeOf(e), side, k, portrait);
+      for (const so of this.solids) {
+        if (so.h < 2.5 || so.r > 3 || p.y > so.h) continue;
+        const rr = so.r * 0.7 + 0.5;
+        if ((p.x - so.x) ** 2 + (p.z - so.z) ** 2 < rr * rr) return false;
+      }
+    }
+    return true;
+  }
+
+  private beginOugiStep(r: OugiRun, i: number) {
+    const P = this.player;
+    const e = r.e;
+    const s = r.steps[i];
+    r.i = i;
+    r.t = 0;
+    r.hit = false;
+    const k = s.speed * TUNE.attackSpeed;
+    r.delay = (s.hit - s.from) / k;
+    r.dur = r.delay + s.follow / k;
+    // the attacker flashes to the blow's spot around the foe, leaving an afterimage where he was
+    this.ghosts.spawn(P.rig.root, GHOST_PERFECT, 0.4);
+    this.puff(P.pos.x, P.pos.z, 5, 2.6);
+    r.ring = e.r + 0.45 + 0.8;
+    r.angle = this.ougiSpot(e, r.ring, r.base + (s.at === 'front' ? 0 : s.at === 'left' ? Math.PI / 2 : s.at === 'right' ? -Math.PI / 2 : Math.PI));
+    this.placeOugiAttacker(r);
+    const wi = this.weapons.findIndex((w) => w.id === s.weapon);
+    if (wi >= 0) this.setWeapon(wi);
+    const move: ClipMove = { clip: s.clip, hit: [s.hit], chain: 99, cancel: 99, end: s.hit + s.follow + 0.6, from: s.from, speed: s.speed, dmg: s.dmg, range: 3, arc: 3, kb: s.kb, heavy: s.heavy, eff: s.eff, stamina: 0 };
+    const act = this.startAct('special', s.clip, { from: s.from, speed: k, cancel: 99, end: move.end, fadeIn: 0.06, fadeOut: 0.15 }, move);
+    if (!act) {
+      // no mocap rig: the procedural body has its own swing for each kind of blow
+      const kind: Record<string, string> = { punch: 'punchR', kick: 'roundKick', spin: 'spin', whirl: 'spin', chain: 'chain', stars: 'throw', blast: 'throw' };
+      P.anim = { kind: kind[s.fx] ?? 'slash', t: 0, dur: 0.3, side: 0 };
+    }
+    // the camera: the other side from the last blow, or the other way round (or from above) when a
+    // trunk or a pillar would be in the way
+    let side = i % 2 === 0 ? this.cineSide : -this.cineSide;
+    let shot = s.shot;
+    if (!this.ougiCamFree(r, shot, side)) {
+      side = -side;
+      if (!this.ougiCamFree(r, shot, side)) shot = 'top';
+    }
+    r.side = side;
+    r.shot = shot;
+    sfx.dash();
+  }
+
+  private stepOugi(dt: number, r: OugiRun) {
+    const P = this.player;
+    P.inv = Math.max(P.inv, 0.5);
+    r.t += dt;
+    if (r.phase === 'intro') {
+      if (r.t >= OUGI_INTRO) {
+        r.phase = 'steps';
+        this.beginOugiStep(r, 0);
+      }
+      return;
+    }
+    if (r.phase === 'steps') {
+      this.placeOugiAttacker(r);
+      if (!r.hit && r.t >= r.delay) {
+        r.hit = true;
+        this.ougiHit(r, r.steps[r.i]);
+      }
+      if (r.t >= r.dur) {
+        if (r.i + 1 < r.steps.length) this.beginOugiStep(r, r.i + 1);
+        else {
+          r.phase = 'outro';
+          r.t = 0;
+          r.shot = 'wide';
+        }
+      }
+      return;
+    }
+    if (r.t >= OUGI_OUTRO) this.endOugi(r);
+  }
+
+  // One blow lands. The opening ones never kill (the foe holds on to its last point of life); the last one
+  // does, except on the Oni, which loses at most a quarter of its life over the whole sequence.
+  private ougiHit(r: OugiRun, s: OugiStep) {
+    const e = r.e;
+    if (e.dead) return;
+    const P = this.player;
+    const last = r.i === r.steps.length - 1;
+    const dx = e.pos.x - P.pos.x;
+    const dz = e.pos.z - P.pos.z;
+    const d = Math.hypot(dx, dz) || 1;
+    let dmg = s.dmg;
+    if (e.type === 'boss') dmg = Math.min(dmg, Math.max(1, (r.budget - r.dealt) / 1.6), Math.max(1, (e.hp - 1) / 1.7));
+    else if (last) dmg = Math.max(dmg, e.hp * 2);
+    else dmg = Math.min(dmg, Math.max(1, (e.hp - 1) / 1.7));
+    const before = e.hp;
+    this.spHit = true; // nothing parries, blocks or sidesteps an Ougi
+    this.hitEnemy(e, dmg, dx / d, dz / d, s.kb, !!s.heavy || last);
+    this.spHit = false;
+    r.dealt += Math.max(0, before - Math.max(0, e.hp));
+    this.ougiFx(s.fx, e, last);
+    if (!e.dead) {
+      this.enemyClip(e, ['hit1', 'hit3', 'hit2'][r.i % 3], { speed: 1.5, to: 0.65, fadeIn: 0.04, fadeOut: 0.2 });
+      e.anim = { kind: 'erecoil', t: 0, dur: 0.3, side: 0 };
+    }
+    if (last) this.ougiFinale(r);
+  }
+
+  // what each kind of blow adds at the moment it lands, beyond the hit's own flash and blood
+  private ougiFx(fx: OugiFx, e: EnemyInstance, last: boolean) {
+    const P = this.player;
+    const sc = this.sizeOf(e);
+    const y = e.pos.y + 1.25 * sc;
+    const dx = e.pos.x - P.pos.x;
+    const dz = e.pos.z - P.pos.z;
+    const d = Math.hypot(dx, dz) || 1;
+    const fx0 = dx / d;
+    const fz0 = dz / d;
+    this.shake = Math.max(this.shake, last ? 0.7 : fx === 'slam' || fx === 'kick' || fx === 'blast' ? 0.45 : 0.28);
+    switch (fx) {
+      case 'slash':
+      case 'thrust':
+        this.slash.geometry = this.slashGeos.katana;
+        this.slash.rotation.set(0, P.yaw, 0);
+        this.slashT = 0;
+        this.slashDur = 0.2;
+        this.emitBlood(e.pos.x, y, e.pos.z, fx0, fz0, 26, true, true);
+        sfx.sliceHit();
+        break;
+      case 'spin':
+      case 'whirl':
+        for (let k = 0; k < 12; k++) {
+          const a = (k / 12) * TAU;
+          this.emitParticles(e.pos.x + Math.cos(a) * 1.3 * sc, y, e.pos.z + Math.sin(a) * 1.3 * sc, 3, 0xffd49a, 5, 1, 4, 0.35);
+        }
+        if (fx === 'whirl') this.chainSpin = 0.45;
+        sfx.heavy();
+        break;
+      case 'chain':
+        this.chainT = 0;
+        sfx.swing();
+        break;
+      case 'punch':
+        this.impacts.spawn(this.tmpV.set(e.pos.x, y, e.pos.z), IMPACT_NORMAL, 2.2, 0.16, 'hit', { x: fx0, z: fz0 });
+        break;
+      case 'kick':
+        this.impacts.spawn(this.tmpV.set(e.pos.x, y, e.pos.z), IMPACT_HEAVY, 3.2 * (sc > 1 ? 1.3 : 1), 0.3, 'heavy', { x: fx0, z: fz0 });
+        sfx.heavy();
+        break;
+      case 'stars': {
+        // a fan of stars out of the off hand, through the foe
+        P.rig.root.updateMatrixWorld(true);
+        (P.rig.clip ? P.rig.handL : P.rig.hand).getWorldPosition(this.tmpH);
+        for (let k = 0; k < 14; k++) {
+          const a = P.yaw + (k / 13 - 0.5) * 0.9;
+          this.sparks.emit(this.tmpH.x, this.tmpH.y, this.tmpH.z, Math.sin(a) * 26, rand(-0.5, 1.5), Math.cos(a) * 26, 0.35, 0, 0.9, 0.95, 1.4, 1, 0.05);
+        }
+        this.impacts.spawn(this.tmpV.set(e.pos.x, y, e.pos.z), IMPACT_NORMAL, 2.4, 0.18, 'hit', { x: fx0, z: fz0 });
+        sfx.throw();
+        break;
+      }
+      case 'blast':
+        this.emitParticles(e.pos.x, y, e.pos.z, 70, 0xff7a20, 12, 4, 10, 0.7);
+        this.impacts.spawn(this.tmpV.set(e.pos.x, y, e.pos.z), IMPACT_HEAVY, 4.6 * (sc > 1 ? 1.3 : 1), 0.4, 'heavy');
+        this.puff(e.pos.x, e.pos.z, 12, 4);
+        sfx.boom();
+        break;
+      case 'slide':
+        this.puff(P.pos.x, P.pos.z, 12, 3, -fx0, -fz0);
+        this.puff(e.pos.x, e.pos.z, 8, 3, fx0, fz0);
+        sfx.heavy();
+        break;
+      case 'slam':
+        this.puff(e.pos.x, e.pos.z, 14, 4);
+        sfx.heavy();
+        break;
+    }
+  }
+
+  // the last blow: the impact frame (flash and colour split), the aftermath in slow motion, the word
+  private ougiFinale(r: OugiRun) {
+    const e = r.e;
+    this.flashFx = Math.max(this.flashFx, 0.6);
+    this.spikeFx = 1;
+    this.fovKick = -6;
+    this.hitstop = 0.14;
+    this.lastHS = performance.now();
+    this.triggerSlowmo(e.dead ? 1.0 : 0.6, 0.25);
+    sfx.deathblow();
+    this.finishers++;
+    this.waveStat.finishers++;
+    this.addHonor('finish', HONOR.finisher);
+    if (e.dead) this.callout('K.O.!', 'blood', '殺');
+    else {
+      // the Oni survives it, but not on its feet: the way is open for a deathblow
+      this.callout('OUGI!', 'gold', '奥義');
+      this.breakPosture(e);
+    }
+  }
+
+  private endOugi(r: OugiRun) {
+    const P = this.player;
+    const e = r.e;
+    this.cine = null;
+    this.cineW = 0;
+    this.callbacks.onCinematic?.(false);
+    this.callbacks.onOugiTitle?.(null);
+    e.staggerT = e.dead ? 0 : e.type === 'boss' ? 1.6 : 1.1;
+    this.cancelAct(0.25);
+    P.anim = null;
+    if (r.weaponBefore !== this.activeWeaponIdx) this.setWeapon(r.weaponBefore);
+    P.inv = Math.max(P.inv, 0.6);
+    P.atkCd = 0.35;
+  }
+
+  // The Ougi camera: a hard cut to the shot of each blow, a slow push-in or turn inside it, eased in from
+  // the chase camera at the start and back out at the end (the blend is `cineW`, as in a finisher)
+  private applyOugiCamera(dt: number, look: THREE.Vector3) {
+    const r = this.cine?.ougi;
+    if (!r) return;
+    if (!this.settings.cinematicCamera) {
+      this.cineW = 0;
+      return;
+    }
+    const ss = (a: number, b: number, x: number) => {
+      const k = Math.min(1, Math.max(0, (x - a) / (b - a)));
+      return k * k * (3 - 2 * k);
+    };
+    const w = r.phase === 'intro' ? ss(0, 0.3, r.t) : r.phase === 'outro' ? 1 - ss(OUGI_OUTRO - 0.4, OUGI_OUTRO, r.t) : 1;
+    this.cineW = w;
+    if (w < 0.001) return;
+    const P = this.player.pos;
+    const e = r.e;
+    const dur = r.phase === 'steps' ? r.dur : r.phase === 'intro' ? OUGI_INTRO : OUGI_OUTRO;
+    const pose = shotPose(this.ougiPose, r.shot, P.x, P.z, e.pos.x, e.pos.z, this.sizeOf(e), r.side, Math.min(1, r.t / dur), this.camera.aspect < 1);
+    const cam = this.camera;
+    const j = this.shake * 0.5;
+    cam.position.x += (pose.x + (Math.random() - 0.5) * j - cam.position.x) * w;
+    cam.position.y += (Math.max(0.3, pose.y) + (Math.random() - 0.5) * j - cam.position.y) * w;
+    cam.position.z += (pose.z + (Math.random() - 0.5) * j - cam.position.z) * w;
+    this.cineFocus.set(pose.lx, pose.ly, pose.lz);
+    look.lerp(this.cineFocus, w);
+    cam.fov += (pose.fov - cam.fov) * w;
+    cam.updateProjectionMatrix();
+    cam.lookAt(look);
+    cam.rotateZ(pose.roll * w);
+  }
+
   // What an enemy does about a blow that just connected. Blocks (guard up, only builds its
   // posture) were always there; parries (the blade is turned aside, the swing bounces and
   // the enemy answers) and sidesteps (the blow cuts air, then it comes back) are new.
   // Fairness: a committed enemy (winding up / striking), a staggered or broken one never
   // defends; one enemy rests 2.5 s after a parry/sidestep and no two happen within half a
   // second of each other; after 3 blows in a row with no defence the odds climb, so it
-  // reads as luck without long droughts or unfair streaks. Specials cut through all of it.
+  // reads as luck without long droughts or unfair streaks. The hook and the Ougi cut through all of it.
   private rollEnemyDefense(e: EnemyInstance, nx: number, nz: number): 'none' | 'block' | 'parry' | 'dodge' {
     if (this.spHit || e.dead) return 'none';
     const boss = e.type === 'boss';
@@ -4441,13 +4580,9 @@ export class GameEngine {
     if (this.heritageT > 0) {
       this.heritageT -= dt;
       if (this.heritageT <= 0) {
-        const i = this.loadoutPool()[0];
-        const w = this.weapons[i];
-        if (w && SPECIALS[w.id]) {
-          this.player.special[i] = this.metaBonus.startSpecial;
-          this.callbacks.onSpecialsUpdate({ ...this.player.special });
-          this.callbacks.onWaveChange(this.wave, 'Herança', `${w.name}: especial por ${this.metaBonus.startSpecial}s`);
-        }
+        const secs = 8 + this.metaBonus.startSpecial;
+        this.grantOugi(secs);
+        this.callbacks.onWaveChange(this.wave, 'Herança', `Ougi ${this.ougiCharge?.def.name ?? ''} por ${secs}s`);
       }
     }
     if (this.picksPending > 0 && !this.cardOffer && !this.cine && this.deadT < 0 && this.player.hp > 0) {
@@ -4476,22 +4611,9 @@ export class GameEngine {
     return false;
   }
 
-  // Only loaded weapons get specials (a charge on an unbound weapon would be unusable).
-  // Prefers a weapon with no special running or scroll already waiting, then the one
-  // given the fewest scrolls this run, so both buttons get specials evenly.
-  private pickScrollWeapon(): number {
-    const pool = this.loadoutPool();
-    const pending = new Set(this.scrolls.map((s) => s.w));
-    const score = (i: number) =>
-      (this.player.special[i] > 0 || pending.has(i) ? 1000 : 0) + (this.scrollsGiven[i] || 0);
-    const best = Math.min(...pool.map(score));
-    const cands = pool.filter((i) => score(i) === best);
-    return cands[Math.floor(Math.random() * cands.length)];
-  }
-
-  // Weapon glyph badge floating over a scroll so the player knows which special it grants
-  private getGlyphTexture(w: WeaponDef): THREE.CanvasTexture {
-    let tex = this.glyphTex.get(w.id);
+  // The kanji badge floating over a scroll
+  private getGlyphTexture(glyph: string): THREE.CanvasTexture {
+    let tex = this.glyphTex.get(glyph);
     if (tex) return tex;
     const canvas = document.createElement('canvas');
     canvas.width = 128;
@@ -4509,17 +4631,15 @@ export class GameEngine {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = '#ffd166';
-      ctx.fillText(w.glyph, 64, 68);
+      ctx.fillText(glyph, 64, 68);
     }
     tex = new THREE.CanvasTexture(canvas);
     tex.colorSpace = THREE.SRGBColorSpace;
-    this.glyphTex.set(w.id, tex);
+    this.glyphTex.set(glyph, tex);
     return tex;
   }
 
   private dropScroll(x: number, z: number) {
-    const wIdx = this.pickScrollWeapon();
-    this.scrollsGiven[wIdx] = (this.scrollsGiven[wIdx] || 0) + 1;
     const g = new THREE.Group();
     g.add(
       new THREE.Mesh(
@@ -4533,7 +4653,7 @@ export class GameEngine {
     );
     const glyph = new THREE.Sprite(
       new THREE.SpriteMaterial({
-        map: this.getGlyphTexture(this.weapons[wIdx]),
+        map: this.getGlyphTexture('奥'),
         transparent: true,
         depthWrite: false,
         fog: false,
@@ -4545,7 +4665,7 @@ export class GameEngine {
     g.position.set(x, 0.9, z);
     ring.position.set(x, 0.06, z);
     this.scene.add(g, ring, glyph);
-    this.scrolls.push({ g, ring, glyph, x, z, t: 0, w: wIdx });
+    this.scrolls.push({ g, ring, glyph, x, z, t: 0 });
   }
 
   private removeScroll(i: number) {
@@ -4739,7 +4859,7 @@ export class GameEngine {
   }
 
   private addEnemyPosture(e: EnemyInstance, v: number) {
-    if (e.dead || e.brokenT > 0) return;
+    if (e.dead || e.brokenT > 0 || this.cine?.ougi?.e === e) return;
     e.posture += v;
     e.postureT = 0;
     if (e.posture >= e.maxPosture) this.breakPosture(e);
@@ -5153,6 +5273,10 @@ export class GameEngine {
   // normal camera by `cineW`, so it leaves and returns without a cut.
   private applyCineCamera(dt: number, look: THREE.Vector3) {
     const c = this.cine;
+    if (c?.ougi) {
+      this.applyOugiCamera(dt, look);
+      return;
+    }
     if (!c || !this.settings.cinematicCamera) {
       this.cineW = 0;
       return;
@@ -5199,6 +5323,10 @@ export class GameEngine {
   private updateCinematic(dt: number) {
     const c = this.cine;
     if (!c) return;
+    if (c.ougi) {
+      this.stepOugi(dt, c.ougi);
+      return;
+    }
     c.t += dt;
     const e = c.e;
     const cinema = this.settings.cinematicCamera;
@@ -5409,7 +5537,7 @@ export class GameEngine {
       // mocap rig: a committed move owns the feet (its root motion is all the movement)
       const committed = !!this.player.rig.clip && (this.player.hp <= 0 || (!!this.act && this.act.kind !== 'draw'));
       const penalty =
-        this.cine || committed ? 0 : this.player.staggerT > 0 ? 0.25 : this.player.healT > 0 ? 0.35 : this.input.guardHeld ? 0.45 : this.player.anim ? 0.6 : this.player.tornado > 0 ? 0.55 : 1;
+        this.cine || committed ? 0 : this.player.staggerT > 0 ? 0.25 : this.player.healT > 0 ? 0.35 : this.input.guardHeld ? 0.45 : this.player.anim ? 0.6 : 1;
       const maxSp = TUNE.moveMaxSpeed * penalty;
       const dvx = amt > 0.05 ? (mx / amt) * maxSp * amt : 0;
       const dvz = amt > 0.05 ? (mz / amt) * maxSp * amt : 0;
@@ -5469,21 +5597,23 @@ export class GameEngine {
       if (this.player.hitComboT <= 0) this.endCombo('done');
     }
 
-    // Special items timers
-    let specialsChanged = false;
-    for (const k in this.player.special) {
-      const idx = +k;
-      const prevShown = Math.ceil(this.player.special[idx]);
-      this.player.special[idx] -= dt;
-      if (this.player.special[idx] <= 0) {
-        delete this.player.special[idx];
-        specialsChanged = true;
-      } else if (Math.ceil(this.player.special[idx]) !== prevShown) {
-        specialsChanged = true;
+    // The Ougi scroll's time (it waits, untouched, while a sequence plays) and whether a foe stands in front
+    const oc = this.ougiCharge;
+    if (oc && !this.cine) {
+      oc.t -= dt;
+      if (oc.t <= 0) {
+        this.ougiCharge = null;
+        this.ougiAim = false;
+        this.callbacks.onOugiState?.(null);
+        this.callbacks.onOugiAim?.(false);
+      } else if ((this.ougiPollT -= dt) <= 0) {
+        this.ougiPollT = 0.2;
+        const ready = !!this.pickOugiTarget();
+        if (ready !== this.ougiAim) {
+          this.ougiAim = ready;
+          this.callbacks.onOugiAim?.(ready);
+        }
       }
-    }
-    if (specialsChanged) {
-      this.callbacks.onSpecialsUpdate({ ...this.player.special });
     }
 
     // posture: recovers after a short pause, faster while guarding; stagger ticks down
@@ -5532,50 +5662,6 @@ export class GameEngine {
       this.staminaSent = this.player.st;
       this.staminaSentAt = performance.now();
       this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
-    }
-
-    // Bō special: spinning AoE tick for its duration, then releases the attack button
-    if (this.player.tornado > 0) {
-      this.player.torTick += dt;
-      if (this.player.torTick >= 0.2) {
-        this.player.torTick -= 0.2;
-        this.meleeHit(3.4, TAU, 16, 5, false);
-      }
-      this.player.tornado -= dt;
-      if (this.player.tornado <= 0) {
-        this.player.tornado = 0;
-        this.player.torTick = 0;
-      }
-    }
-
-    // Karatê special: timed flurry on the nearest target, then releases the attack button
-    if (this.player.rush) {
-      const r = this.player.rush;
-      r.t += dt;
-      if (!r.kicked && r.hits < 3 && r.t >= (r.hits + 1) * 0.16) {
-        r.hits++;
-        const tg = this.findTarget(3);
-        if (tg) {
-          const dx = tg.pos.x - this.player.pos.x;
-          const dz = tg.pos.z - this.player.pos.z;
-          const d = Math.hypot(dx, dz) || 0.001;
-          this.hitEnemy(tg, 24, dx / d, dz / d, 2, false);
-          this.player.anim = { kind: r.hits % 2 ? 'punchR' : 'punchL', t: 0, dur: 0.14, side: 0 };
-        }
-      } else if (!r.kicked && r.hits >= 3 && r.t >= 0.58) {
-        r.kicked = true;
-        const tg = this.findTarget(3.2);
-        if (tg) {
-          const dx = tg.pos.x - this.player.pos.x;
-          const dz = tg.pos.z - this.player.pos.z;
-          const d = Math.hypot(dx, dz) || 0.001;
-          this.hitEnemy(tg, 60, dx / d, dz / d, 10, true);
-          this.player.anim = { kind: 'roundKick', t: 0, dur: 0.3, side: 0 };
-        }
-      }
-      if (r.t >= 1.0) {
-        this.player.rush = null;
-      }
     }
 
     if (this.attackQueueT > 0) this.attackQueueT -= dt;
@@ -5691,7 +5777,7 @@ export class GameEngine {
     lookTarget.x += this.fightLead.x;
     lookTarget.z += this.fightLead.z;
     this.fovKick *= Math.exp(-5 * dt);
-    // special-move punch-in: a quick push toward the fighter that eases back out
+    // parry punch-in: a quick push toward the fighter that eases back out
     let punch = 0;
     if (this.punchT < this.punchDur) {
       this.punchT += dt;
@@ -5906,6 +5992,8 @@ export class GameEngine {
         }
         continue;
       }
+      // an Ougi stops time for everyone but its target
+      if (this.cine?.ougi && this.cine.e !== e) continue;
 
       const dx = this.player.pos.x - e.pos.x;
       const dz = this.player.pos.z - e.pos.z;
@@ -7128,10 +7216,9 @@ export class GameEngine {
       s.glyph.visible = s.t < 11 || Math.floor(s.t * 6) % 2 === 0;
       const got = Math.hypot(s.x - this.player.pos.x, s.z - this.player.pos.z) < 1.4;
       if (got) {
-        this.player.special[s.w] = this.specialDuration();
-        this.callbacks.onSpecialsUpdate({ ...this.player.special });
-        const w = this.weapons[s.w];
-        this.callbacks.onWaveChange(this.wave, SPECIALS[w.id]?.name ?? 'Especial', `${w.name}: especial por ${this.specialDuration()}s`);
+        const secs = this.specialDuration();
+        this.grantOugi(secs);
+        this.callbacks.onWaveChange(this.wave, 'Pergaminho de Ougi', `${this.ougiCharge?.def.name ?? ''}: toque em 奥義 diante do inimigo (${secs}s)`);
         sfx.special();
       }
       if (got || s.t > 15) {
@@ -7435,7 +7522,7 @@ export class GameEngine {
     const eff = this.act?.move?.eff;
     const limb = !!clip && !!eff && eff !== 'sword';
     const spec = w && (limb ? LIMB_TRAIL : TRAIL_SPEC[w.id]);
-    if (spec && (this.player.anim || this.player.tornado > 0)) {
+    if (spec && this.player.anim) {
       let ok = true;
       if (limb) {
         this.player.rig.root.updateMatrixWorld(true);
@@ -7457,7 +7544,7 @@ export class GameEngine {
       this.trailPrevTip.copy(this.trailB);
       this.trailPrevOk = ok;
       if (show) {
-        this.trail.setTint(this.player.special[this.activeWeaponIdx] > 0 ? TRAIL_SPECIAL : spec.tint);
+        this.trail.setTint(this.cine?.ougi ? TRAIL_SPECIAL : spec.tint);
         // a heavy blow (third cut, thrust, overhead) leaves its crescent hanging a little longer
         const heavy = !!this.act && (!!this.act.move?.heavy || this.act.windows.some((w) => w.heavy));
         this.trail.push(this.trailA, this.trailB, this.time, heavy ? 0.26 : 0.17);

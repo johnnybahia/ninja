@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { GameEngine } from './game/engine';
 import { CharacterId, WeaponDef } from './game/types';
-import { WEAPONS_KAGE, WEAPON_INFO, KARATE, SPECIALS } from './game/constants';
+import { WEAPONS_KAGE, WEAPON_INFO, KARATE } from './game/constants';
+import { OUGI_DEFS } from './game/ougi';
 import { ICON_URLS } from './game/icons';
 import { initAudio } from './game/audio';
 import type { Quality, QualitySetting } from './game/postfx';
@@ -90,11 +91,14 @@ export default function App() {
   const [banner, setBanner] = useState<{ main: string; sub: string } | null>(null);
   const [activeWeaponIdx, setActiveWeaponIdx] = useState(0);
   const [activeWeapon, setActiveWeapon] = useState<WeaponDef | null>(null);
-  const [specials, setSpecials] = useState<Record<number, number>>({});
+  // the Ougi scroll (its sequence and time), whether a foe stands in front to use it on, and the title card
+  const [ougi, setOugi] = useState<{ id: number; name: string; glyph: string; secs: number } | null>(null);
+  const [ougiAim, setOugiAim] = useState(false);
+  const [ougiTitle, setOugiTitle] = useState<{ name: string; glyph: string; sub: string } | null>(null);
   const [posture, setPosture] = useState(0);
   const [heals, setHeals] = useState(3);
   const [dbReady, setDbReady] = useState(false);
-  const [cinematic, setCinematic] = useState<false | 'full' | 'short' | 'duel'>(false);
+  const [cinematic, setCinematic] = useState<false | 'full' | 'short' | 'duel' | 'ougi'>(false);
   // progression: permanent Honra upgrades, the run's Honra, level-up cards, boss bar
   const [meta, setMeta] = useState<MetaSave>(() => ensureDaily(loadMeta(), localDate()));
   const metaRef = useRef(meta);
@@ -399,7 +403,9 @@ export default function App() {
         setActiveWeaponIdx(idx);
         setActiveWeapon(w);
       },
-      onSpecialsUpdate: (sp) => setSpecials(sp),
+      onOugiState: (o) => setOugi(o),
+      onOugiAim: (a) => setOugiAim(a),
+      onOugiTitle: (t) => setOugiTitle(t),
       onPostureChange: (p, max) => setPosture(max > 0 ? p / max : 0),
       onHealsChange: (n) => setHeals(n),
       onDeathblowReady: (r) => setDbReady(r),
@@ -686,6 +692,7 @@ export default function App() {
       }
       if (e.code === 'KeyF' && !e.repeat) engineRef.current.guardDown();
       if (e.code === 'KeyR' && !e.repeat) engineRef.current.heal();
+      if (e.code === 'KeyX' && !e.repeat) engineRef.current.ougi();
       if (e.code === 'KeyC') engineRef.current.recenterCamera();
     };
 
@@ -858,7 +865,7 @@ export default function App() {
 
           {/* Bottom Right Controls: arc of action buttons around the primary attack */}
           <div
-            className="absolute right-[calc(var(--sar)+14px)] bottom-[calc(var(--sab)+14px)] flex flex-col items-end gap-2 pointer-events-none"
+            className={`absolute right-[calc(var(--sar)+14px)] bottom-[calc(var(--sab)+14px)] flex flex-col items-end gap-2 pointer-events-none transition-opacity duration-200 ${cinematic === 'ougi' ? 'opacity-0' : ''}`}
             style={{ transform: 'scale(var(--hud-s))', transformOrigin: 'bottom right' }}
           >
             <div className="font-serif text-xs font-extrabold tracking-wide text-[var(--ember)] pr-1 [text-shadow:0_1px_5px_rgba(0,0,0,0.9)]">
@@ -869,7 +876,6 @@ export default function App() {
               {slots.map((weaponIdx, s) => {
                 const w = weaponList[weaponIdx];
                 const isActive = activeWeaponIdx === weaponIdx;
-                const hasSpecial = specials[weaponIdx] > 0;
                 const deathblow = s === 0 && dbReady;
                 const nudge = followUp !== null && weaponIdx !== followUp && !deathblow;
                 // Big primary in the corner, secondary right above it
@@ -890,7 +896,7 @@ export default function App() {
                         : isActive
                         ? 'kg-btn-ember'
                         : ''
-                    } ${hasSpecial && !deathblow ? 'ring-2 ring-[#ffd166] animate-pulse' : ''} ${nudge ? 'kg-nudge' : ''}`}
+                    } ${nudge ? 'kg-nudge' : ''}`}
                     aria-label={deathblow ? 'Golpe final' : `Atacar com ${w?.name}`}
                     title={w?.name}
                   >
@@ -904,11 +910,6 @@ export default function App() {
                       />
                     ) : (
                       <Swords className="w-8 h-8 text-[var(--ember)] pointer-events-none" />
-                    )}
-                    {hasSpecial && !deathblow && (
-                      <span className="absolute -top-1 -right-1 min-w-4 text-[10px] bg-[#ffd166] text-[#16121f] font-bold rounded-full px-1">
-                        {Math.ceil(specials[weaponIdx])}
-                      </span>
                     )}
                   </button>
                 );
@@ -975,14 +976,51 @@ export default function App() {
                   {heals}
                 </span>
               </button>
+
+              {/* Ougi: a button of its own, there while the scroll lasts (the ring is the time left; it glows when a
+                  foe stands in front, and with none it only says so and keeps the charge) */}
+              {ougi && (
+                <>
+                  <span className="absolute right-[96px] bottom-[206px] w-24 text-center font-serif text-[10px] font-extrabold leading-tight text-[var(--ember)] [text-shadow:0_1px_5px_#000] pointer-events-none">{ougi.name}</span>
+                  <button
+                    key={ougi.id}
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                      engineRef.current?.ougi();
+                    }}
+                    className={`absolute right-[112px] bottom-[138px] w-16 h-16 kg-btn kg-ougi flex items-center justify-center pointer-events-auto active:scale-95 transition-transform duration-75 ${ougiAim ? 'kg-ougi-ready' : 'opacity-70'}`}
+                    aria-label={`Ougi: ${ougi.name}`}
+                    title={ougi.name}
+                  >
+                    <svg viewBox="0 0 64 64" className="absolute inset-0 h-full w-full -rotate-90 pointer-events-none" aria-hidden="true">
+                      <circle cx="32" cy="32" r="29.5" fill="none" stroke="rgba(10,8,14,0.6)" strokeWidth="3" />
+                      <circle cx="32" cy="32" r="29.5" fill="none" stroke="#ffd166" strokeWidth="3" strokeLinecap="round" pathLength={100} strokeDasharray="100" className="kg-ougi-ring" style={{ animationDuration: `${ougi.secs}s` }} />
+                    </svg>
+                    <span className="font-serif text-lg font-black leading-none text-[#fff0c8] [text-shadow:0_0_8px_rgba(255,200,60,0.9)] pointer-events-none">奥義</span>
+                  </button>
+                </>
+              )}
             </div>
           </div>
       </div>
 
       {/* Deathblow cinematic: letterbox bars and a brushed 忍殺 */}
-      <div className={`fixed inset-0 z-20 pointer-events-none transition-opacity duration-150 ${cinematic === 'full' || cinematic === 'duel' ? 'opacity-100' : 'opacity-0'}`}>
-        <div className={`absolute left-0 right-0 top-0 bg-black transition-all duration-200 ${cinematic === 'full' ? 'h-[11vh]' : cinematic === 'duel' ? 'h-[6vh]' : 'h-0'}`} />
-        <div className={`absolute left-0 right-0 bottom-0 bg-black transition-all duration-200 ${cinematic === 'full' ? 'h-[11vh]' : cinematic === 'duel' ? 'h-[6vh]' : 'h-0'}`} />
+      <div className={`fixed inset-0 z-20 pointer-events-none transition-opacity duration-150 ${cinematic === 'full' || cinematic === 'duel' || cinematic === 'ougi' ? 'opacity-100' : 'opacity-0'}`}>
+        <div className={`absolute left-0 right-0 top-0 bg-black transition-all duration-200 ${cinematic === 'full' || cinematic === 'ougi' ? 'h-[11vh]' : cinematic === 'duel' ? 'h-[6vh]' : 'h-0'}`} />
+        <div className={`absolute left-0 right-0 bottom-0 bg-black transition-all duration-200 ${cinematic === 'full' || cinematic === 'ougi' ? 'h-[11vh]' : cinematic === 'duel' ? 'h-[6vh]' : 'h-0'}`} />
+        {/* Ougi: the name of the sequence, slashed in just above the lower bar */}
+        {cinematic === 'ougi' && ougiTitle && (
+          <div key={ougiTitle.name} className="kg-ougi-title absolute left-0 right-0 bottom-[calc(11vh+16px)] px-[6vw]">
+            <div className="flex items-end gap-3">
+              <span className="font-serif text-[5.5rem] short:text-[3.2rem] font-black leading-[0.85] text-[var(--torii)] [text-shadow:0_0_2px_#2a0000,3px_4px_0_rgba(10,0,0,0.8),0_0_30px_rgba(200,50,60,0.6)]">{ougiTitle.glyph}</span>
+              <span className="pb-1">
+                <span className="block text-[11px] font-extrabold tracking-[0.4em] text-[var(--ember)] [text-shadow:0_1px_4px_#000]">奥義 · OUGI</span>
+                <span className="block font-serif text-[1.9rem] short:text-xl font-extrabold leading-tight text-[var(--paper)] [text-shadow:0_2px_8px_rgba(0,0,0,0.9)]">{ougiTitle.name}</span>
+                <span className="block max-w-[60vw] text-xs leading-snug text-[var(--paper)]/85 [text-shadow:0_1px_4px_#000]">{ougiTitle.sub}</span>
+              </span>
+            </div>
+          </div>
+        )}
         {cinematic === 'full' && (
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="deathblow-kanji font-serif font-black text-[#e8231a] select-none">忍殺</div>
@@ -1087,10 +1125,13 @@ export default function App() {
                       <b>危 Perigo:</b> rasteira = pule; estocada = apare no tempo certo ou esquive.
                     </li>
                     <li>
+                      <b>奥義 Ougi:</b> o pergaminho (cai de elites, do chefe e de vez em quando dos outros) acende um botão dourado por alguns segundos. Com um inimigo à frente, toque nele: uma sequência automática com as suas armas, em câmeras diferentes, que termina com a morte do alvo (o Oni perde até um quarto da vida).
+                    </li>
+                    <li>
                       <b>Cura:</b> 3 goles da cabaça por onda. <b>Bússola:</b> recentraliza a câmera.
                     </li>
                     <li className="pt-1.5 border-t border-[rgba(239,230,210,0.12)]">
-                      <b>No PC:</b> <span className="kg-key">WASD</span> move, mouse gira a câmera, clique esquerdo ataca, clique direito ou <span className="kg-key">F</span> defende, <span className="kg-key">Espaço</span> pula, <span className="kg-key">Shift</span> esquiva, <span className="kg-key">R</span> cura, <span className="kg-key">1</span>/<span className="kg-key">2</span> ou <span className="kg-key">Q</span>/<span className="kg-key">E</span> trocam a arma, <span className="kg-key">C</span> recentraliza.
+                      <b>No PC:</b> <span className="kg-key">WASD</span> move, mouse gira a câmera, clique esquerdo ataca, clique direito ou <span className="kg-key">F</span> defende, <span className="kg-key">Espaço</span> pula, <span className="kg-key">Shift</span> esquiva, <span className="kg-key">R</span> cura, <span className="kg-key">X</span> Ougi, <span className="kg-key">1</span>/<span className="kg-key">2</span> ou <span className="kg-key">Q</span>/<span className="kg-key">E</span> trocam a arma, <span className="kg-key">C</span> recentraliza.
                     </li>
                   </ul>
                 )}
@@ -1205,11 +1246,14 @@ export default function App() {
                     </span>
                   </div>
                   <p className="text-[11px] text-[var(--paper)]/80 leading-snug">{WEAPON_INFO[w.id]?.desc}</p>
-                  {SPECIALS[w.id] && (
-                    <p className="text-[11px] text-[#ffd166] mt-1">
-                      Especial: <b>{SPECIALS[w.id].name}</b>
-                    </p>
-                  )}
+                  {(() => {
+                    const names = OUGI_DEFS.filter((d) => d.weapons.includes(w.id)).map((d) => d.name);
+                    return names.length ? (
+                      <p className="text-[11px] text-[#ffd166] mt-1">
+                        Aparece no Ougi: <b>{names.join(', ')}</b>
+                      </p>
+                    ) : null;
+                  })()}
                   <div className="flex gap-4 text-[10px] text-[var(--paper)]/60 mt-2">
                     <span>
                       Dano <b className="text-[var(--paper)]">{dmgText(w)}</b>

@@ -28,11 +28,6 @@ export interface WeaponDef {
   pointMult?: number;
 }
 
-export interface SpecialDef {
-  name: string;
-  cd: number;
-}
-
 export interface KarateMove {
   name: string;
   range: number;

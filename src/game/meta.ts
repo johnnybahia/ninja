@@ -33,7 +33,7 @@ export const UPGRADES: UpgradeDef[] = [
   { id: 'folego', name: 'Fôlego', glyph: '息', desc: '+5 de stamina máxima', max: 4, base: 40, growth: 1.5 },
   { id: 'lamina', name: 'Lâmina Afiada', glyph: '刃', desc: '+2% de dano', max: 5, base: 60, growth: 1.5 },
   { id: 'guarda', name: 'Guarda Firme', glyph: '守', desc: 'A postura se recupera 15% mais rápido', max: 3, base: 80, growth: 1.5 },
-  { id: 'heranca', name: 'Herança', glyph: '巻', desc: 'Começa com o especial da arma principal (+6 s por nível)', max: 3, base: 100, growth: 1.7 },
+  { id: 'heranca', name: 'Herança', glyph: '巻', desc: 'Começa com um Ougi pronto: 14 s de botão, +6 s por nível', max: 3, base: 100, growth: 1.7 },
   { id: 'cabaca', name: 'Cabaça Grande', glyph: '瓢', desc: '+1 gole de cura por onda', max: 2, base: 120, growth: 2 }
 ];
 
@@ -51,7 +51,7 @@ export interface MetaBonus {
   st: number;
   dmg: number; // fraction, 0.1 = +10%
   heals: number;
-  startSpecial: number; // seconds of the primary weapon's special at the start of the run
+  startSpecial: number; // extra seconds of the Ougi the run starts with (8 s + this)
   postureRecov: number; // fraction
 }
 

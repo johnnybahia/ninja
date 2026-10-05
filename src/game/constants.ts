@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { WeaponDef, SpecialDef, KarateMove } from './types';
+import { WeaponDef, KarateMove } from './types';
 
 export const TAU = Math.PI * 2;
 export const R_ARENA = 40;
@@ -33,18 +33,6 @@ export const WEAPON_INFO: Record<string, { tag: string; desc: string }> = {
   kunai: { tag: 'Distância', desc: 'Lâmina rápida e forte que atravessa vários inimigos em linha.' },
   bomb: { tag: 'Explosivo · Área', desc: 'Explosão com dano alto em área. Consome vigor.' },
   karate: { tag: 'Corpo a corpo', desc: 'Sequência de socos e chutes com avanço; fecha com um chute pesado.' }
-};
-
-// Special damage is tuned to roughly 2x the weapon's own normal DPS (about 1.5x when a
-// single-target weapon's special becomes an area attack), so every pick is worth a scroll.
-export const SPECIALS: Record<string, SpecialDef> = {
-  katana: { name: 'Corte do Vento', cd: 0.5 },
-  bo: { name: 'Tornado', cd: 1.8 },
-  kama: { name: 'Ceifa', cd: 0.7 },
-  shuriken: { name: 'Chuva de Estrelas', cd: 0.7 },
-  kunai: { name: 'Relâmpago', cd: 0.8 },
-  bomb: { name: 'Chuva de Fogo', cd: 1.4 },
-  karate: { name: 'Punho do Dragão', cd: 1.0 }
 };
 
 export const KARATE: KarateMove[] = [
