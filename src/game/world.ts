@@ -493,6 +493,7 @@ interface Petal {
   rot: THREE.Euler;
   spin: THREE.Vector3;
   ph: number;
+  k: THREE.Vector3; // velocity added by a gust, dies away on its own
 }
 
 interface Mote {
@@ -1322,7 +1323,8 @@ export class World {
         v: new THREE.Vector3(rand(0.4, 1.1), rand(-1.1, -0.55), rand(-0.3, 0.3)),
         rot: new THREE.Euler(rand(0, TAU), rand(0, TAU), rand(0, TAU)),
         spin: new THREE.Vector3(rand(-3, 3), rand(-3, 3), rand(-3, 3)),
-        ph: rand(0, TAU)
+        ph: rand(0, TAU),
+        k: new THREE.Vector3()
       });
     }
     this.root.add(m);
@@ -1535,6 +1537,39 @@ export class World {
     this.sun.shadow.mapSize.set(p.shadowMap, p.shadowMap);
   }
 
+  /**
+   * A burst of wind at (x, z), from a dash, a landing or a slam: the petals, leaves or flakes in the
+   * lower air within `radius` are thrown outward, up and around, and `lift` of the ones that lie on
+   * the ground are raised into the swirl. What they are depends on the season (the petal colour and
+   * size follow the theme), so the stones answer in leaves in autumn and in snow in winter.
+   */
+  gust(x: number, z: number, radius: number, power: number, lift = 0) {
+    const n = Math.min(this.petalData.length, this.petals.count);
+    if (n <= 0) return;
+    const r2 = radius * radius;
+    for (let i = 0; i < n; i++) {
+      const pt = this.petalData[i];
+      const dx = pt.p.x - x;
+      const dz = pt.p.z - z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 > r2 || pt.p.y > 7) continue;
+      const d = Math.sqrt(d2) || 1e-3;
+      const f = (1 - d / radius) * power;
+      pt.k.x += (dx / d) * f * 3 - (dz / d) * f * 1.6;
+      pt.k.z += (dz / d) * f * 3 + (dx / d) * f * 1.6;
+      pt.k.y += f * 2.4;
+      if (pt.k.lengthSq() > 144) pt.k.setLength(12);
+    }
+    for (let j = 0; j < lift; j++) {
+      const pt = this.petalData[Math.floor(Math.random() * n)];
+      const a = rand(0, TAU);
+      const rr = Math.sqrt(Math.random()) * radius;
+      pt.p.set(x + Math.cos(a) * rr, rand(0.05, 0.5), z + Math.sin(a) * rr);
+      const f = (1 - rr / radius) * power + 0.3;
+      pt.k.set(Math.cos(a) * f * 2.5 - Math.sin(a) * f * 1.5, 2.2 + f * 2.2, Math.sin(a) * f * 2.5 + Math.cos(a) * f * 1.5);
+    }
+  }
+
   // View-distance multiplier the game can pull down (a fog wave) and back; eased so the
   // world thickens and clears instead of popping
   fogScale = 1;
@@ -1634,6 +1669,10 @@ export class World {
       pt.p.x += (pt.v.x * fall.drift + Math.sin(pt.ph) * 0.35) * dt;
       pt.p.y += pt.v.y * fall.speed * dt;
       pt.p.z += (pt.v.z + Math.cos(pt.ph * 0.7) * 0.25) * dt;
+      if (pt.k.lengthSq() > 1e-4) {
+        pt.p.addScaledVector(pt.k, dt);
+        pt.k.multiplyScalar(Math.exp(-1.7 * dt));
+      }
       pt.rot.x += pt.spin.x * dt;
       pt.rot.y += pt.spin.y * dt;
       pt.rot.z += pt.spin.z * dt;
