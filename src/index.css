@@ -187,6 +187,116 @@ html, body, #root {
   }
 }
 
+/* Fighting-game lettering: the hit counter, its rank words and the shout-outs */
+@keyframes kgHitPop {
+  0% {
+    transform: scale(1.55) rotate(-5deg);
+  }
+  45% {
+    transform: scale(0.95) rotate(1deg);
+  }
+  100% {
+    transform: none;
+  }
+}
+
+@keyframes kgWordPop {
+  0% {
+    transform: translateX(-22px) scale(1.5);
+    opacity: 0;
+  }
+  38% {
+    transform: translateX(0) scale(0.96);
+    opacity: 1;
+  }
+  100% {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@keyframes kgWindow {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+@keyframes kgComboOut {
+  0%,
+  60% {
+    opacity: 1;
+    transform: none;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-14px);
+  }
+}
+
+@keyframes kgComboBroke {
+  0% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  12% {
+    transform: translateX(-7px);
+  }
+  24% {
+    transform: translateX(6px);
+  }
+  36% {
+    transform: translateX(-4px);
+  }
+  48% {
+    transform: translateX(0);
+  }
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+
+@keyframes kgShoutIn {
+  0% {
+    opacity: 0;
+    transform: scale(2.2);
+  }
+  13% {
+    opacity: 1;
+    transform: scale(0.94);
+  }
+  22% {
+    transform: scale(1.03);
+  }
+  30% {
+    transform: scale(1);
+  }
+  76% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-16px) scale(1);
+  }
+}
+
+@keyframes kgFadeOnly {
+  0%,
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
 @layer components {
   .kg-panel {
     position: relative;
@@ -387,9 +497,88 @@ html, body, #root {
     text-align: center;
     font-size: 0.92em;
   }
+
+  /* slanted lettering: a dark copy behind (the outline and glow), the gradient-filled text in front */
+  .kg-shout {
+    position: relative;
+    display: inline-block;
+    transform: skewX(-8deg);
+    white-space: nowrap;
+  }
+  .kg-shout-back {
+    position: absolute;
+    left: 0;
+    top: 0;
+    color: #0d0a14;
+    -webkit-text-stroke: 0.2em #0d0a14;
+    text-shadow: 0 0.07em 0 #0d0a14, 0 0 0.55em var(--sg, rgba(255, 200, 60, 0.6));
+  }
+  .kg-shout-front {
+    position: relative;
+    color: transparent;
+    background-image: linear-gradient(180deg, var(--s1, #fff4c2) 12%, var(--s2, #ffc83d) 88%);
+    -webkit-background-clip: text;
+    background-clip: text;
+  }
+  /* the kanji of a word, in a small stamped square */
+  .kg-seal {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.9em;
+    height: 1.9em;
+    padding: 0 0.3em;
+    font-family: var(--font-serif);
+    font-weight: 800;
+    font-size: 1.05rem;
+    line-height: 1;
+    color: var(--s1, var(--paper));
+    border: 2px solid var(--s2, var(--gold));
+    border-radius: 4px;
+    background: rgba(22, 18, 31, 0.82);
+    box-shadow: 0 0 10px var(--sg, rgba(255, 200, 60, 0.5)), inset 0 0 0 1px rgba(0, 0, 0, 0.5);
+    transform: rotate(-6deg);
+  }
+  .kg-hitpop {
+    transform-origin: 0% 80%;
+    animation: kgHitPop 0.18s cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  }
+  .kg-wordpop {
+    animation: kgWordPop 0.3s cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  }
+  /* time left on the streak: restarts with every hit, the duration comes inline */
+  .kg-combo-win {
+    width: 8.5rem;
+    height: 3px;
+    margin-top: 0.3rem;
+    transform-origin: left;
+    background: linear-gradient(90deg, var(--ember), rgba(255, 200, 60, 0.95));
+    box-shadow: 0 0 6px rgba(242, 166, 90, 0.7);
+    animation: kgWindow linear forwards;
+  }
+  .kg-combo-done {
+    animation: kgComboOut 1.7s ease-in forwards;
+  }
+  .kg-combo-broke {
+    animation: kgComboBroke 0.9s ease-in forwards;
+  }
+  .kg-shout-in {
+    animation: kgShoutIn 1.2s cubic-bezier(0.2, 0.9, 0.3, 1) forwards;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .kg-hitpop,
+  .kg-wordpop {
+    animation: none !important;
+  }
+  .kg-combo-win {
+    display: none;
+  }
+  .kg-combo-broke,
+  .kg-shout-in {
+    animation-name: kgFadeOnly !important;
+  }
   .kg-cta::after,
   .kg-low {
     animation: none !important;

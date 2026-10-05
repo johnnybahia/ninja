@@ -168,6 +168,12 @@ export const sfx = {
   special: () => {
     [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => tone(f, f, 0.22, 'triangle', 0.14), i * 70));
   },
+  // The streak reaches a new word: a bright pair of notes, higher for each rank
+  rank: (n = 1) => {
+    const f = 520 * Math.pow(1.122, Math.min(n, 6));
+    tone(f, f, 0.16, 'triangle', 0.1);
+    setTimeout(() => tone(f * 1.5, f * 1.5, 0.22, 'triangle', 0.1), 70);
+  },
   levelup: () => {
     [392, 494, 587, 784].forEach((f, i) => setTimeout(() => tone(f, f, 0.3, 'sine', 0.15), i * 90));
   },

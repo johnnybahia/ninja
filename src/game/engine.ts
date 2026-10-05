@@ -23,6 +23,7 @@ import {
   KARATE
 } from './constants';
 import { sfx } from './audio';
+import { COMBO_RANKS, COMBO_WINDOW, KILL_CHAINS, comboRank, type Callout, type CalloutTone, type ComboInfo } from './combo';
 import { World } from './world';
 import { ATMOSPHERES, AtmosMode, atmosphereForWave } from './atmosphere';
 import { THEMES, ThemeMode, themeForWave } from './theme';
@@ -287,7 +288,7 @@ export interface GameEngineCallbacks {
   onStaminaChange: (st: number, maxSt: number) => void;
   onXpChange: (xp: number, xpNext: number, level: number) => void;
   onScoreChange: (score: number) => void;
-  onComboChange: (combo: number) => void;
+  onComboChange: (combo: ComboInfo | null) => void;
   onWaveChange: (wave: number, text: string, sub: string) => void;
   onWeaponChange: (weaponIdx: number, weapon: WeaponDef) => void;
   onSpecialsUpdate: (specials: Record<number, number>) => void;
@@ -295,6 +296,8 @@ export interface GameEngineCallbacks {
   onQualityChange?: (setting: QualitySetting, effective: Quality) => void;
   onPostureChange?: (posture: number, max: number) => void;
   onCinematic?: (active: boolean, kind?: 'full' | 'short' | 'duel') => void;
+  // a big word on screen for the moments worth shouting about (a perfect parry, a kill chain)
+  onCallout?: (c: Callout) => void;
   onDeathblowReady?: (ready: boolean) => void;
   onHealsChange?: (heals: number) => void;
   onCardOffer?: (offer: CardOffer[] | null) => void;
@@ -405,6 +408,7 @@ export class GameEngine {
     killComboT: 0,
     hitCombo: 0,
     hitComboT: 0,
+    comboDmg: 0,
     bestCombo: 0,
     tookDamage: false,
     jumps: 0,
@@ -473,6 +477,12 @@ export class GameEngine {
   private spHit = false;
   private ptMult = 1;
   private lastHS = 0;
+  // hit counter (see combo.ts): bumped on every hit so the HUD pops the number, the rank last
+  // announced, and when each shout-out was last sent
+  private comboTick = 0;
+  private comboRankShown = 0;
+  private calloutId = 0;
+  private calloutAt = new Map<string, number>();
   private lastMove = new THREE.Vector3(0, 0, -1);
   private slowmoT = 0;
   private attackQueueT = 0;
@@ -997,6 +1007,8 @@ export class GameEngine {
     this.player.killComboT = 0;
     this.player.hitCombo = 0;
     this.player.hitComboT = 0;
+    this.player.comboDmg = 0;
+    this.comboRankShown = 0;
     this.player.bestCombo = 0;
     this.player.kills = 0;
     this.player.special = {};
@@ -1046,7 +1058,7 @@ export class GameEngine {
     this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
     this.callbacks.onXpChange(this.player.xp, this.player.xpNext, this.player.level);
     this.callbacks.onScoreChange(0);
-    this.callbacks.onComboChange(0);
+    this.callbacks.onComboChange(null);
     this.callbacks.onSpecialsUpdate({});
     this.setWeapon(this.loadout?.[0] ?? 0);
   }
@@ -3871,6 +3883,52 @@ export class GameEngine {
     this.player.atkCd += 0.2;
   }
 
+  /** One more hit on the streak: its clock renews and the damage adds up. */
+  private registerHit(dmg: number) {
+    const P = this.player;
+    if (P.hitComboT > 0) P.hitCombo++;
+    else {
+      P.hitCombo = 1;
+      P.comboDmg = 0;
+      this.comboRankShown = 0;
+    }
+    P.hitComboT = COMBO_WINDOW;
+    P.comboDmg += dmg;
+    P.bestCombo = Math.max(P.bestCombo, P.hitCombo);
+    this.comboTick++;
+  }
+
+  /** Sends the streak to the HUD: nothing under two hits; a finished one (3+) stays a moment as a result. */
+  private emitCombo(state: ComboInfo['state'] = 'live') {
+    const P = this.player;
+    const hits = P.hitCombo;
+    if (hits < (state === 'live' ? 2 : 3)) return void this.callbacks.onComboChange(null);
+    const rank = comboRank(hits);
+    const r = rank > 0 ? COMBO_RANKS[rank - 1] : null;
+    if (state === 'live') {
+      if (rank > this.comboRankShown) sfx.rank(rank);
+      this.comboRankShown = rank;
+    }
+    this.callbacks.onComboChange({ hits, damage: P.comboDmg, win: COMBO_WINDOW, rank, word: r?.word ?? '', glyph: r?.glyph ?? '', tick: this.comboTick, state });
+  }
+
+  /** The streak is over: the clock ran out ('done') or a blow got through ('broken'). */
+  private endCombo(state: 'done' | 'broken') {
+    const P = this.player;
+    if (P.hitCombo > 0) this.emitCombo(state);
+    P.hitCombo = 0;
+    P.hitComboT = 0;
+    P.comboDmg = 0;
+    this.comboRankShown = 0;
+  }
+
+  /** A big word on the HUD. The same word is not sent twice within a second (a crowd breaking at once). */
+  private callout(word: string, tone: CalloutTone, glyph?: string, sub?: string) {
+    if (this.time - (this.calloutAt.get(word) ?? -9) < 1) return;
+    this.calloutAt.set(word, this.time);
+    this.callbacks.onCallout?.({ id: ++this.calloutId, word, glyph, sub, tone });
+  }
+
   public hitEnemy(e: EnemyInstance, dmg: number, nx: number, nz: number, kb: number, heavy: boolean, hit?: HitInfo) {
     if (e.dead) return;
     // Samurai (and, rarely, the Oni) fight back: a blow that connects may be blocked,
@@ -3929,12 +3987,7 @@ export class GameEngine {
     }
 
     // Atualiza sequência de golpes (Hit Combo Streak)
-    if (this.player.hitComboT > 0) {
-      this.player.hitCombo++;
-    } else {
-      this.player.hitCombo = 1;
-    }
-    this.player.hitComboT = 1.6;
+    this.registerHit(dmg);
 
     const isCombo = this.player.combo >= 1 || this.player.hitCombo >= 2 || this.player.killCombo > 0;
     const isComboFinisher = this.player.combo === 2 || this.player.hitCombo % 3 === 0 || heavy;
@@ -3972,7 +4025,7 @@ export class GameEngine {
       sfx.hit();
     }
 
-    this.callbacks.onComboChange(Math.max(this.player.hitCombo, this.player.killCombo));
+    this.emitCombo();
 
     if (e.hp <= 0) this.killEnemy(e);
     else {
@@ -4009,8 +4062,9 @@ export class GameEngine {
 
     this.player.killCombo = this.player.killComboT > 0 ? this.player.killCombo + 1 : 1;
     this.player.killComboT = 2.2;
-    this.player.bestCombo = Math.max(this.player.bestCombo, Math.max(this.player.killCombo, this.player.hitCombo));
-    this.callbacks.onComboChange(Math.max(this.player.killCombo, this.player.hitCombo));
+    this.player.bestCombo = Math.max(this.player.bestCombo, this.player.killCombo, this.player.hitCombo);
+    const chain = KILL_CHAINS[this.player.killCombo];
+    if (chain) this.callout(chain.word, chain.tone, chain.glyph);
 
     this.addXp(pts);
 
@@ -4313,9 +4367,7 @@ export class GameEngine {
     this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.3, this.player.pos.z), IMPACT_HURT, 1.4, 0.18, 'hurt');
     this.player.dashInv = false;
     this.player.killCombo = 0;
-    this.player.hitCombo = 0;
-    this.player.hitComboT = 0;
-    this.callbacks.onComboChange(0);
+    this.endCombo('broken');
     this.player.tookDamage = true;
     this.player.kb.x += nx * 9;
     this.player.kb.z += nz * 9;
@@ -4482,7 +4534,7 @@ export class GameEngine {
     sfx.postureBreak();
     this.impacts.spawn(this.tmpV.set(e.pos.x, e.pos.y + 1.5 * this.sizeOf(e), e.pos.z), IMPACT_DEFLECT, 2.6, 0.3, 'parry', { x: Math.sin(this.player.yaw), z: Math.cos(this.player.yaw) });
     this.shake = Math.max(this.shake, 0.25);
-    this.spawnLabel(e.pos.x, e.pos.y + 3.1 * this.sizeOf(e), e.pos.z, 'POSTURA!', '#ff5a3a', 1.2);
+    this.callout('POSTURA QUEBRADA!', 'blood', '崩');
   }
 
   private cancelStrike(e: EnemyInstance) {
@@ -4637,7 +4689,8 @@ export class GameEngine {
     if (this.player.inv > 0) {
       if (this.player.dashInv) {
         const perfect = this.player.dash > 0;
-        this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, perfect ? 'PERFEITO!' : 'ESQUIVOU!', perfect ? '#ffd166' : '#8fe0c8', perfect ? 1.55 : 1.1);
+        if (perfect) this.callout('ESQUIVA PERFEITA!', 'jade', '見切');
+        else this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'ESQUIVOU!', '#8fe0c8', 1.1);
         this.triggerSlowmo(perfect ? 0.5 : 0.22, perfect ? 0.22 : 0.42);
         this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.2, this.player.pos.z), IMPACT_DODGE, perfect ? 2.4 : 1.6, 0.3, 'dodge');
         this.fovKick = perfect ? -5 : -2.5;
@@ -4681,7 +4734,7 @@ export class GameEngine {
       sfx.clang();
       const scene = this.startParryScene(e, meet, perfect, st.kind === 'thrust');
       if (perfect) {
-        this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'APARO PERFEITO!', '#ffd166', 1.45);
+        this.callout('APARO PERFEITO!', 'gold', '弾');
         if (!scene) this.triggerSlowmo(0.22, 0.38);
         this.player.st = Math.min(this.player.maxSt, this.player.st + 10);
         this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
@@ -4691,7 +4744,7 @@ export class GameEngine {
         }
         this.addEnemyPosture(e, 12);
       } else if (st.kind === 'thrust') {
-        this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'CONTRA-ATAQUE!', '#ffd166', 1.3);
+        this.callout('CONTRA-ATAQUE!', 'ember', '返');
         this.triggerSlowmo(0.35, 0.3);
       } else this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.4, this.player.pos.z, 'APAROU!', '#ffb347', 1);
       // a short push-in on the defences worth seeing: the wave's first, a thrust, the Oni, a captain
@@ -4944,6 +4997,9 @@ export class GameEngine {
         else this.triggerSlowmo(c.full ? 0.5 : 0.25, c.full ? 0.28 : 0.45);
       }
       sfx.deathblow();
+      // the finishing blow is the last hit of the streak
+      this.registerHit(Math.round(e.type === 'boss' && (e.dbCount || 0) === 0 && e.hp > e.maxHp * 0.5 ? e.maxHp * 0.5 : Math.max(0, e.hp)));
+      this.emitCombo();
       this.finishers++;
       this.waveStat.finishers++;
       this.addHonor('finish', HONOR.finisher);
@@ -5184,12 +5240,7 @@ export class GameEngine {
     this.player.killComboT -= dt;
     if (this.player.hitComboT > 0) {
       this.player.hitComboT -= dt;
-      if (this.player.hitComboT <= 0) {
-        this.player.hitCombo = 0;
-        if (this.player.killComboT <= 0) {
-          this.callbacks.onComboChange(0);
-        }
-      }
+      if (this.player.hitComboT <= 0) this.endCombo('done');
     }
 
     // Special items timers
