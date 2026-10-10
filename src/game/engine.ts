@@ -33,7 +33,7 @@ import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
 import { createClipRig, Grip, OneShot, PlayOptions } from './clipRig';
 import { loadCharacter, loadWeapons, loadLazyWeapons, weaponsReady, preloadModels, characterIfReady, CharacterTemplate, LAZY_CHARACTERS, type CharacterModel } from './models';
-import { COMBOS, ENEMY_STRIKES, BOSS_STRIKES, FINISHERS, FINISHER_CLIP_LEN, HOOK, Finisher, ClipMove } from './moves';
+import { COMBOS, ENEMY_STRIKES, BOSS_STRIKES, STRIKE_FIT, FINISHERS, FINISHER_CLIP_LEN, HOOK, Finisher, ClipMove } from './moves';
 import { BladeSeg, makeSeg, segSegDist, sweepVsCapsule, BLADE_SEG, MAGNET_REACH, HURT_BOTTOM, HURT_TOP } from './combat';
 import { DebugDraw } from './debugdraw';
 import { animateCharacter, animateDeath } from './animation';
@@ -227,7 +227,27 @@ const TELL_LEAD = 0.17; // the blow's flash comes this long before it lands: pre
 const PARRY_SCENE_GAP = [0, 14, 7, 3.5]; // seconds between two defence scenes, by TUNE.parryScene
 const CUT_MIN_SPEED = 3.5; // m/s: the tip must be moving at least this fast to cut a shot out of the air
 const DEFEND_REACH = 1.5; // a guard (held, or pressed in time) meets an arrow this far from the body, at the weapon
-const BUFFER_WINDOW = 0.35; // a dash/jump/guard pressed during a committed swing waits this long for its cancel point
+const BUFFER_WINDOW = 0.35; // a dash/jump pressed during a committed swing waits this long for its cancel point
+const GUARD_BUFFER = 0.6; // ... and a guard waits longer (the long moves release late); a tap already let go still counts
+// A foe's blade goes live this long before its clip's hit frame (see updateEnemies) and it stops stepping in just before
+const BLADE_LEAD = 0.06;
+const STRIKE_COMMIT = BLADE_LEAD + 0.02;
+const STRIKE_STEP_SPEED = 7; // m/s: how fast a foe steps in to the distance its clip really cuts at (STRIKE_FIT)
+// Arkham-style counter: a blow that can be answered lights a mark above its wielder this long before it lands, and a
+// press of the guard while a mark is up answers it - from any side, whatever the Rōnin was in the middle of
+const ALERT_LEAD = 0.6; // seconds before the blade lands that the mark appears
+const COUNTER_LATE = 0.1; // ... and a press still answers a blade that has not touched yet this long after
+const COUNTER_PERFECT = 0.2; // a press this close to the blow is a perfect counter
+const COUNTER_RANGE = 7; // farther away than this a blow shows no mark
+const COUNTER_INTENT = 0.25; // a press made this long before a mark appears is remembered and fires when it does
+const COUNTER_DMG = 20;
+const COUNTER_POSTURE = 36; // posture taken from a foe by a counter (the Oni: two thirds of it)
+// Free-flow: the attack button glides to a foe picked with the stick, up to this far (edge to edge)
+const FLOW_RANGE = 7;
+const FLOW_SPEED = 16; // m/s of the glide
+const FLOW_GLIDE_MIN = 1.0; // a foe closer than this (edge to reach) is simply stepped to, no glide
+const FLOW_MAX_WINDUP = 0.4; // the wind-up is stretched to at most this long while crossing the gap
+const TAKEDOWN_EVERY = 8; // hits of a streak that earn a finisher
 const SHOT_BACK_SPEED = 26;
 const CLASH_POSE_TIME = 0.2; // how long the weapon is held where the blades met
 const GHOST_DASH = new THREE.Color(0x2a2464);
@@ -289,6 +309,39 @@ function markTextures() {
   return { dangerTex: dangerTex!, deathblowTex: deathblowTex! };
 }
 
+// The counter mark: a white bolt on a blue glow, over the head of whoever is about to strike
+let alertTex: THREE.CanvasTexture | null = null;
+function alertTexture() {
+  if (!alertTex) {
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const g = c.getContext('2d')!;
+    const gr = g.createRadialGradient(64, 64, 8, 64, 64, 62);
+    gr.addColorStop(0, 'rgba(110,190,255,0.7)');
+    gr.addColorStop(1, 'rgba(110,190,255,0)');
+    g.fillStyle = gr;
+    g.fillRect(0, 0, 128, 128);
+    g.beginPath();
+    g.moveTo(76, 8);
+    g.lineTo(34, 70);
+    g.lineTo(60, 70);
+    g.lineTo(48, 120);
+    g.lineTo(96, 52);
+    g.lineTo(68, 52);
+    g.lineTo(90, 8);
+    g.closePath();
+    g.lineJoin = 'round';
+    g.lineWidth = 9;
+    g.strokeStyle = 'rgba(6,22,64,0.95)';
+    g.stroke();
+    g.fillStyle = '#eaf7ff';
+    g.fill();
+    alertTex = new THREE.CanvasTexture(c);
+    alertTex.colorSpace = THREE.SRGBColorSpace;
+  }
+  return alertTex;
+}
+
 export interface GameEngineCallbacks {
   onHpChange: (hp: number, maxHp: number) => void;
   onStaminaChange: (st: number, maxSt: number) => void;
@@ -318,6 +371,8 @@ export interface GameEngineCallbacks {
   onWaveMod?: (mod: { id: string; name: string; glyph: string; desc: string } | null) => void;
   // shots being drawn or in flight toward the player from outside the view: angle from the camera's forward (rad, + = right)
   onThreats?: (threats: { a: number; u: number }[]) => void;
+  // a blow that can be countered is about to land (the guard button lights up while this is true)
+  onCounterReady?: (ready: boolean) => void;
 }
 
 // The Kusarigama hook in progress (see stepHook): which foe, who gets dragged, the clock and the
@@ -375,7 +430,8 @@ interface PlayerAct {
   // can connect, plus the attack-magnetism target the swing closes on
   windows: HitWindow[];
   target?: EnemyInstance;
-  magnet?: { reach: number; until: number; k: number };
+  magnet?: { reach: number; until: number; k: number; max: number };
+  restoreSpeed?: number; // a glide stretched the wind-up: the clip goes back to this speed at the hit frame
 }
 
 interface HitWindow {
@@ -738,6 +794,17 @@ export class GameEngine {
   private bladeRadius = 0.06;
   private hitPt = new THREE.Vector3();
   private comboTarget: EnemyInstance | null = null;
+  // Arkham-style combat: when the guard was last pressed (kept for a moment even if no mark was up yet), whether a
+  // counter mark is up, the glide that carries the Rōnin to a foe, the stick's direction, the foe a counter wants the
+  // riposte aimed at, and the finisher a streak of 8 earns
+  private guardIntentT = -99;
+  private counterReady = false;
+  private glide: { x0: number; z0: number; x1: number; z1: number; t: number; dur: number } | null = null;
+  private intent = new THREE.Vector2(0, 1);
+  private intentAmt = 0;
+  private forceTarget: EnemyInstance | null = null;
+  private takedownReady = false;
+  private fitWarned = new Set<string>();
   private dbg!: DebugDraw;
   private dbgHits: { p: THREE.Vector3; t: number }[] = [];
   private enemyBlades: BladeSeg[] = [];
@@ -1008,6 +1075,16 @@ export class GameEngine {
   public reset() {
     this.enemies.forEach((e) => this.removeEnemy(e));
     this.enemies = [];
+    // (no foe is left to counter, nothing is pending)
+    this.glide = null;
+    this.guardIntentT = -99;
+    this.forceTarget = null;
+    this.takedownReady = false;
+    this.buffered = null;
+    if (this.counterReady) {
+      this.counterReady = false;
+      this.callbacks.onCounterReady?.(false);
+    }
     while (this.projectiles.length) this.killProj(this.projectiles.length - 1);
     this.pickups.forEach((p) => this.scene.remove(p.m));
     this.pickups = [];
@@ -2148,6 +2225,12 @@ export class GameEngine {
       danger.renderOrder = 32;
       overlay.add(danger);
       enemy.danger = danger;
+      const alertMark = new THREE.Sprite(new THREE.SpriteMaterial({ map: alertTexture(), transparent: true, depthTest: false, depthWrite: false, fog: false }));
+      alertMark.position.set(0, 3.2, 0);
+      alertMark.visible = false;
+      alertMark.renderOrder = 34;
+      overlay.add(alertMark);
+      enemy.alertMark = alertMark;
       const mark = new THREE.Sprite(
         new THREE.SpriteMaterial({ map: deathblowTex, color: new THREE.Color(2.2, 1.2, 1.2), transparent: true, depthTest: false, depthWrite: false, fog: false, blending: THREE.AdditiveBlending })
       );
@@ -2272,6 +2355,7 @@ export class GameEngine {
     if (e.tele) this.scene.remove(e.tele);
     e.rig.dispose?.();
     e.danger?.material.dispose();
+    e.alertMark?.material.dispose();
     e.dbMark?.material.dispose();
     e.bar.children.forEach((c) => {
       const m = c as THREE.Mesh;
@@ -2727,6 +2811,7 @@ export class GameEngine {
     this.callbacks.onStaminaChange(this.player.st, this.player.maxSt);
     this.cancelAct(0.08);
     this.hook = null;
+    this.glide = null;
     this.player.dash = 0.2;
     this.player.inv = Math.max(this.player.inv, 0.3 + 0.04 * (this.cardLv.sombra ?? 0));
     this.player.dashInv = true;
@@ -2749,13 +2834,14 @@ export class GameEngine {
   // briefly so a quick tap during another weapon's cooldown isn't silently dropped.
   public pressAttack() {
     const before = this.player.atkCd;
-    this.tryAttack();
+    this.tryAttack(true);
     this.attackQueueT = this.player.atkCd > before ? 0 : 0.3;
   }
 
-  public tryAttack() {
+  // `press`: a fresh tap (it wins over a guard still held); the auto-repeat of a held button does not
+  public tryAttack(press = false) {
     if (this.player.rig.clip) {
-      this.soulsAttack();
+      this.soulsAttack(press);
       return;
     }
     if (this.player.atkCd > 0 || this.state !== 'play') return;
@@ -2909,7 +2995,7 @@ export class GameEngine {
   private stepBuffer() {
     const b = this.buffered;
     if (!b) return;
-    if (this.state !== 'play' || this.player.hp <= 0 || this.time - b.t > BUFFER_WINDOW) {
+    if (this.state !== 'play' || this.player.hp <= 0 || this.time - b.t > (b.kind === 'guard' ? GUARD_BUFFER : BUFFER_WINDOW)) {
       this.buffered = null;
       return;
     }
@@ -2917,7 +3003,8 @@ export class GameEngine {
     this.buffered = null;
     if (b.kind === 'dash') this.dash();
     else if (b.kind === 'jump') this.jump();
-    else if (this.input.guardHeld && this.player.healT <= 0) {
+    else if (this.player.healT <= 0) {
+      // the press is what parries, not the finger still being down: a quick tap made mid-swing is kept
       if (this.act && this.act.kind !== 'deflect' && this.act.kind !== 'block') this.cancelAct(0.1);
       this.player.guardPressT = this.time;
     }
@@ -2944,7 +3031,7 @@ export class GameEngine {
     return !a || a.kind === 'deflect' || a.kind === 'block' || a.kind === 'draw';
   }
 
-  private soulsAttack() {
+  private soulsAttack(press = false) {
     if (this.state !== 'play' || this.player.hp <= 0) return;
     if (this.player.staggerT > 0 || this.cine || this.player.healT > 0) return;
     const a = this.act;
@@ -2958,11 +3045,17 @@ export class GameEngine {
         return;
       }
     }
-    if (this.input.guardHeld && !a) return;
+    if (this.input.guardHeld && !a && !press) return;
 
     const db = this.findDeathblowTarget();
     if (db) {
       this.performDeathblow(db);
+      return;
+    }
+    // a streak of 8 earned a finisher: the next attack falls on the foe the stick points at
+    const td = this.takedownTarget();
+    if (td) {
+      this.startTakedown(td);
       return;
     }
     const w = this.weapons[this.activeWeaponIdx];
@@ -2980,15 +3073,40 @@ export class GameEngine {
     this.player.comboT = 0;
     this.ptMult = w.pointMult || 1;
     this.actQueued = false;
-    if (step === 0) this.autoFaceNearestEnemyForAttack(Math.max(2.5, w.kind === 'chain' ? HOOK.range : m.range));
+    const P = this.player.pos;
     const sweepable = w.kind === 'melee' || w.kind === 'karate';
-    const target = sweepable ? this.pickAttackTarget(m.range, chaining) : null;
+    // free-flow: the foe comes from the stick (up to FLOW_RANGE away, any side), the swing turns to it before it starts
+    // and, across a gap, the wind-up stretches to the glide that gets there - the blow lands as the Rōnin arrives
+    const flow = sweepable && TUNE.flow > 0.5;
+    if (step === 0 && !flow) this.autoFaceNearestEnemyForAttack(Math.max(2.5, w.kind === 'chain' ? HOOK.range : m.range));
+    const target = flow ? this.pickFlowTarget(chaining) : sweepable ? this.pickAttackTarget(m.range, chaining) : null;
+    if (flow && target && step === 0) this.player.yaw = turnTo(this.player.yaw, Math.atan2(target.pos.x - P.x, target.pos.z - P.z), 0.85);
+    let speed = (m.speed ?? 1) * TUNE.attackSpeed;
+    let restore: number | undefined;
+    let reachMax = 2.2;
+    if (flow && target && m.hit.length) {
+      const reach = m.reach ?? MAGNET_REACH[w.id] ?? 1.3;
+      const gap = Math.hypot(target.pos.x - P.x, target.pos.z - P.z) - (target.r + reach);
+      if (gap > 0.5 && this.lineClear(P.x, P.z, target.pos.x, target.pos.z)) reachMax = FLOW_RANGE + 1;
+      if (gap > FLOW_GLIDE_MIN && reachMax > 2.2) {
+        const natural = (m.hit[0] - (m.from ?? 0)) / speed;
+        const wanted = clamp(gap / FLOW_SPEED, natural, FLOW_MAX_WINDUP);
+        if (wanted > natural * 1.05) {
+          restore = speed;
+          speed *= natural / wanted;
+        }
+        this.fovKick = Math.max(this.fovKick, 4);
+        this.ghosts.spawn(this.player.rig.root, GHOST_DASH);
+        this.ghostT = 0.05;
+        sfx.dash();
+      }
+    }
 
     const act = this.startAct(
       'attack',
       m.clip,
       {
-        speed: (m.speed ?? 1) * TUNE.attackSpeed,
+        speed,
         from: m.from,
         rootMotion: !!m.root,
         fadeIn: chaining ? 0.14 : 0.1,
@@ -3000,6 +3118,7 @@ export class GameEngine {
       m
     );
     if (!act) return;
+    if (restore !== undefined) act.restoreSpeed = restore;
     this.player.atkCd = Math.max(0, this.player.atkCd) + 0.05;
     if (sweepable) {
       // damage is decided by the weapon actually touching a body inside these spans
@@ -3009,7 +3128,7 @@ export class GameEngine {
       if (target && m.hit.length) {
         this.comboTarget = target;
         act.target = target;
-        act.magnet = { reach: m.reach ?? MAGNET_REACH[w.id] ?? 1.3, until: m.hit[0], k: m.root ? 0.5 : 1 };
+        act.magnet = { reach: m.reach ?? MAGNET_REACH[w.id] ?? 1.3, until: m.hit[0], k: m.root ? 0.5 : 1, max: reachMax };
       }
     } else {
       for (const t of m.hit) act.events.push({ t, fn: () => this.soulsStrike(w, m, step) });
@@ -3025,6 +3144,48 @@ export class GameEngine {
     }
     this.meleeHit(m.range, m.arc, m.dmg, m.kb, !!m.heavy);
     m.heavy || step === 2 ? sfx.heavy() : sfx.swing();
+  }
+
+  /**
+   * Free-flow: the foe an attack goes to. The stick says where (the nearest foe inside a cone around its direction,
+   * nearer and straighter ones first); with the stick at rest it is whoever is in front, or right beside. A combo
+   * keeps its foe unless the stick has clearly swung toward another. `peek` leaves a pending riposte target alone.
+   */
+  private pickFlowTarget(keepPrev: boolean, peek = false, keep?: (e: EnemyInstance) => boolean): EnemyInstance | null {
+    const P = this.player;
+    const forced = this.forceTarget;
+    if (!peek) this.forceTarget = null;
+    if (forced && !forced.dead && Math.hypot(forced.pos.x - P.pos.x, forced.pos.z - P.pos.z) - forced.r <= FLOW_RANGE) return forced;
+    const stick = this.intentAmt > 0.35;
+    const ix = stick ? this.intent.x : Math.sin(P.yaw);
+    const iz = stick ? this.intent.y : Math.cos(P.yaw);
+    const aim = Math.atan2(ix, iz);
+    const cone = stick ? 1.05 : 1.75;
+    let best: EnemyInstance | null = null;
+    let bestScore = Infinity;
+    let bestAng = 0;
+    for (const e of this.enemies) {
+      if (e.dead || e.flee || (e.vanishT ?? 0) > 0 || (keep && !keep(e))) continue;
+      const dx = e.pos.x - P.pos.x;
+      const dz = e.pos.z - P.pos.z;
+      const edge = (Math.hypot(dx, dz) || 0.001) - e.r;
+      if (edge > FLOW_RANGE) continue;
+      const ang = Math.abs(wrap(Math.atan2(dx, dz) - aim));
+      if (ang > cone && edge > 1.8) continue; // (someone right beside is always in reach)
+      const score = edge * 0.55 + ang * 2.2 + (isFodder(e) ? 0.8 : 0);
+      if (score < bestScore) {
+        bestScore = score;
+        best = e;
+        bestAng = ang;
+      }
+    }
+    const prev = this.comboTarget;
+    if (keepPrev && prev && !prev.dead && !prev.flee && prev !== best && (!keep || keep(prev)) && Math.hypot(prev.pos.x - P.pos.x, prev.pos.z - P.pos.z) - prev.r <= FLOW_RANGE) {
+      // the combo stays on its foe unless the stick has clearly swung toward another one
+      const pa = Math.abs(wrap(Math.atan2(prev.pos.x - P.pos.x, prev.pos.z - P.pos.z) - aim));
+      if (!stick || pa <= 0.9 || bestAng > 0.6) return prev;
+    }
+    return best;
   }
 
   // Closest live enemy in front (or right beside) the player within reach of a swing;
@@ -3061,19 +3222,29 @@ export class GameEngine {
   private stepMagnet(a: PlayerAct, dt: number) {
     const t = a.target;
     const mg = a.magnet;
-    if (!t || !mg || t.dead) return;
     const sh = a.shot;
+    // a glide stretched the wind-up: at the hit frame (or if the foe is gone) the clip goes back to its own speed
+    if (a.restoreSpeed !== undefined && (!t || !mg || t.dead || sh.t > mg.until)) {
+      sh.o.speed = a.restoreSpeed;
+      a.restoreSpeed = undefined;
+    }
+    if (!t || !mg || t.dead) return;
     if (sh.t > mg.until) return;
     const dx = t.pos.x - this.player.pos.x;
     const dz = t.pos.z - this.player.pos.z;
     const d = Math.hypot(dx, dz) || 0.001;
     this.player.yaw = turnTo(this.player.yaw, Math.atan2(dx, dz), Math.min(1, dt * 12));
     const gap = d - (t.r + mg.reach);
-    if (gap > 0.04 && gap < 2.2) {
+    if (gap > 0.04 && gap < mg.max) {
       const remain = Math.max(0.05, (mg.until - sh.t) / Math.max(0.1, sh.o.speed));
-      const step = Math.min(gap, ((gap / remain) * dt * mg.k) || 0, 12 * dt);
+      // (a short step is the old magnetism; across a gap the same law spreads the glide over the stretched wind-up)
+      const step = Math.min(gap, ((gap / remain) * dt * mg.k) || 0, (mg.max > 2.2 ? FLOW_SPEED * 1.5 : 12) * dt);
       this.player.pos.x += (dx / d) * step;
       this.player.pos.z += (dz / d) * step;
+      if (step > 9 * dt && (this.ghostT -= dt) <= 0) {
+        this.ghostT = 0.05;
+        this.ghosts.spawn(this.player.rig.root, GHOST_DASH);
+      }
     }
   }
 
@@ -4252,6 +4423,11 @@ export class GameEngine {
     P.comboDmg += dmg;
     P.bestCombo = Math.max(P.bestCombo, P.hitCombo);
     this.comboTick++;
+    // every TAKEDOWN_EVERY hits the next attack is a finisher on the foe the stick points at
+    if (TUNE.takedown > 0.5 && P.hitCombo % TAKEDOWN_EVERY === 0 && !this.takedownReady) {
+      this.takedownReady = true;
+      this.callout('FINALIZAÇÃO PRONTA!', 'blood', '殺');
+    }
   }
 
   /** Sends the streak to the HUD: nothing under two hits; a finished one (3+) stays a moment as a result. */
@@ -4276,6 +4452,7 @@ export class GameEngine {
     P.hitComboT = 0;
     P.comboDmg = 0;
     this.comboRankShown = 0;
+    this.takedownReady = false;
   }
 
   /** A big word on the HUD. The same word is not sent twice within a second (a crowd breaking at once). */
@@ -4285,11 +4462,11 @@ export class GameEngine {
     this.callbacks.onCallout?.({ id: ++this.calloutId, word, glyph, sub, tone });
   }
 
-  public hitEnemy(e: EnemyInstance, dmg: number, nx: number, nz: number, kb: number, heavy: boolean, hit?: HitInfo) {
+  public hitEnemy(e: EnemyInstance, dmg: number, nx: number, nz: number, kb: number, heavy: boolean, hit?: HitInfo, forced = false) {
     if (e.dead) return;
     // Samurai (and, rarely, the Oni) fight back: a blow that connects may be blocked,
-    // parried or sidestepped instead of landing - see rollEnemyDefense
-    const defense = this.rollEnemyDefense(e, nx, nz);
+    // parried or sidestepped instead of landing - see rollEnemyDefense (a counter cannot be defended against)
+    const defense = forced ? 'none' : this.rollEnemyDefense(e, nx, nz);
     if (defense !== 'none') {
       this.enemyDefend(e, defense, dmg, nx, nz, heavy, hit);
       return;
@@ -4694,6 +4871,8 @@ export class GameEngine {
     this.player.inv = 0.6;
     this.hurtFx = 1;
     this.hook = null; // a blow taken cuts the chain loose
+    this.glide = null;
+    this.guardIntentT = -99;
     if (this.player.healT > 0 && !this.player.healDone) {
       // interrupted mid-drink: the sip is lost
       this.player.healT = 0;
@@ -4763,6 +4942,9 @@ export class GameEngine {
   public guardDown() {
     if (this.state !== 'play' || this.player.healT > 0 || this.player.hp <= 0) return;
     this.input.guardHeld = true;
+    this.guardIntentT = this.time;
+    // a counter mark is up: answer it now, whatever the Rōnin was in the middle of
+    if (this.tryCounter()) return;
     // mocap rig: a committed swing can't be turned into a parry, only its recovery (the press waits for it)
     if (!this.freeToCancel()) {
       this.buffered = { kind: 'guard', t: this.time };
@@ -4774,6 +4956,217 @@ export class GameEngine {
 
   public guardUp() {
     this.input.guardHeld = false;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Counter (Arkham style). Every blow that can be answered wears a mark (a bolt over its wielder's head) for the
+  // last ALERT_LEAD seconds before it lands; pressing Defesa while a mark is up cancels that blow, steps the Rōnin
+  // in front of its wielder from wherever he is and strikes back. Blows that must be jumped (sweeps) show the old
+  // red mark instead and cannot be countered.
+  // ---------------------------------------------------------------------------
+
+  /** The counter steps the Rōnin in front of the foe: it can if the foe is near or the way is clear of pillars and trunks. */
+  private counterReach(e: EnemyInstance): boolean {
+    const P = this.player.pos;
+    const d = Math.hypot(e.pos.x - P.x, e.pos.z - P.z);
+    return d <= e.r + 2.7 || this.lineClear(P.x, P.z, e.pos.x, e.pos.z);
+  }
+
+  /** Seconds until the foe's blade lands (negative: it is live and has not touched yet). */
+  private timeToImpact(e: EnemyInstance): number {
+    if (e.strike) return e.strike.windup - e.strike.t;
+    if (e.blade) return BLADE_LEAD - e.blade.t;
+    return Infinity;
+  }
+
+  private setAlert(e: EnemyInstance, on: boolean) {
+    e.alert = on;
+    if (e.alertMark) {
+      e.alertMark.visible = on;
+      e.alertMark.userData.k = 0;
+      e.alertMark.scale.setScalar(0.01);
+    }
+    if (on) sfx.alert();
+    const any = this.enemies.some((o) => o.alert && !o.dead);
+    if (any !== this.counterReady) {
+      this.counterReady = any;
+      this.callbacks.onCounterReady?.(any);
+    }
+  }
+
+  /** Marks (or clears) every foe whose blow can be countered right now. */
+  private stepAlerts() {
+    const P = this.player.pos;
+    const live = TUNE.counter > 0.5 && this.state === 'play' && !this.cine && this.player.hp > 0;
+    for (const e of this.enemies) {
+      let on = false;
+      if (live && !e.dead && e.type !== 'archer' && !isFodder(e) && this.time >= (e.counterUntil ?? 0)) {
+        const st = e.strike ?? (e.blade && !e.blade.hit ? e.blade.st : undefined);
+        if (st && !st.feint && st.kind !== 'sweep') {
+          const tti = this.timeToImpact(e);
+          on = tti <= ALERT_LEAD && tti >= -COUNTER_LATE && Math.hypot(e.pos.x - P.x, e.pos.z - P.z) <= COUNTER_RANGE && this.counterReach(e);
+        }
+      }
+      if (on !== !!e.alert) this.setAlert(e, on);
+    }
+  }
+
+  /** The foe about to land its blow soonest among the marked ones, if the Rōnin is in a state to answer. */
+  private tryCounter(): boolean {
+    if (TUNE.counter < 0.5 || this.cine || this.state !== 'play' || this.player.hp <= 0 || this.player.staggerT > 0) return false;
+    const k = this.act?.kind;
+    if (k === 'hurt' || k === 'stagger' || k === 'heal' || k === 'deathblow' || k === 'special' || k === 'death') return false;
+    let best: EnemyInstance | null = null;
+    let bt = Infinity;
+    for (const e of this.enemies) {
+      if (!e.alert || e.dead) continue;
+      const t = this.timeToImpact(e);
+      if (t < bt) {
+        bt = t;
+        best = e;
+      }
+    }
+    if (!best) return false;
+    this.performCounter(best);
+    return true;
+  }
+
+  private performCounter(e: EnemyInstance) {
+    const P = this.player;
+    const st = e.strike ?? e.blade?.st;
+    const perfect = this.timeToImpact(e) <= COUNTER_PERFECT;
+    const boss = e.type === 'boss';
+    const heavyFoe = boss || e.variant === 'brute';
+    const thrust = st?.kind === 'thrust';
+    const sc = this.sizeOf(e);
+    this.guardIntentT = -99;
+    P.guardPressT = this.time; // (a second blade arriving in the next instants is deflected like after any parry)
+    this.buffered = null;
+    this.waveStat.deflects++;
+    this.deflectsTotal++;
+    this.hook = null;
+    P.dash = 0;
+    P.dashInv = false;
+    this.setAlert(e, false);
+
+    // step in front of the attacker from wherever the Rōnin is (any side, any distance up to COUNTER_RANGE)
+    const dx = e.pos.x - P.pos.x;
+    const dz = e.pos.z - P.pos.z;
+    const d = Math.hypot(dx, dz) || 0.001;
+    const nx = dx / d;
+    const nz = dz / d;
+    const stand = e.r + 1.2;
+    if (d > stand + 0.2 && this.lineClear(P.pos.x, P.pos.z, e.pos.x, e.pos.z)) this.startGlide(e.pos.x - nx * stand, e.pos.z - nz * stand, clamp((d - stand) / 26, 0.07, 0.22));
+    else this.glide = null;
+    this.faceEnemy(e);
+
+    // the answer: the Rōnin's stance (it cancels whatever he was doing), the blades meeting, the foe hurt and
+    // knocked off its feet, and its posture taking the worst of it
+    this.actQueued = false;
+    this.playerDeflectAnim();
+    const meet = this.clashPose(e);
+    const mid = meet ? this.tmpV.copy(meet) : this.tmpV.set(e.pos.x - nx * 0.6, e.pos.y + 1.35 * sc, e.pos.z - nz * 0.6);
+    this.impacts.spawn(mid, IMPACT_DEFLECT, (thrust ? 2.4 : 1.9) * (perfect ? 1.35 : 1), perfect ? 0.22 : 0.16, perfect ? 'perfect' : 'parry', { x: nx, z: nz });
+    this.emitParticles(mid.x, mid.y, mid.z, perfect ? 40 : 26, perfect ? 0xfff0b0 : 0xffb347, perfect ? 11 : 9, 2.2, 18, 0.32);
+    this.hitPt.copy(mid);
+    this.hitEnemy(e, Math.round(COUNTER_DMG * (perfect ? 1.5 : 1) * (heavyFoe ? 0.7 : 1)), nx, nz, heavyFoe ? 4 : 8, true, { point: this.hitPt, dirX: nx, dirZ: nz }, true);
+    P.inv = Math.max(P.inv, 0.5);
+    this.hitstop = Math.max(this.hitstop, perfect ? 0.1 : 0.075);
+    this.lastHS = performance.now();
+    this.shake = Math.max(this.shake, perfect ? 0.32 : 0.22);
+    this.fovKick = Math.min(this.fovKick, perfect ? -4.5 : -3);
+    sfx.clang();
+    sfx.counter();
+    if (!e.dead) {
+      this.cancelStrike(e);
+      e.staggerT = Math.max(e.staggerT, boss ? 0.6 : 0.95);
+      e.mode = 'recover';
+      e.modeT = 0;
+      e.token = false;
+      e.comboLeft = 0;
+      e.cd = Math.max(e.cd, 1.1);
+      e.counterUntil = this.time + (boss ? 4 : heavyFoe ? 2.5 : 0.9);
+      e.anim = { kind: 'erecoil', t: 0, dur: 0.32, side: 0 };
+      this.enemyClip(e, this.reactionClip(e), { from: 0.05, to: 0.8, speed: 1.2, fadeIn: 0.05 });
+      this.addEnemyPosture(e, COUNTER_POSTURE * (boss ? 0.65 : 1) * (perfect ? 1.5 : 1) * (thrust ? 1.3 : 1));
+      // ... and the riposte follows by itself, aimed at the foe just countered
+      if (!e.dead && e.brokenT <= 0) {
+        if (TUNE.flow > 0.5) this.forceTarget = e;
+        this.actQueued = true;
+      }
+    }
+    const scene = this.startParryScene(e, meet, perfect, !!thrust);
+    if (perfect) {
+      this.callout('CONTRA PERFEITO!', 'gold', '弾');
+      if (!scene) this.triggerSlowmo(0.22, 0.38);
+      P.st = Math.min(P.maxSt, P.st + 10);
+      this.callbacks.onStaminaChange(P.st, P.maxSt);
+      if (this.settings.cinematicCamera) {
+        this.flashFx = Math.max(this.flashFx, 0.14);
+        this.spikeFx = Math.max(this.spikeFx, 0.3);
+      }
+    } else {
+      this.callout('CONTRA!', 'ember', '返');
+      this.spawnLabel(P.pos.x, P.pos.y + 2.4, P.pos.z, 'CONTRA!', '#ffb347', 1);
+    }
+    if (!scene && (perfect || thrust || boss || e.captain)) this.parryZoom(perfect || !!thrust);
+  }
+
+  /** Carries the Rōnin to (x1, z1) in `dur` seconds: fast off the mark, soft landing (see updatePlayerMovementAndCamera). */
+  private startGlide(x1: number, z1: number, dur: number) {
+    const P = this.player;
+    this.glide = { x0: P.pos.x, z0: P.pos.z, x1, z1, t: 0, dur: Math.max(0.05, dur) };
+    this.ghosts.spawn(P.rig.root, GHOST_DASH);
+    this.ghostT = 0.04;
+    this.fovKick = Math.max(this.fovKick, 5);
+    sfx.dash();
+  }
+
+  // ---- the finisher a streak of TAKEDOWN_EVERY hits earns
+  private takedownTarget(): EnemyInstance | null {
+    if (!this.takedownReady || TUNE.takedown < 0.5 || this.player.hitComboT <= 0 || this.cine) return null;
+    const ok = (e: EnemyInstance) => e.type !== 'boss' && !isFodder(e) && e.brokenT <= 0;
+    const aimed = this.pickFlowTarget(false, true, ok);
+    if (aimed) return aimed;
+    // nobody on the line of the stick: the nearest foe in reach all the same (the press must never be wasted)
+    let best: EnemyInstance | null = null;
+    let bd = FLOW_RANGE;
+    for (const e of this.enemies) {
+      if (e.dead || e.flee || (e.vanishT ?? 0) > 0 || !ok(e)) continue;
+      const d = Math.hypot(e.pos.x - this.player.pos.x, e.pos.z - this.player.pos.z) - e.r;
+      if (d < bd) {
+        bd = d;
+        best = e;
+      }
+    }
+    return best;
+  }
+
+  private startTakedown(e: EnemyInstance) {
+    this.takedownReady = false;
+    this.cancelStrike(e);
+    e.token = false;
+    e.mode = 'broken';
+    e.modeT = 0;
+    e.anim = undefined;
+    e.bow = undefined;
+    e.kick = undefined;
+    // doubled over under the blow, as a foe whose posture broke
+    this.enemyClip(e, 'hit2', { to: 0.62, hold: true, fadeIn: 0.08 });
+    this.callout('FINALIZAÇÃO!', 'blood', '殺');
+    this.performDeathblow(e);
+  }
+
+  /** Everything the player was holding is let go (the window lost focus, the tab was hidden, a menu opened):
+   *  a button whose release never arrived must not stay down - a guard stuck on stops every attack. */
+  public releaseInputs() {
+    this.input.guardHeld = false;
+    this.input.attackHeld = false;
+    this.input.jx = 0;
+    this.input.jy = 0;
+    for (const k of Object.keys(this.input.keys)) this.input.keys[k] = false;
+    this.joyTouch.id = null;
+    this.lookTouch.id = null;
   }
 
   // Healing gourd: a short drink that leaves you open, three sips per wave
@@ -4909,8 +5302,8 @@ export class GameEngine {
     const r = Math.random();
     switch (e.variant) {
       case 'shinobi': {
-        // fast cuts and stabs; now and then the sliding cut (jump it)
-        if (last && r < 0.3) return { kind: 'sweep', clip: 'slideAttack', hit: 1.43, from: 0.95, speed: 1, dmg: 14, reach: 3.3, perilous: true } as FS;
+        // fast cuts and stabs; now and then the wide cut across (jump it)
+        if (last && r < 0.3) return { kind: 'sweep', clip: 'slash2', hit: 0.87, from: 0.1, speed: 1, dmg: 14, reach: 2.4, perilous: true } as FS;
         if (r < 0.4) return { kind: 'slash', clip: 'eSwordAttack', hit: 0.52, speed: 1.45 * sp, dmg: 11, reach: 3, perilous: false } as FS;
         return { kind: 'slash', clip: 'eSwordSlash', hit: 0.7, from: 0.12, speed: 1.7 * sp, dmg: 9, reach: 2.4, perilous: false } as FS;
       }
@@ -4934,7 +5327,7 @@ export class GameEngine {
       case 'nito': {
         // two blades: wide, quick cuts in long chains, and a spin with both (jump it)
         if (last && r < 0.4) return { kind: 'sweep', clip: 'spin', hit: 0.43, from: 0.1, speed: 0.95, dmg: 15, reach: 3.1, perilous: true } as FS;
-        if (r < 0.35) return { kind: 'slash', clip: 'attack', hit: 0.5, speed: 1.3 * sp, dmg: 12, reach: 2.7, perilous: false } as FS;
+        if (r < 0.35) return { kind: 'slash', clip: 'slash1', hit: 0.68, from: 0.1, speed: 1.3 * sp, dmg: 12, reach: 2.7, perilous: false } as FS;
         return { kind: 'slash', clip: 'eSwordSlash', hit: 0.7, from: 0.12, speed: 1.5 * sp, dmg: 11, reach: 2.7, perilous: false } as FS;
       }
     }
@@ -4959,9 +5352,16 @@ export class GameEngine {
     let reach = boss ? (kind === 'sweep' ? 4.6 : 3.9) : brute ? (kind === 'sweep' ? 3.7 : 3.0) : monk ? (kind === 'thrust' ? 4.3 : 3.3) : kind === 'thrust' ? 3.4 : kind === 'sweep' ? 2.8 : 2.3;
     let dmg = Math.round((boss ? (kind === 'sweep' ? 22 : 24) : kind === 'thrust' ? 18 : kind === 'sweep' ? 15 : 12) * (e.elite ? 1.25 : 1) * (brute ? 1.7 : monk ? 0.85 : isFodder(e) ? FODDER_DAMAGE : 1));
     let wind = windup;
-    // the named fighters use the Rōnin's own moves in their own style (see fighterStrike)
-    const fs = e.rig.clip ? this.fighterStrike(e, first, last) : null;
+    // the named fighters use the Rōnin's own moves in their own style (see fighterStrike); a model that lacks
+    // the clip (each GLB carries its own set) falls back to the ordinary strikes instead of swinging at air
+    let fs = e.rig.clip ? this.fighterStrike(e, first, last) : null;
+    if (fs && !e.rig.clip!.has(fs.clip)) fs = null;
+    const playable = <T extends { clip: string }>(list: T[]): T[] => {
+      const ok = list.filter((o) => e.rig.clip!.has(o.clip));
+      return ok.length ? ok : list;
+    };
     let limb: 'foot' | undefined;
+    let clipName = '';
     if (fs) {
       kind = fs.kind;
       perilous = fs.perilous;
@@ -4970,23 +5370,34 @@ export class GameEngine {
       limb = fs.limb;
       const from = fs.from ?? 0;
       wind = (fs.hit - from) / fs.speed;
+      clipName = fs.clip;
       this.enemyClip(e, fs.clip, { from, speed: fs.speed, fadeIn: 0.1, fadeOut: 0.28 });
     } else if (e.rig.clip && boss) {
-      const opts = BOSS_STRIKES[kind] ?? BOSS_STRIKES.smash;
+      const opts = playable(BOSS_STRIKES[kind] ?? BOSS_STRIKES.smash);
       const pick = opts[Math.floor(Math.random() * opts.length)];
       const speed = kind === 'sweep' ? 0.85 : first ? 0.9 : 1.05;
       const from = pick.from ?? 0;
       wind = (pick.hit - from) / speed;
+      clipName = pick.clip;
       this.enemyClip(e, pick.clip, { from, speed, fadeIn: 0.15, fadeOut: 0.35 });
     } else if (e.rig.clip && !boss) {
       // the wind-up IS the clip up to its hit frame: readable, and the blade really
       // arrives when the damage does (combo follow-ups come a little quicker)
-      const opts = ENEMY_STRIKES[kind];
+      const opts = playable(ENEMY_STRIKES[kind]);
       const pick = opts[Math.floor(Math.random() * opts.length)];
       const speed = (perilous ? 0.95 : first ? 1.05 : 1.25) * (brute ? 0.72 : monk ? 1.15 : isFodder(e) ? 0.8 : 1);
       const from = pick.from ?? 0;
       wind = (pick.hit - from) / speed;
+      clipName = pick.clip;
       this.enemyClip(e, pick.clip, { from, speed, fadeIn: 0.12, fadeOut: 0.3 });
+    }
+    // where this clip's blade really crosses a standing player: the foe steps in to it during the wind-up
+    const fitKey = `${e.variant ?? 'plain'}:${clipName}`;
+    const tableFit = !boss && clipName ? STRIKE_FIT[fitKey] : undefined;
+    if (import.meta.env.DEV && !boss && clipName && tableFit === undefined && !this.fitWarned.has(fitKey)) {
+      // a new clip or fighter: measure it (see STRIKE_FIT in moves.ts) or it will swing from wherever the AI stopped
+      this.fitWarned.add(fitKey);
+      console.warn(`STRIKE_FIT has no entry for "${fitKey}": that foe will not step in to reach`);
     }
     const strike: EnemyStrike = {
       kind,
@@ -4997,6 +5408,7 @@ export class GameEngine {
       reach,
       dmg,
       limb,
+      fit: tableFit === undefined ? undefined : Math.max(tableFit, e.r + 0.65),
       side: e.strike ? e.strike.side ^ 1 : Math.random() < 0.5 ? 0 : 1
     };
     e.strike = strike;
@@ -5009,7 +5421,8 @@ export class GameEngine {
       e.tele.position.set(e.pos.x, 0.05, e.pos.z);
       e.tele.scale.setScalar(boss ? 1.6 : 1.1);
     }
-    if (perilous && e.danger) {
+    // (the red mark is for what has to be jumped; a thrust can be countered and wears the counter mark instead)
+    if (perilous && e.danger && (kind === 'sweep' || TUNE.counter < 0.5)) {
       e.danger.visible = true;
       e.danger.scale.setScalar(0.01);
       sfx.danger();
@@ -5477,6 +5890,9 @@ export class GameEngine {
     const mx = fx * -iy + rx * ix;
     const mz = fz * -iy + rz * ix;
     const amt = Math.min(1, Math.hypot(mx, mz));
+    // where the stick points (world frame): free-flow picks the foe an attack goes to from it
+    this.intentAmt = amt;
+    if (amt > 0.05) this.intent.set(mx / amt, mz / amt);
 
     if (amt > 0.05) {
       // 1. O PERSONAGEM VIRA NA DIREÇÃO DO MOVIMENTO (Acaba com andar de costas!)
@@ -5586,6 +6002,21 @@ export class GameEngine {
         }
       }
     }
+    // a counter or a free-flow dash carries the Rōnin along its line (fast off the mark, soft landing)
+    if (this.glide) {
+      const g = this.glide;
+      g.t += dt;
+      const k = Math.min(1, g.t / g.dur);
+      const ease = 1 - (1 - k) * (1 - k);
+      this.player.pos.x = g.x0 + (g.x1 - g.x0) * ease;
+      this.player.pos.z = g.z0 + (g.z1 - g.z0) * ease;
+      this.player.vel.set(0, 0, 0);
+      if ((this.ghostT -= dt) <= 0) {
+        this.ghostT = 0.05;
+        this.ghosts.spawn(this.player.rig.root, GHOST_DASH);
+      }
+      if (k >= 1) this.glide = null;
+    }
     this.collide(this.player.pos, 0.45);
 
     this.player.inv -= dt;
@@ -5644,7 +6075,7 @@ export class GameEngine {
       this.healBufT -= dt;
       if (this.player.healT <= 0 && this.freeToCancel()) this.heal();
     }
-    const dbReady = !!this.findDeathblowTarget();
+    const dbReady = !!this.findDeathblowTarget() || !!this.takedownTarget();
     if (dbReady !== this.player.dbReady) {
       this.player.dbReady = dbReady;
       this.callbacks.onDeathblowReady?.(dbReady);
@@ -5667,7 +6098,7 @@ export class GameEngine {
     if (this.attackQueueT > 0) this.attackQueueT -= dt;
     if (this.input.attackHeld || this.attackQueueT > 0) {
       const before = this.player.atkCd;
-      this.tryAttack();
+      this.tryAttack(this.attackQueueT > 0);
       if (this.player.atkCd > before) this.attackQueueT = 0;
     }
 
@@ -6169,6 +6600,16 @@ export class GameEngine {
         e.windup = Math.max(0, st.windup - st.t);
         if (st.t < st.windup * 0.8) e.yaw = turnTo(e.yaw, toP, dt * (boss ? 3.5 : 6));
         const k = Math.min(1, st.t / st.windup);
+        // the swing steps in to where its clip really cuts (STRIKE_FIT) until the blade is about to go live, so a
+        // blow aimed at a player who stayed put connects - and one aimed at a player who ran off whiffs
+        if (st.fit !== undefined && st.t < st.windup - STRIKE_COMMIT) {
+          const gap = d - st.fit;
+          if (gap > 0.05) {
+            mvx = nx;
+            mvz = nz;
+            spd = Math.min(STRIKE_STEP_SPEED, gap / Math.max(0.1, st.windup - STRIKE_COMMIT - st.t));
+          }
+        }
         if (e.tele) {
           e.tele.position.set(e.pos.x, 0.05, e.pos.z);
           (e.tele.material as THREE.MeshBasicMaterial).opacity = 0.18 + 0.42 * k;
@@ -6185,7 +6626,7 @@ export class GameEngine {
         }
         // mocap enemies: a short lead before the clip's hit frame the blade becomes live -
         // the strike lands when it actually touches the player, not when a timer ends
-        if (e.rig.clip && e.weapon && !e.blade && !st.feint && st.t >= st.windup - 0.06) {
+        if (e.rig.clip && e.weapon && !e.blade && !st.feint && st.t >= st.windup - BLADE_LEAD) {
           e.blade = { st, t: 0, dur: 0.3, hit: false, limb: st.limb, prev: makeSeg(), prevOk: false, prevL: makeSeg(), prevLOk: false };
         }
         if (st.feint && st.t >= st.windup * 0.6) {
@@ -6389,6 +6830,14 @@ export class GameEngine {
 
       e.rig.root.position.copy(e.pos);
       e.rig.root.rotation.y = e.yaw;
+
+      // the counter mark pops in and throbs while it is up
+      if (e.alertMark && e.alertMark.visible) {
+        const m = e.alertMark;
+        const kk = Math.min(1, ((m.userData.k as number) ?? 0) + dt * 9);
+        m.userData.k = kk;
+        m.scale.setScalar((boss ? 0.62 : 1.1) * (1 - (1 - kk) * (1 - kk)) * (1 + Math.sin(this.time * 24) * 0.06));
+      }
 
       // deathblow mark pulses while posture is broken
       if (e.dbMark) {
@@ -7315,6 +7764,9 @@ export class GameEngine {
     this.stepHook(dt);
     this.stepBuffer();
     this.updateEnemies(dt);
+    // counter marks follow the blows now in flight; a guard pressed a moment before a mark came up still answers it
+    this.stepAlerts();
+    if (this.time - this.guardIntentT <= COUNTER_INTENT) this.tryCounter();
     this.updateShocks(dt);
     this.updateBolts(dt);
     this.updateProjectiles(dt);

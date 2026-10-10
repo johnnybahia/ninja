@@ -141,6 +141,8 @@ export default function App() {
   const [waveMod, setWaveMod] = useState<{ id: string; name: string; glyph: string; desc: string } | null>(null);
   // shots being drawn or flying at the player from outside the view (marked at the screen edge)
   const [threats, setThreats] = useState<{ a: number; u: number }[]>([]);
+  // a blow that can be countered is about to land: the guard button lights up and says so
+  const [counterReady, setCounterReady] = useState(false);
   const [runResult, setRunResult] = useState<RunResult | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [bestScore, setBestScore] = useState<number>(() => {
@@ -169,6 +171,9 @@ export default function App() {
   const slots = loadouts[charId];
   const slotsRef = useRef(slots);
   const heldSlotRef = useRef<number | null>(null);
+  // which finger holds the guard button, and which mouse buttons the game believes are down
+  const guardPointerRef = useRef<number | null>(null);
+  const mouseBtnRef = useRef({ left: false, right: false });
   const [editSlot, setEditSlot] = useState(0);
   const [inspectIdx, setInspectIdx] = useState(slots[0]);
 
@@ -226,6 +231,22 @@ export default function App() {
     if (heldSlotRef.current !== slot) return;
     heldSlotRef.current = null;
     if (engineRef.current) engineRef.current.input.attackHeld = false;
+  };
+
+  // The guard follows the finger that pressed it until that finger lifts, wherever it slides (a thumb drifting
+  // off the edge, a second finger on the stick, the browser taking the touch) - so it can neither drop in the
+  // middle of a block nor stay stuck down
+  const releaseGuard = (pointerId: number) => {
+    if (guardPointerRef.current !== pointerId) return;
+    guardPointerRef.current = null;
+    engineRef.current?.guardUp();
+  };
+  const holdPointer = (e: React.PointerEvent<HTMLElement>) => {
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // (a pointer that is already gone: the press still counts)
+    }
   };
 
   // Settings Modal
@@ -416,6 +437,7 @@ export default function App() {
       onBossChange: (b) => setBossBar(b),
       onWaveMod: (m) => setWaveMod(m),
       onThreats: (t) => setThreats(t),
+      onCounterReady: (r) => setCounterReady(r),
       onGameOver: (finalScore, wave, _level, _kills, _combo, summary) => {
         const prevBest = bestScoreRef.current;
         if (finalScore > prevBest && !engineRef.current?.practice) {
@@ -562,12 +584,8 @@ export default function App() {
     initAudio();
 
     if (e.pointerType === 'mouse') {
-      if (e.button === 0) {
-        engineRef.current.input.attackHeld = true;
-        engineRef.current.pressAttack();
-      } else if (e.button === 2) {
-        engineRef.current.guardDown();
-      }
+      holdPointer(e);
+      syncMouseButtons(e);
       return;
     }
 
@@ -590,6 +608,8 @@ export default function App() {
     if (!engineRef.current || gameState !== 'play') return;
 
     if (e.pointerType === 'mouse') {
+      // (a second button pressed or released while the first is still down arrives here, not as down/up)
+      syncMouseButtons(e);
       const dx = e.movementX;
       const dy = e.movementY;
       engineRef.current.camYaw -= dx * 0.0028 * sensitivity;
@@ -633,10 +653,25 @@ export default function App() {
     if (e.pointerId === engineRef.current.lookTouch.id) {
       engineRef.current.lookTouch.id = null;
     }
-    if (e.pointerType === 'mouse') {
-      if (e.button === 2) engineRef.current.guardUp();
-      else engineRef.current.input.attackHeld = false;
-    }
+    if (e.pointerType === 'mouse') syncMouseButtons(e);
+  };
+
+  // Left = attack, right = guard, read from the live `buttons` mask so chords (guard while the attack button is
+  // held, and the other way round) work and a release is never lost
+  const syncMouseButtons = (e: React.PointerEvent<HTMLElement>) => {
+    const eng = engineRef.current;
+    if (!eng) return;
+    const left = (e.buttons & 1) !== 0;
+    const right = (e.buttons & 2) !== 0;
+    const was = mouseBtnRef.current;
+    if (right && !was.right) eng.guardDown();
+    else if (!right && was.right) eng.guardUp();
+    if (left && !was.left) {
+      eng.input.attackHeld = true;
+      eng.pressAttack();
+    } else if (!left && was.left) eng.input.attackHeld = false;
+    was.left = left;
+    was.right = right;
   };
 
   // Keyboard controls
@@ -667,6 +702,28 @@ export default function App() {
     setJoyActive(false);
     heldSlotRef.current = null;
   }, [cardOffer]);
+
+  // Losing the window (alt-tab, a call, a hidden tab) swallows the releases: let go of everything that was held
+  useEffect(() => {
+    const letGo = () => {
+      engineRef.current?.releaseInputs();
+      guardPointerRef.current = null;
+      heldSlotRef.current = null;
+      mouseBtnRef.current = { left: false, right: false };
+      setJoyActive(false);
+    };
+    const onHide = () => {
+      if (document.hidden) letGo();
+    };
+    window.addEventListener('blur', letGo);
+    window.addEventListener('pagehide', letGo);
+    document.addEventListener('visibilitychange', onHide);
+    return () => {
+      window.removeEventListener('blur', letGo);
+      window.removeEventListener('pagehide', letGo);
+      document.removeEventListener('visibilitychange', onHide);
+    };
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -885,11 +942,12 @@ export default function App() {
                     key={s}
                     onPointerDown={(e) => {
                       e.stopPropagation();
+                      holdPointer(e);
                       handleSlotDown(s);
                     }}
                     onPointerUp={() => handleSlotUp(s)}
                     onPointerCancel={() => handleSlotUp(s)}
-                    onPointerLeave={() => handleSlotUp(s)}
+                    onLostPointerCapture={() => handleSlotUp(s)}
                     className={`absolute ${pos} kg-btn flex items-center justify-center pointer-events-auto active:scale-95 transition-transform ${
                       deathblow
                         ? 'border-2 border-[#ff3b24] bg-[radial-gradient(circle_at_32%_26%,rgba(255,90,60,0.75),rgba(110,10,8,0.9)_70%)] shadow-[0_0_18px_rgba(255,40,20,0.8)]'
@@ -920,16 +978,18 @@ export default function App() {
                 onPointerDown={(e) => {
                   e.stopPropagation();
                   initAudio();
+                  holdPointer(e);
+                  guardPointerRef.current = e.pointerId;
                   engineRef.current?.guardDown();
                 }}
-                onPointerUp={() => engineRef.current?.guardUp()}
-                onPointerCancel={() => engineRef.current?.guardUp()}
-                onPointerLeave={() => engineRef.current?.guardUp()}
-                className="absolute right-[84px] bottom-[64px] w-[66px] h-[66px] kg-btn kg-btn-guard flex flex-col items-center justify-center pointer-events-auto active:scale-95 transition-transform duration-75"
-                aria-label="Defesa"
+                onPointerUp={(e) => releaseGuard(e.pointerId)}
+                onPointerCancel={(e) => releaseGuard(e.pointerId)}
+                onLostPointerCapture={(e) => releaseGuard(e.pointerId)}
+                className={`absolute right-[84px] bottom-[64px] w-[66px] h-[66px] kg-btn kg-btn-guard ${counterReady ? 'kg-counter-ready' : ''} flex flex-col items-center justify-center pointer-events-auto active:scale-95 transition-transform duration-75 before:absolute before:-inset-[6px] before:rounded-full before:content-['']`}
+                aria-label={counterReady ? 'Contra-ataque' : 'Defesa'}
               >
-                <Shield className="w-6 h-6 text-[#8fe0c8] pointer-events-none" />
-                <span className="text-[10px] font-bold text-[var(--paper)] leading-none mt-0.5 pointer-events-none">Defesa</span>
+                <Shield className={`w-6 h-6 pointer-events-none ${counterReady ? 'text-[#eaf7ff]' : 'text-[#8fe0c8]'}`} />
+                <span className="text-[10px] font-bold text-[var(--paper)] leading-none mt-0.5 pointer-events-none">{counterReady ? 'Contra!' : 'Defesa'}</span>
               </button>
 
               {/* Dash: dims while there is not enough stamina for it */}
@@ -1113,16 +1173,16 @@ export default function App() {
                       <b>Armas:</b> antes de entrar você escolhe 2 armas no Arsenal. Elas ficam fixas até morrer.
                     </li>
                     <li>
-                      <b>Atacar:</b> toque no botão da arma (segure para disparo contínuo).
+                      <b>Atacar:</b> toque no botão da arma (segure para disparo contínuo). Aponte o analógico para um inimigo, até 7 m, em qualquer direção: o golpe desliza até ele. A cada 8 hits seguidos o próximo ataque vira uma <b>finalização</b> (忍殺).
                     </li>
                     <li>
-                      <b>Defesa:</b> segure para defender. Toque no instante do golpe inimigo para <b>aparar</b> (faíscas) e quebrar a postura dele.
+                      <b>Contra:</b> quando um raio azul acende sobre um inimigo, ele vai atacar: toque em <b>Defesa</b> (o botão fica azul e diz Contra!) e o Rōnin vai até ele, desvia o golpe e revida, de qualquer lado e mesmo no meio de um golpe seu. Quanto mais perto do impacto, melhor (contra perfeito). Segurar a Defesa continua bloqueando.
                     </li>
                     <li>
                       <b>忍殺 Golpe final:</b> com a postura quebrada (ponto vermelho), ataque de perto para executar.
                     </li>
                     <li>
-                      <b>危 Perigo:</b> rasteira = pule; estocada = apare no tempo certo ou esquive.
+                      <b>危 Perigo:</b> rasteira (marca vermelha) = pule ou esquive; ela não pode ser contra-atacada.
                     </li>
                     <li>
                       <b>奥義 Ougi:</b> o pergaminho (cai de elites, do chefe e de vez em quando dos outros) acende um botão dourado por alguns segundos. Com um inimigo à frente, toque nele: uma sequência automática com as suas armas, em câmeras diferentes, que termina com a morte do alvo (o Oni perde até um quarto da vida).

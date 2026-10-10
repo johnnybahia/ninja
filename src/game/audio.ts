@@ -145,6 +145,16 @@ export const sfx = {
   tell: () => {
     tone(1560, 1900, 0.05, 'triangle', 0.05);
   },
+  // A counter mark lights over a foe's head: a quick rising pair, the cue to press Defesa
+  alert: () => {
+    tone(980, 1480, 0.07, 'triangle', 0.07);
+    setTimeout(() => tone(1480, 1960, 0.08, 'triangle', 0.06), 55);
+  },
+  // The counter lands: a hard snap with a low thump under the clang
+  counter: () => {
+    noise(0.1, 0.55, 3200, 'highpass');
+    tone(210, 70, 0.22, 'square', 0.16);
+  },
   // Perilous attack warning
   danger: () => {
     tone(740, 740, 0.35, 'square', 0.07);

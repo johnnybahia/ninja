@@ -73,10 +73,46 @@ export const COMBOS: Record<string, ClipMove[]> = {
 export const ENEMY_STRIKES: Record<string, { clip: string; hit: number; from?: number }[]> = {
   slash: [
     { clip: 'eSwordSlash', hit: 0.7, from: 0.12 },
-    { clip: 'attack', hit: 0.5 }
+    // (the Rōnin's second cut: back-swing, then the diagonal that lands at 0.68 - the old 'attack' clip
+    // swung the blade behind and beside the body, so it never reached anyone standing in front)
+    { clip: 'slash1', hit: 0.68, from: 0.1 }
   ],
   thrust: [{ clip: 'eSwordAttack', hit: 0.52 }],
   sweep: [{ clip: 'slash2', hit: 0.87, from: 0.1 }]
+};
+
+// How far from the player's centre a foe stands for each of its clips to really cut through him (keys:
+// variant or 'plain', then the clip). Measured in the game, sweeping the distance in steps of 0.1 m against a
+// player standing still and noting where the live blade touches him (each clip reaches about 1.8-3 m, a claw
+// jab 1.4 m, a staff spin 1.7 m), then settling a little inside the farthest touch. The AI starts a strike from
+// its usual spacing and, during the wind-up, steps in to this distance (see updateEnemies) - before, a Monge
+// swung from 3 m with a staff that reaches 2.6 and the Lutador's claws from 1.9 with a reach of 1.4, so they
+// almost never connected. A clip missing here simply does not step in.
+export const STRIKE_FIT: Record<string, number> = {
+  'plain:eSwordSlash': 1.8,
+  'plain:slash1': 1.4,
+  'plain:eSwordAttack': 2.3,
+  'plain:slash2': 1.4,
+  'ashigaru:eSwordSlash': 1.5,
+  'ashigaru:slash1': 1.3,
+  'brute:eSwordSlash': 1.8,
+  'brute:slash1': 1.8,
+  'brute:slash2': 1.8,
+  'monk:eSwordSlash': 2.0,
+  'monk:slash1': 1.8,
+  'monk:eSwordAttack': 2.4,
+  'monk:spin': 1.2,
+  'raio:jabL': 1.2,
+  'raio:jabR': 1.1,
+  'raio:cross': 1.2,
+  'raio:spin': 1.3,
+  'raio:kick1': 1.5,
+  'nito:slash1': 1.7,
+  'nito:eSwordSlash': 2.0,
+  'nito:spin': 1.3,
+  'shinobi:eSwordAttack': 1.6,
+  'shinobi:eSwordSlash': 1.8,
+  'shinobi:slash2': 1.3
 };
 
 // The giant (boss): the Rōnin's heavy two-handed moves at its size - an overhead smash or

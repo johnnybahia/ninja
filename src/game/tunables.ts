@@ -46,6 +46,12 @@ export const TUNE = {
   perfectWindow: 0.14,
   // the short cut-in on a defence worth seeing: 0 off, 1 rare, 2 normal, 3 frequent
   parryScene: 2,
+  // Arkham-style combat. counter: a blow that can be answered shows a mark and the guard button counters it (0: the guard
+  // works as it used to); flow: the attack button glides to the foe picked with the stick (0: it swings where it stands);
+  // takedown: a streak of 8 hits earns a finisher (0: off)
+  counter: 1,
+  flow: 1,
+  takedown: 1,
   // fight camera: the frame leans toward the opponent and opens up for a crowd or the Oni (0 = off)
   fightCam: 0.7,
   // glow around the characters' silhouettes (a rim light that helps them read in the dark)
@@ -91,6 +97,9 @@ export const TUNABLES: Tunable[] = [
   { key: 'perfectWindow', label: 'Aparo perfeito: janela (s)', min: 0.04, max: 0.25, step: 0.01 },
   { key: 'parryScene', label: 'Cenas de defesa (0 desliga, 1 rara, 2 normal, 3 frequente)', min: 0, max: 3, step: 1 },
   { key: 'parryZoom', label: 'Zoom curto em algumas defesas (0/1)', min: 0, max: 1, step: 1 },
+  { key: 'counter', label: 'Contra-ataque estilo Arkham: aviso + resposta automática (0/1)', min: 0, max: 1, step: 1 },
+  { key: 'flow', label: 'Ataque em fluxo: desliza até o inimigo escolhido com o direcional (0/1)', min: 0, max: 1, step: 1 },
+  { key: 'takedown', label: 'Finalização a cada 8 hits seguidos (0/1)', min: 0, max: 1, step: 1 },
   { key: 'fightCam', label: 'Câmera de luta: enquadra o oponente e abre com multidão (0 = desliga)', min: 0, max: 1, step: 0.05 },
   { key: 'rim', label: 'Brilho de contorno dos personagens (×, 0 = sem brilho)', min: 0, max: 1.5, step: 0.05 },
   { key: 'legSwingBase', label: 'Balanço da perna (andando)', min: 0.1, max: 1.2, step: 0.02 },

@@ -215,6 +215,10 @@ export interface EnemyInstance {
   postureBar?: THREE.Mesh;
   danger?: THREE.Sprite;
   dbMark?: THREE.Sprite;
+  // Arkham-style counter prompt: a blow that can be answered is about to land (the mark is up above its head)
+  alert?: boolean;
+  alertMark?: THREE.Sprite;
+  counterUntil?: number; // game time before which it cannot be countered again
   hookImmune?: number; // game time until which the Kusarigama's hook cannot catch it again
 }
 
@@ -231,6 +235,7 @@ export interface EnemyStrike {
   side: number;
   limb?: 'foot'; // a kick: the foot is the weapon
   warned?: boolean; // the flash that tells the player the blow is about to land has been shown
+  fit?: number; // centre-to-centre distance at which this clip's blade crosses a standing player (STRIKE_FIT): the foe steps in to it during the wind-up
 }
 
 export interface ProjectileInstance {

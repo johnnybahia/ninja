@@ -401,6 +401,26 @@ html, body, #root {
     border-color: rgba(143, 224, 200, 0.7);
     background: radial-gradient(circle at 32% 26%, rgba(52, 104, 96, 0.9), rgba(16, 28, 32, 0.92) 70%);
   }
+  /* a blow that can be countered is about to land: the guard button turns bright blue and throbs */
+  .kg-btn.kg-counter-ready {
+    border-color: #cfeaff;
+    background: radial-gradient(circle at 32% 26%, rgba(120, 200, 255, 0.98), rgba(14, 40, 92, 0.96) 70%);
+    box-shadow: 0 0 24px rgba(120, 200, 255, 0.95), inset 0 0 0 2px rgba(0, 0, 0, 0.3), 0 4px 10px rgba(0, 0, 0, 0.5);
+    animation: kg-counter-throb 0.26s ease-in-out infinite alternate;
+  }
+  @keyframes kg-counter-throb {
+    from {
+      transform: scale(1);
+    }
+    to {
+      transform: scale(1.12);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .kg-btn.kg-counter-ready {
+      animation: none;
+    }
+  }
   .kg-btn.kg-btn-off {
     opacity: 0.45;
     filter: saturate(0.4);
