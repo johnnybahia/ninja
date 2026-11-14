@@ -263,6 +263,7 @@ export default function App() {
     }
   });
   const atmosRef = useRef(atmosMode);
+  const [stageCard, setStageCard] = useState<{ id: string; name: string; glyph: string; desc: string; n: number; key: number } | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     try {
       return localStorage.getItem('kage_theme') === 'off' ? 'off' : 'three';
@@ -415,6 +416,7 @@ export default function App() {
       onCardOffer: (offer) => setCardOffer(offer),
       onBossChange: (b) => setBossBar(b),
       onWaveMod: (m) => setWaveMod(m),
+      onStage: (st) => setStageCard(st ? { ...st, key: Date.now() } : null),
       onThreats: (t) => setThreats(t),
       onGameOver: (finalScore, wave, _level, _kills, _combo, summary) => {
         const prevBest = bestScoreRef.current;
@@ -1003,6 +1005,16 @@ export default function App() {
             </div>
           </div>
       </div>
+
+      {/* A new stage: the screen goes dark, the stage is swapped behind it, and its name is brushed on */}
+      {stageCard && (
+        <div key={stageCard.key} className="kg-stage-card fixed inset-0 z-30 flex flex-col items-center justify-center pointer-events-none" onAnimationEnd={() => setStageCard(null)}>
+          <div className="font-serif text-[min(34vh,30vw)] leading-none font-black text-[var(--ember)] opacity-90 [text-shadow:0_0_40px_rgba(255,120,40,0.35)]">{stageCard.glyph}</div>
+          <div className="mt-2 font-serif text-xs tracking-[0.5em] text-[var(--paper)] opacity-70">FASE {stageCard.n}</div>
+          <div className="font-serif text-3xl font-extrabold tracking-wide text-[var(--paper)]">{stageCard.name}</div>
+          <div className="mt-1 max-w-[80vw] text-center text-sm text-[var(--paper)] opacity-75">{stageCard.desc}</div>
+        </div>
+      )}
 
       {/* Deathblow cinematic: letterbox bars and a brushed 忍殺 */}
       <div className={`fixed inset-0 z-20 pointer-events-none transition-opacity duration-150 ${cinematic === 'full' || cinematic === 'duel' || cinematic === 'ougi' ? 'opacity-100' : 'opacity-0'}`}>

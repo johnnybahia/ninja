@@ -350,6 +350,7 @@ export class PropSystem {
   /** colours of the leaves that fly off (the scenery theme's; sakura by default) */
   look: ThemeLeaf = THEMES[0].leaf;
   private props: Prop[] = [];
+  private sets: Prop[][] = [this.props];
   private leaves: DebrisPool;
   private chips: DebrisPool;
   private twigs: DebrisPool;
@@ -381,6 +382,12 @@ export class PropSystem {
     this.marks.count = 90;
     for (let i = 0; i < 90; i++) this.marks.setMatrixAt(i, ZERO);
     this.root.add(this.leaves.mesh, this.chips.mesh, this.twigs.mesh, this.stones.mesh, this.sparks.points, this.marks);
+  }
+
+  /** Props register into, and blades test against, one stage's list at a time */
+  useSet(i: number) {
+    while (this.sets.length <= i) this.sets.push([]);
+    this.props = this.sets[i];
   }
 
   /** 1 high, ~0.6 medium, ~0.35 low: scales how much debris a hit throws */
@@ -1003,7 +1010,7 @@ export class PropSystem {
     for (let i = 0; i < 90; i++) this.marks.setMatrixAt(i, ZERO);
     this.marks.instanceMatrix.needsUpdate = true;
     this.treeShake.fill(0);
-    for (const p of this.props) {
+    for (const p of this.sets.flat()) {
       p.token = null;
       p.shockTok = null;
       if (p.kind === 'lantern' && p.broken) {

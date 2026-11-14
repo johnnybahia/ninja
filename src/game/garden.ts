@@ -31,6 +31,60 @@ function pondRadius(a: number) {
   return POND.r * (1 + Math.sin(a * 3 + 0.7) * 0.09 + Math.sin(a * 5 + 2.1) * 0.05);
 }
 
+// Bamboo, shared by the garden's grove and the bamboo stage: stalk and leaf geometry and their
+// swaying materials (one of each for the whole game)
+let BAMBOO: { stalkG: THREE.BufferGeometry; stalkM: THREE.MeshStandardMaterial; leafG: THREE.BufferGeometry; leafM: THREE.MeshStandardMaterial; tex: THREE.Texture } | null = null;
+export function bambooKit(windTime: { value: number }) {
+  if (BAMBOO) return BAMBOO;
+  // stalk texture: green with darker node rings every ~0.7m
+  const c = document.createElement('canvas');
+  c.width = 32;
+  c.height = 256;
+  const g = c.getContext('2d')!;
+  const grd = g.createLinearGradient(0, 0, 32, 0);
+  grd.addColorStop(0, '#4f6a2c');
+  grd.addColorStop(0.5, '#7f9a44');
+  grd.addColorStop(1, '#4a6228');
+  g.fillStyle = grd;
+  g.fillRect(0, 0, 32, 256);
+  for (let y = 0; y < 256; y += 32) {
+    g.fillStyle = 'rgba(40,52,20,0.9)';
+    g.fillRect(0, y, 32, 3);
+    g.fillStyle = 'rgba(190,200,120,0.5)';
+    g.fillRect(0, y + 3, 32, 2);
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(1, 3);
+
+  const sway = (m: THREE.Material, amp: number, key: string) => {
+    m.onBeforeCompile = (shader) => {
+      shader.uniforms.uWindTime = windTime;
+      shader.vertexShader =
+        'uniform float uWindTime;\n' +
+        shader.vertexShader.replace(
+          '#include <begin_vertex>',
+          `#include <begin_vertex>
+          vec3 wo = instanceMatrix[3].xyz;
+          float hh = clamp(position.y / 7.0, 0.0, 1.0);
+          float ph = uWindTime * 1.3 + wo.x * 0.4 + wo.z * 0.3;
+          transformed.x += sin(ph) * ${amp.toFixed(3)} * hh * hh;
+          transformed.z += cos(ph * 0.8) * ${(amp * 0.5).toFixed(3)} * hh * hh;`
+        );
+    };
+    m.customProgramCacheKey = () => key;
+  };
+
+  const stalkG = new THREE.CylinderGeometry(0.065, 0.08, 7, 7).translate(0, 3.5, 0);
+  const stalkM = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.55 });
+  sway(stalkM, 0.35, 'bamboo');
+  const leafG = new THREE.PlaneGeometry(0.12, 0.8).translate(0, -0.36, 0);
+  const leafM = new THREE.MeshStandardMaterial({ color: 0x5c8a38, side: THREE.DoubleSide, roughness: 0.7 });
+  sway(leafM, 0.35, 'bambooLeaf');
+  return (BAMBOO = { stalkG, stalkM, leafG, leafM, tex });
+}
+
 export class Garden {
   bamboo: { stalks: { matrix: THREE.Matrix4; idx: number; leafStart: number; leafCount: number }[]; mesh: THREE.InstancedMesh; leaves: THREE.InstancedMesh; map: THREE.Texture } | null = null;
   solids: Solid[] = [];
@@ -241,49 +295,7 @@ export class Garden {
   }
 
   private buildBamboo(root: THREE.Object3D, windTime: { value: number }) {
-    // stalk texture: green with darker node rings every ~0.7m
-    const c = document.createElement('canvas');
-    c.width = 32;
-    c.height = 256;
-    const g = c.getContext('2d')!;
-    const grd = g.createLinearGradient(0, 0, 32, 0);
-    grd.addColorStop(0, '#4f6a2c');
-    grd.addColorStop(0.5, '#7f9a44');
-    grd.addColorStop(1, '#4a6228');
-    g.fillStyle = grd;
-    g.fillRect(0, 0, 32, 256);
-    for (let y = 0; y < 256; y += 32) {
-      g.fillStyle = 'rgba(40,52,20,0.9)';
-      g.fillRect(0, y, 32, 3);
-      g.fillStyle = 'rgba(190,200,120,0.5)';
-      g.fillRect(0, y + 3, 32, 2);
-    }
-    const tex = new THREE.CanvasTexture(c);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.wrapT = THREE.RepeatWrapping;
-    tex.repeat.set(1, 3);
-
-    const sway = (m: THREE.Material, amp: number, key: string) => {
-      m.onBeforeCompile = (shader) => {
-        shader.uniforms.uWindTime = windTime;
-        shader.vertexShader =
-          'uniform float uWindTime;\n' +
-          shader.vertexShader.replace(
-            '#include <begin_vertex>',
-            `#include <begin_vertex>
-            vec3 wo = instanceMatrix[3].xyz;
-            float hh = clamp(position.y / 7.0, 0.0, 1.0);
-            float ph = uWindTime * 1.3 + wo.x * 0.4 + wo.z * 0.3;
-            transformed.x += sin(ph) * ${amp.toFixed(3)} * hh * hh;
-            transformed.z += cos(ph * 0.8) * ${(amp * 0.5).toFixed(3)} * hh * hh;`
-          );
-      };
-      m.customProgramCacheKey = () => key;
-    };
-
-    const stalkG = new THREE.CylinderGeometry(0.065, 0.08, 7, 7).translate(0, 3.5, 0);
-    const stalkM = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.55 });
-    sway(stalkM, 0.35, 'bamboo');
+    const { stalkG, stalkM, leafG, leafM, tex } = bambooKit(windTime);
     const clumps = [[0, 0], [2.2, 1.6], [-1.8, 2.2], [1.4, -2.3], [-2.2, -1.4], [3.2, -0.6]];
     const stalks: THREE.Matrix4[] = [];
     const leafSpots: THREE.Vector3[] = [];
@@ -308,9 +320,6 @@ export class Garden {
     root.add(stalkMesh);
 
     // leaf sprays: bunches of narrow blades
-    const leafG = new THREE.PlaneGeometry(0.12, 0.8).translate(0, -0.36, 0);
-    const leafM = new THREE.MeshStandardMaterial({ color: 0x5c8a38, side: THREE.DoubleSide, roughness: 0.7 });
-    sway(leafM, 0.35, 'bambooLeaf');
     const perSpot = 9;
     const leaves = new THREE.InstancedMesh(leafG, leafM, leafSpots.length * perSpot);
     let li = 0;
