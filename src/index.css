@@ -665,3 +665,18 @@ html, body, #root {
     transition-delay: 0ms;
   }
 }
+
+/* Stage card: fades to black, holds while the stage is swapped behind it, then lifts */
+.kg-stage-card {
+  background: #07060a;
+  animation: kg-stage-card 1.9s ease-in-out forwards;
+}
+@keyframes kg-stage-card {
+  0% { opacity: 0; }
+  18% { opacity: 1; }
+  68% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kg-stage-card { animation-duration: 1.4s; }
+}

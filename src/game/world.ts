@@ -11,6 +11,7 @@ import { detectQuality } from './postfx';
 import { PropSystem, Seg } from './props';
 import { THEMES, Theme, ThemeUniforms, addThemeTint, blendTheme, cloneTheme, themeUniforms } from './theme';
 import { PlazaUniforms, addPlazaFx, plazaUniforms } from './plaza';
+import { STAGES, StageCtx, StageDef } from './stages';
 
 export type Solid = { x: number; z: number; r: number; h: number };
 
@@ -44,11 +45,12 @@ function worldMaterials(): WorldMats {
   applySurface(W.dark, 'wood', { mode: 'tri', scale: 0.45, normal: 0.4, albedo: 0.2 });
   return W;
 }
-type WorldMats = Record<'stone' | 'stoneDark' | 'rock' | 'wood' | 'woodDark' | 'roof' | 'torii' | 'trunk' | 'dark', THREE.MeshStandardMaterial>;
+export type WorldMats = Record<'stone' | 'stoneDark' | 'rock' | 'wood' | 'woodDark' | 'roof' | 'torii' | 'trunk' | 'dark', THREE.MeshStandardMaterial>;
 let WM: WorldMats;
+export const worldMats = () => WM;
 
 // Shared wind clock for every swaying material (grass, foliage, banners)
-const WIND_TIME = { value: 0 };
+export const WIND_TIME = { value: 0 };
 const IDENT = new THREE.Matrix4();
 const TMP_C = new THREE.Color();
 
@@ -119,7 +121,7 @@ function chainSegs(curve: THREE.Curve<THREE.Vector3>, radius: (t: number) => num
 // ---------------------------------------------------------------------------
 // Procedural textures
 // ---------------------------------------------------------------------------
-function canvasTex(size: number, draw: (g: CanvasRenderingContext2D, s: number) => void, repeat = 1) {
+export function canvasTex(size: number, draw: (g: CanvasRenderingContext2D, s: number) => void, repeat = 1) {
   const c = document.createElement('canvas');
   c.width = c.height = size;
   const g = c.getContext('2d')!;
@@ -208,7 +210,7 @@ function roundSpriteTexture() {
 
 // Everything static is collected per material and merged into one mesh each, which
 // turns hundreds of world draw calls into a couple dozen.
-class Batcher {
+export class Batcher {
   private buckets = new Map<THREE.Material, THREE.BufferGeometry[]>();
   private shadowless = new Set<THREE.Material>();
 
@@ -257,13 +259,13 @@ const Q = new THREE.Quaternion();
 const E = new THREE.Euler();
 const V = new THREE.Vector3();
 const S = new THREE.Vector3();
-function mtx(x: number, y: number, z: number, rx = 0, ry = 0, rz = 0, sx = 1, sy = 1, sz = 1) {
+export function mtx(x: number, y: number, z: number, rx = 0, ry = 0, rz = 0, sx = 1, sy = 1, sz = 1) {
   return M4.compose(V.set(x, y, z), Q.setFromEuler(E.set(rx, ry, rz)), S.set(sx, sy, sz)).clone();
 }
 
 // Japanese hip roof with sagging slopes and upturned corners. Base rectangle w×d at
 // height 0, ridge of half-length `ridge` along X at height h.
-function curvedRoof(w: number, d: number, h: number, ridge: number, lift: number) {
+export function curvedRoof(w: number, d: number, h: number, ridge: number, lift: number) {
   const segU = 12;
   const segV = 8;
   const pos: number[] = [];
@@ -316,7 +318,7 @@ function curvedRoof(w: number, d: number, h: number, ridge: number, lift: number
 }
 
 // Box bent upward at both ends (torii kasagi / shimaki beams)
-function curvedBeam(len: number, hgt: number, dep: number, rise: number) {
+export function curvedBeam(len: number, hgt: number, dep: number, rise: number) {
   const g = new THREE.BoxGeometry(len, hgt, dep, 24, 1, 1);
   const p = g.attributes.position as THREE.BufferAttribute;
   for (let i = 0; i < p.count; i++) {
@@ -511,6 +513,17 @@ interface Mote {
   cy: number;
 }
 
+type Flame = { outer: THREE.Mesh; inner: THREE.Mesh; ph: number; light: THREE.PointLight };
+interface StageSet {
+  group: THREE.Group;
+  solids: Solid[];
+  embers: THREE.Vector3[];
+  flames: Flame[];
+  lights: THREE.PointLight[];
+  h0: number;
+  h1: number;
+}
+
 export class World {
   solids: Solid[] = [];
   /** reactive scenery: blades, fists and blasts make props answer (see props.ts) */
@@ -528,7 +541,18 @@ export class World {
   private moteData: Mote[] = [];
   private motePos: Float32Array;
   private moteCol: Float32Array;
-  private flames: { outer: THREE.Mesh; inner: THREE.Mesh; ph: number; light: THREE.PointLight }[] = [];
+  private flames: Flame[] = [];
+  // Stages (stages.ts): each is a set of scenery under a group of its own, with its solids, lamps and
+  // cuttable props; only one is shown. Every set has the same number of point lights, so a change of
+  // stage never changes the light count (which would recompile every lit shader).
+  stageIndex = 0;
+  private sets: StageSet[] = [];
+  private groundMesh!: THREE.Mesh;
+  private commonRoot!: THREE.Group;
+  private pathMat!: THREE.MeshStandardMaterial;
+  private stageFog = 1;
+  private profile: QualityProfile | null = null;
+  private kit: Record<string, any> = {};
   private lanternLights: THREE.PointLight[] = [];
   private emberSources: THREE.Vector3[] = [];
   // soft additive halos around every lamp: p position, size in metres, k strength, on (a broken lantern goes dark)
@@ -612,28 +636,46 @@ export class World {
     this.root.add(mFar, mNear);
     this.mountains.push({ mesh: mFar, far: true }, { mesh: mNear, far: false });
 
-    this.props = new PropSystem(this.root);
-    const batch = new Batcher();
-
+    const common = this.root;
+    this.commonRoot = common;
+    this.props = new PropSystem(common);
     this.buildGround();
+    this.buildDistantForest();
+
+    // the temple: stage 0
+    this.beginSet(0);
+    const batch = new Batcher();
+    this.buildPlaza();
     this.buildTemple(batch);
     this.buildTorii(batch);
     this.buildTrees(batch);
     this.buildLanterns();
     this.buildRocks(batch);
-    this.buildDistantForest();
     this.buildBanners(batch);
     this.buildTorches(batch);
-    this.buildHalos();
     batch.build(this.root);
-
     this.garden = new Garden(this.root, atm, WIND_TIME, (x, z, pad) => this.isFree(x, z, pad), this.themeU);
-    this.updateEnv();
     this.solids.push(...this.garden.solids);
     this.registerBamboo();
     this.shojiMat = this.root.userData.shoji as THREE.MeshBasicMaterial;
-    this.buildMist();
     this.grass = this.buildGrass();
+    this.endSet();
+    // the other stages
+    for (let i = 1; i < STAGES.length; i++) {
+      this.beginSet(i);
+      const b = new Batcher();
+      STAGES[i].build?.(this.stageCtx(b));
+      b.build(this.root);
+      this.endSet();
+    }
+    this.root = common;
+    this.solids = [];
+    this.stageIndex = -1;
+    this.setStage(0);
+
+    this.buildHalos();
+    this.updateEnv();
+    this.buildMist();
     this.petals = this.buildPetals();
     const motes = this.buildMotes();
     this.motes = motes.points;
@@ -641,10 +683,87 @@ export class World {
     this.moteCol = motes.col;
   }
 
+  private beginSet(i: number) {
+    const group = new THREE.Group();
+    this.commonRoot.add(group);
+    this.root = group;
+    this.stageIndex = i;
+    this.solids = [];
+    this.emberSources = [];
+    this.flames = [];
+    this.lanternLights = [];
+    this.props.useSet(i);
+    this.sets[i] = { group, solids: this.solids, embers: this.emberSources, flames: this.flames, lights: this.lanternLights, h0: this.haloSpots.length, h1: 0 };
+  }
+
+  private endSet() {
+    const s = this.sets[this.stageIndex];
+    s.h1 = this.haloSpots.length;
+    if (!s.embers.length) s.embers.push(new THREE.Vector3(0, 1.5, 0));
+  }
+
+  private stageCtx(b: Batcher): StageCtx {
+    return {
+      b,
+      group: this.root,
+      M: WM,
+      plazaMat: this.plazaMat,
+      pathMat: this.pathMat,
+      groundMat: this.groundMat,
+      props: this.props,
+      solid: (x, z, r, h) => this.addSolid(x, z, r, h),
+      lantern: (x, z, lit) => this.addLantern(x, z, lit),
+      torch: (x, z) => this.addTorch(b, x, z),
+      banner: (x, z, ry) => this.addBanner(x, z, ry),
+      rock: (x, z, sc, seed) => this.addRock(b, x, z, sc, seed),
+      halo: (x, y, z, size, k) => void this.haloSpots.push({ p: new THREE.Vector3(x, y, z), size, k, on: true }),
+      ember: (x, y, z) => void this.emberSources.push(new THREE.Vector3(x, y, z))
+    };
+  }
+
+  get stage(): StageDef {
+    return STAGES[Math.max(0, this.stageIndex)];
+  }
+
+  /** Show another stage: its scenery, solids, lamps and props take the place of the current one's. */
+  setStage(i: number) {
+    if (i === this.stageIndex) return;
+    this.props.reset();
+    this.props.useSet(i);
+    this.stageIndex = i;
+    this.sets.forEach((s, k) => (s.group.visible = k === i));
+    const s = this.sets[i];
+    this.solids.length = 0;
+    this.solids.push(...s.solids);
+    this.emberSources = s.embers;
+    this.flames = s.flames;
+    this.lanternLights = s.lights;
+    this.groundMesh.visible = STAGES[i].ground !== false;
+    this.stageFog = STAGES[i].fog ?? 1;
+    for (const m of this.moteData) m.life = m.max; // fireflies and embers leave with the old lamps
+  }
+
+  /** Inside the stage's playable ground, `pad` away from its edge */
+  inside(x: number, z: number, pad: number) {
+    return this.stage.inside(x, z, pad);
+  }
+
+  /** Keep a body of radius r on the stage's ground */
+  confine(pos: { x: number; z: number }, r: number) {
+    this.stage.confine(pos, r);
+  }
+
+  /** Keep the camera out of the stage's walls */
+  confineCam(pos: { x: number; z: number }) {
+    this.stage.cam?.(pos);
+  }
+
   // open ground: off the temple podium, the pond/grove and every solid prop
   isFree(x: number, z: number, pad: number) {
-    if (z < -21.5 && Math.abs(x) < 10) return false;
-    if (Garden.blocked(x, z)) return false;
+    if (this.stageIndex === 0) {
+      if (z < -21.5 && Math.abs(x) < 10) return false;
+      if (Garden.blocked(x, z)) return false;
+    } else if (!this.stage.inside(x, z, pad)) return false;
     return !this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r + pad);
   }
 
@@ -677,6 +796,10 @@ export class World {
     const ground = new THREE.Mesh(new THREE.CircleGeometry(170, 64).rotateX(-Math.PI / 2), groundMat);
     ground.receiveShadow = true;
     this.root.add(ground);
+    this.groundMesh = ground;
+  }
+
+  private buildPlaza() {
 
     const plazaMat = new THREE.MeshStandardMaterial({ roughness: 0.8, color: new THREE.Color(0.12, 0.12, 0.125) });
     applySurface(plazaMat, 'cobble', { mode: 'top', scale: 0.6, normal: 1.1, breakup: true });
@@ -696,6 +819,7 @@ export class World {
 
     const pathMat = new THREE.MeshStandardMaterial({ roughness: 0.85, color: new THREE.Color(0.16, 0.16, 0.155) });
     applySurface(pathMat, 'flag', { mode: 'tri', scale: 0.4, normal: 1.0 });
+    this.pathMat = pathMat;
     const path = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.06, 11), pathMat);
     path.position.set(0, 0.03, -17.8);
     path.receiveShadow = true;
@@ -951,6 +1075,11 @@ export class World {
     ];
     // warm light pools around the plaza lanterns (only lit on higher quality)
     const lit = new Set(['-9,0', '9,0', '-4,12', '4,12']);
+    for (const [lx, lz] of pts) this.addLantern(lx, lz, lit.has(`${lx},${lz}`));
+  }
+
+  private lanternKit() {
+    if (this.kit.lantern) return this.kit.lantern as { baseG: THREE.BufferGeometry; pillarG: THREE.BufferGeometry; boxG: THREE.BufferGeometry; stoneHeadG: THREE.BufferGeometry; framesG: THREE.BufferGeometry };
     const baseG = new THREE.CylinderGeometry(0.42, 0.5, 0.3, 16);
     const pillarG = new THREE.CylinderGeometry(0.16, 0.2, 0.85, 16);
     const shelfG = new THREE.CylinderGeometry(0.48, 0.4, 0.16, 6);
@@ -966,6 +1095,12 @@ export class World {
     };
     const stoneHeadG = merge([[shelfG, mtx(0, 1.22, 0)], [roofG, mtx(0, 1.94, 0, 0, Math.PI / 6, 0)], [jewelG, mtx(0, 2.2, 0)]]);
     const framesG = merge([[-1, -1], [1, -1], [-1, 1], [1, 1]].map(([fx, fz]): [THREE.BufferGeometry, THREE.Matrix4] => [frameG, mtx(fx * 0.24, 1.52, fz * 0.24)]));
+    return (this.kit.lantern = { baseG, pillarG, boxG, stoneHeadG, framesG });
+  }
+
+  /** A stone lantern (tōrō) the scenery system can shatter; `lit` ones carry a point light */
+  private addLantern(lx: number, lz: number, lit: boolean) {
+    const { baseG, pillarG, boxG, stoneHeadG, framesG } = this.lanternKit();
     const mk = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number, shadow = true) => {
       const m = new THREE.Mesh(geo, mat);
       m.position.set(x, y, z);
@@ -974,7 +1109,7 @@ export class World {
       this.root.add(m);
       return m;
     };
-    for (const [lx, lz] of pts) {
+    {
       mk(baseG, WM.stone, lx, 0.15, lz);
       const pillar = mk(pillarG, WM.stone, lx, 0.72, lz);
       const head = [mk(stoneHeadG, WM.stone, lx, 0, lz), mk(framesG, WM.stoneDark, lx, 0, lz), mk(boxG, MAT.glow, lx, 1.52, lz, false)];
@@ -984,7 +1119,7 @@ export class World {
       const halo = { p: new THREE.Vector3(lx, 1.55, lz), size: 3.4, k: 1, on: true };
       this.haloSpots.push(halo);
       let light: THREE.PointLight | undefined;
-      if (lit.has(`${lx},${lz}`)) {
+      if (lit) {
         light = new THREE.PointLight(0xff9a48, 5, 10, 1.6);
         light.position.set(lx, 1.6, lz);
         this.root.add(light);
@@ -1016,12 +1151,14 @@ export class World {
       [-16, -2, 1.3], [16, -2, 1.2],
       [-5.5, -23.5, 0.95], [5.5, -23.8, 0.9]
     ];
-    pts.forEach(([rx, rz, s], i) => {
-      b.add(rockGeometry(i * 7 + 3, 3), WM.rock, mtx(rx, s * 0.22, rz, 0, rand(0, TAU), 0, s * 1.3, s * 0.85, s * 1.1));
-      b.add(rockGeometry(i * 7 + 5, 2, 0.28), WM.rock, mtx(rx + s * 1.15, s * 0.1, rz + s * 0.45, 0, rand(0, TAU), 0, s * 0.5, s * 0.4, s * 0.45));
-      this.addSolid(rx, rz, s * 0.95, s * 1.5);
-      this.props.addRock(rx, rz, s);
-    });
+    pts.forEach(([rx, rz, s], i) => this.addRock(b, rx, rz, s, i));
+  }
+
+  private addRock(b: Batcher, rx: number, rz: number, s: number, i: number) {
+    b.add(rockGeometry(i * 7 + 3, 3), WM.rock, mtx(rx, s * 0.22, rz, 0, rand(0, TAU), 0, s * 1.3, s * 0.85, s * 1.1));
+    b.add(rockGeometry(i * 7 + 5, 2, 0.28), WM.rock, mtx(rx + s * 1.15, s * 0.1, rz + s * 0.45, 0, rand(0, TAU), 0, s * 0.5, s * 0.4, s * 0.45));
+    this.addSolid(rx, rz, s * 0.95, s * 1.5);
+    this.props.addRock(rx, rz, s);
   }
 
   // Dark pine silhouettes between the arena and the mountains for depth: three bands (nearer ones
@@ -1098,6 +1235,11 @@ export class World {
       [-15, 8, 0.15], [15, 8, -0.15],
       [-7, 22, 0.05], [7, 22, -0.05]
     ];
+    for (const [bx, bz, ry] of pts) this.addBanner(bx, bz, ry);
+  }
+
+  private bannerKit() {
+    if (this.kit.banner) return this.kit.banner as { cloth: THREE.Material; clothG: THREE.BufferGeometry; poleG: THREE.BufferGeometry; barG: THREE.BufferGeometry };
     const cloth = new THREE.MeshStandardMaterial({ map: bannerTexture(), roughness: 0.85, side: THREE.DoubleSide });
     // pinned at the pole (uv.x = 0), rippling more toward the free edge
     cloth.onBeforeCompile = (shader) => {
@@ -1117,7 +1259,13 @@ export class World {
     const clothG = new THREE.PlaneGeometry(1.0, 3.4, 8, 14).translate(0.5, 0, 0);
     const poleG = new THREE.CylinderGeometry(0.06, 0.08, 5.6, 8);
     const barG = new THREE.CylinderGeometry(0.04, 0.04, 1.15, 6).rotateZ(Math.PI / 2);
-    for (const [bx, bz, ry] of pts) {
+    return (this.kit.banner = { cloth, clothG, poleG, barG });
+  }
+
+  /** A war banner on a pole that a blade can cut down */
+  private addBanner(bx: number, bz: number, ry: number) {
+    const { cloth, clothG, poleG, barG } = this.bannerKit();
+    {
       // pole and cross bar are separate meshes: a cut pole drops its top, bar and cloth together
       const pole = new THREE.Mesh(poleG, WM.woodDark);
       pole.position.set(bx, 2.8, bz);
@@ -1145,13 +1293,24 @@ export class World {
       [-5.8, -23], [5.8, -23],
       [-2.2, 14.2], [2.2, 14.2]
     ];
+    for (const [tx, tz] of pts) this.addTorch(b, tx, tz);
+  }
+
+  private torchKit() {
+    if (this.kit.torch) return this.kit.torch as { legG: THREE.BufferGeometry; bowlG: THREE.BufferGeometry; outerM: THREE.Material; innerM: THREE.Material; outerG: THREE.BufferGeometry; innerG: THREE.BufferGeometry };
     const legG = new THREE.CylinderGeometry(0.04, 0.05, 2.3, 6);
     const bowlG = new THREE.CylinderGeometry(0.36, 0.2, 0.26, 10);
     const outerM = new THREE.MeshBasicMaterial({ color: new THREE.Color(0xff6a1a).multiplyScalar(3), transparent: true, opacity: 0.85, depthWrite: false, fog: false });
     const innerM = new THREE.MeshBasicMaterial({ color: new THREE.Color(0xffd070).multiplyScalar(4), transparent: true, opacity: 0.9, depthWrite: false, fog: false });
     const outerG = new THREE.ConeGeometry(0.26, 0.7, 10).translate(0, 0.35, 0);
     const innerG = new THREE.ConeGeometry(0.13, 0.42, 8).translate(0, 0.21, 0);
-    for (const [tx, tz] of pts) {
+    return (this.kit.torch = { legG, bowlG, outerM, innerM, outerG, innerG });
+  }
+
+  /** A fire bowl on three legs, with its own point light */
+  private addTorch(b: Batcher, tx: number, tz: number) {
+    const { legG, bowlG, outerM, innerM, outerG, innerG } = this.torchKit();
+    {
       const g = new THREE.Group();
       g.position.set(tx, 0, tz);
       for (let i = 0; i < 3; i++) {
@@ -1532,8 +1691,10 @@ export class World {
     this.mist.forEach((m, i) => (m.visible = i < p.mistLayers));
     this.petals.count = Math.floor(this.petalMax * p.ambientParticles);
     const lights = p.composer ? (p.shadowMap >= 2048 ? 4 : 2) : 0;
-    this.lanternLights.forEach((l, i) => (l.visible = i < lights));
-    this.flames.forEach((f) => (f.light.visible = p.shadowMap >= 2048));
+    for (const s of this.sets) {
+      s.lights.forEach((l, i) => (l.visible = i < lights));
+      s.flames.forEach((f) => (f.light.visible = p.shadowMap >= 2048));
+    }
     this.sun.shadow.mapSize.set(p.shadowMap, p.shadowMap);
   }
 
@@ -1598,15 +1759,12 @@ export class World {
     }
     this.props.update(dt);
     this.fogScaleCur += (this.fogScale - this.fogScaleCur) * Math.min(1, dt * 1.2);
-    if (Math.abs(this.fogScaleCur - 1) > 0.002 || this.fogScale !== 1) {
+    {
+      // the stage's own air (a bamboo grove closes in, a lake opens up) times the game's fog wave
       const fog = this.scene.fog as THREE.Fog;
-      fog.near = this.atm.fogNear * this.fogScaleCur;
-      fog.far = this.atm.fogFar * this.fogScaleCur;
-    } else if (this.fogScaleCur !== 1) {
-      this.fogScaleCur = 1;
-      const fog = this.scene.fog as THREE.Fog;
-      fog.near = this.atm.fogNear;
-      fog.far = this.atm.fogFar;
+      const k = this.fogScaleCur * this.stageFog;
+      fog.near = this.atm.fogNear * k;
+      fog.far = this.atm.fogFar * Math.max(k, 0.3);
     }
     const fall = this.theme.fall;
     this.petals.count = Math.floor(this.petalMax * Math.min(1, this.petalQuality * Math.max(this.atm.petals * fall.mul, fall.min)));
@@ -1618,7 +1776,8 @@ export class World {
       m.position.x = focus.x;
       m.position.z = focus.z;
     }
-    this.garden.update(dt, time, this.atm);
+    if (this.stageIndex === 0) this.garden.update(dt, time, this.atm);
+    this.stage.update?.(time, this.atm, focus);
     this.sky.position.copy(camPos);
     (this.sky.material as THREE.ShaderMaterial).uniforms.uTime.value = time;
 
@@ -1654,7 +1813,7 @@ export class World {
       const h = this.haloSpots[i];
       // gone as the camera comes close, so a lamp never veils the picture from a few steps away
       const dist = h.p.distanceTo(camPos);
-      halo[i] = h.on ? haloK * h.k * Math.min(1, Math.max(0, (dist - 1.5) / 3)) : 0;
+      halo[i] = h.on && i >= this.sets[this.stageIndex].h0 && i < this.sets[this.stageIndex].h1 ? haloK * h.k * Math.min(1, Math.max(0, (dist - 1.5) / 3)) : 0;
     }
     this.haloAlpha.needsUpdate = true;
     const sj = this.atm.shoji * glowK;

@@ -27,13 +27,14 @@ import { newPose, ougiById, pickOugi, resolveOugi, shotPose, type OugiDef, type 
 import { World } from './world';
 import { ATMOSPHERES, AtmosMode, atmosphereForWave } from './atmosphere';
 import { THEMES, ThemeMode, themeForWave } from './theme';
+import { STAGES, stageForWave } from './stages';
 import { Afterimages, BladeTrail, DustPool, ImpactPool, InkDecals, StreakPool, softDotTexture, makeBladeGlow, makeLightning } from './vfx';
 import { PostFX, NINJA_LOOK, Quality, QualitySetting, QualityProfile, qualityProfile, detectQuality } from './postfx';
 import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
 import { createClipRig, Grip, OneShot, PlayOptions } from './clipRig';
 import { loadCharacter, loadWeapons, loadLazyWeapons, weaponsReady, preloadModels, characterIfReady, CharacterTemplate, LAZY_CHARACTERS, type CharacterModel } from './models';
-import { COMBOS, ENEMY_STRIKES, BOSS_STRIKES, FINISHERS, FINISHER_CLIP_LEN, HOOK, Finisher, ClipMove } from './moves';
+import { COMBOS, ENEMY_STRIKES, BOSS_STRIKES, FINISHERS, FINISHER_CLIP_LEN, HOOK, Finisher, ClipMove, DASH_ATTACK, DASH_MOVES, PLUNGE } from './moves';
 import { BladeSeg, makeSeg, segSegDist, sweepVsCapsule, BLADE_SEG, MAGNET_REACH, HURT_BOTTOM, HURT_TOP } from './combat';
 import { DebugDraw } from './debugdraw';
 import { animateCharacter, animateDeath } from './animation';
@@ -310,11 +311,15 @@ export interface GameEngineCallbacks {
   onCallout?: (c: Callout) => void;
   // a hook just landed: the slot of the weapon that threw it (the HUD lights the other one), or null once the window closes
   onFollowUp?: (weaponIdx: number | null) => void;
+  /** the target lock went on or off */
+  onLock?: (on: boolean) => void;
   onDeathblowReady?: (ready: boolean) => void;
   onHealsChange?: (heals: number) => void;
   onCardOffer?: (offer: CardOffer[] | null) => void;
   onHonorChange?: (honor: number) => void;
   onBossChange?: (boss: { hp: number; max: number; fury: boolean; name: string } | null) => void;
+  /** a new stage opens: the card shown over the fade */
+  onStage?: (s: { id: string; name: string; glyph: string; desc: string; n: number } | null) => void;
   onWaveMod?: (mod: { id: string; name: string; glyph: string; desc: string } | null) => void;
   // shots being drawn or in flight toward the player from outside the view: angle from the camera's forward (rad, + = right)
   onThreats?: (threats: { a: number; u: number }[]) => void;
@@ -376,6 +381,8 @@ interface PlayerAct {
   windows: HitWindow[];
   target?: EnemyInstance;
   magnet?: { reach: number; until: number; k: number };
+  // golpe aéreo: the blow lands when the feet do
+  plunge?: { w: WeaponDef; done: boolean };
 }
 
 interface HitWindow {
@@ -390,6 +397,7 @@ interface HitWindow {
   wide: number; // extra contact radius (a broad shove)
   ring: number; // whirl: anyone this close is caught when the window is half through
   ringDone: boolean;
+  pierce?: boolean; // investida: no guard, parry or sidestep answers it
 }
 
 // Where a blow really landed: the contact point and the direction the blade was travelling
@@ -554,6 +562,11 @@ export class GameEngine {
   private labels: { sprite: THREE.Sprite; t: number; life: number; vy: number; base: number }[] = [];
   private reticle!: THREE.Sprite;
   private reticleTarget = new THREE.Vector3();
+  // target lock: the camera frames it, attacks and the guard turn to it
+  private lockTarget: EnemyInstance | null = null;
+  private lockMark!: THREE.Sprite;
+  private lastDashT = -9; // when the last dodge began
+  private counterUntil = -9; // a perfect dodge keeps a counter open until then
 
   public input = {
     jx: 0,
@@ -973,6 +986,8 @@ export class GameEngine {
     const pin = parseInt(new URLSearchParams(location.search).get('theme') ?? '', 10);
     this.themeForce = Number.isFinite(pin) ? Math.min(THEMES.length - 1, Math.max(0, pin)) : null;
     this.world.setTheme(this.themeForce ?? 0, true);
+    const stg = parseInt(new URLSearchParams(location.search).get('stage') ?? '', 10);
+    this.stageForce = Number.isFinite(stg) ? Math.min(STAGES.length - 1, Math.max(0, stg)) : null;
     // the new fighters load in the background while the first waves are fought
     LAZY_CHARACTERS.forEach((id) => void loadCharacter(id).catch(() => undefined));
     void loadLazyWeapons();
@@ -988,11 +1003,15 @@ export class GameEngine {
       const go = () => {
         if (this.state !== 'play' || this.wave !== 0) return;
         this.wave = Math.min(40, from) - 1;
+        this.enterStage(this.stageFor(this.wave + 1));
         this.nextWave();
       };
       Promise.race([Promise.allSettled([...LAZY_CHARACTERS.map(loadCharacter), loadLazyWeapons()]), new Promise((r) => setTimeout(r, 8000))]).then(go);
     } else if (this.mode === 'conquest') this.setupConquest();
-    else this.nextWave();
+    else {
+      this.enterStage(this.stageFor(1));
+      this.nextWave();
+    }
     if (!this.isRunning) {
       this.isRunning = true;
       this.clock.start();
@@ -1005,7 +1024,93 @@ export class GameEngine {
     this.state = 'menu';
   }
 
+  // ---------------------------------------------------------------- stages
+  private stageForce: number | null = null;
+  private stageSwap: { t: number; to: number; done: boolean } | null = null;
+
+  /** The stage a wave is fought in (the temple in Conquista, whose posts are laid out on it) */
+  private stageFor(wave: number) {
+    if (this.mode === 'conquest') return 0;
+    return this.stageForce ?? stageForWave(wave, this.themeMode);
+  }
+
+  // The wave is over: on to the next one, through a fade if it is fought somewhere else
+  private advance() {
+    const to = this.stageFor(this.wave + 1);
+    if (to === this.world.stageIndex) {
+      this.nextWave();
+      return;
+    }
+    this.stageSwap = { t: 0, to, done: false };
+    const st = STAGES[to];
+    this.callbacks.onStage?.({ id: st.id, name: st.name, glyph: st.glyph, desc: st.desc, n: to + 1 });
+  }
+
+  // The swap happens while the card covers the screen (the stage's shaders compile on its first frame)
+  private stepStageSwap(dt: number) {
+    const s = this.stageSwap;
+    if (!s) return;
+    s.t += dt;
+    if (!s.done && s.t >= 0.45) {
+      s.done = true;
+      this.enterStage(s.to);
+      this.nextWave();
+    }
+    if (s.t >= 1.5) this.stageSwap = null;
+  }
+
+  /** Move the fight to a stage: nothing of the old ground comes along, and the player stands at its way in. */
+  private enterStage(i: number) {
+    const P = this.player;
+    if (i !== this.world.stageIndex) {
+      this.enemies.forEach((e) => this.removeEnemy(e));
+      this.enemies = [];
+      while (this.projectiles.length) this.killProj(this.projectiles.length - 1);
+      // what was left on the ground is picked up on the way out
+      for (const p of this.pickups) {
+        p.x = STAGES[i].start[0] + rand(-1.2, 1.2);
+        p.z = STAGES[i].start[1] + rand(-1.2, 1.2);
+        p.m.position.set(p.x, p.m.position.y, p.z);
+      }
+      for (const sc of this.scrolls) {
+        sc.x = STAGES[i].start[0] + rand(-0.8, 0.8);
+        sc.z = STAGES[i].start[1] - 1.6;
+        sc.g.position.set(sc.x, sc.g.position.y, sc.z);
+      }
+      this.rings.forEach((r) => {
+        this.scene.remove(r.m);
+        (r.m.material as THREE.Material).dispose();
+      });
+      this.rings = [];
+      this.sparks.clear();
+      this.blood.clear();
+      this.decals.clear();
+      this.dust.clear();
+      this.ghosts.clear();
+      for (const sh of this.shocks) this.disposeShock(sh);
+      this.shocks = [];
+      for (const b of this.bolts) this.disposeBolt(b);
+      this.bolts = [];
+      this.endClash();
+      this.hook = null;
+      this.world.setStage(i);
+      const a = this.world.stage.atmos;
+      if (i > 0 && a !== undefined && a !== this.world.atmIndex) this.world.setAtmosphere(a, true);
+    }
+    const st = this.world.stage;
+    P.pos.set(st.start[0], 0, st.start[1]);
+    P.vel.set(0, 0, 0);
+    P.kb.set(0, 0, 0);
+    P.yaw = Math.PI;
+    this.camYaw = 0;
+  }
+
   public reset() {
+    this.stageSwap = null;
+    this.callbacks.onStage?.(null);
+    this.setLock(null);
+    this.lastDashT = -9;
+    this.counterUntil = -9;
     this.enemies.forEach((e) => this.removeEnemy(e));
     this.enemies = [];
     while (this.projectiles.length) this.killProj(this.projectiles.length - 1);
@@ -1024,6 +1129,7 @@ export class GameEngine {
     this.dust.clear();
     this.ghosts.clear();
 
+    if (this.world.stageIndex !== 0) this.world.setStage(0);
     this.world.props.reset();
     this.endClash();
     this.clearConquest();
@@ -1290,7 +1396,8 @@ export class GameEngine {
 
     this.waveStat = { t0: this.time, enemies: list.filter((it) => !isFodder(it)).length, queued: this.waveQueue.filter((it) => !isFodder(it)).length, finishers: 0, deflects: 0 };
     let sub = boss ? BOSS_HINT[bossForm ?? 'oni'] : mod ? mod.desc : goalDef ? (duelist ? `Duelo contra ${FIGHTER_NAME[duelist]}` : goalDef.desc) : `${nS} samurais${nA ? ` e ${nA} arqueiros` : ''}`;
-    const atmIdx = atmosphereForWave(this.wave, this.atmosMode, this.world.atmIndex);
+    // a stage other than the temple keeps the air that suits it; the temple cycles as before
+    const atmIdx = (this.world.stageIndex > 0 ? this.world.stage.atmos : undefined) ?? atmosphereForWave(this.wave, this.atmosMode, this.world.atmIndex);
     if (atmIdx !== this.world.atmIndex) {
       this.world.setAtmosphere(atmIdx);
       sub += ` · ${ATMOSPHERES[atmIdx].name}`;
@@ -1356,7 +1463,7 @@ export class GameEngine {
       const r = rand(15, 23);
       const x = P.x + Math.sin(a) * r;
       const z = P.z + Math.cos(a) * r;
-      if (Math.hypot(x, z) > 35) continue;
+      if (!this.world.inside(x, z, Math.min(5, this.world.stage.radius * 0.125))) continue;
       if (this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r + 0.8)) continue;
       return { x, z };
     }
@@ -1796,7 +1903,7 @@ export class GameEngine {
       const r = type === 'boss' ? rand(1.5, 3.5) : rand(2.5, 5.5);
       const x = o.x + Math.sin(a) * r;
       const z = o.z + Math.cos(a) * r;
-      if (Math.hypot(x, z) > R_ARENA - 2) continue;
+      if (!this.world.inside(x, z, 2)) continue;
       if (this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r + (type === 'boss' ? 1.5 : 0.8))) continue;
       return this.spawnEnemy(type, x, z, variant);
     }
@@ -1855,12 +1962,18 @@ export class GameEngine {
 
   // One spot on the ring around the arena (never on top of the player or a solid prop)
   private spawnRing(type: 'samurai' | 'archer' | 'boss', near: boolean, variant?: EnemyVariant): EnemyInstance | null {
-    for (let k = 0; k < 30; k++) {
+    // the ring is the stage's: a small one brings them in closer, and never off its ground
+    const R = this.world.stage.radius;
+    const k = R / R_ARENA;
+    const away = Math.min(near ? 10 : 13, R * 0.45);
+    for (let n = 0; n < 60; n++) {
       const a = Math.random() * TAU;
-      const r = near ? rand(14, 22) : rand(20, 34);
+      // (past 30 tries anywhere on the ground will do, as long as it is not on top of the player)
+      const r = n >= 30 ? rand(0.2, 0.95) * R : (near ? rand(14, 22) : rand(20, 34)) * k;
       const x = Math.sin(a) * r;
       const z = Math.cos(a) * r;
-      if (Math.hypot(x - this.player.pos.x, z - this.player.pos.z) < (near ? 10 : 13)) continue;
+      if (!this.world.inside(x, z, 1)) continue;
+      if (Math.hypot(x - this.player.pos.x, z - this.player.pos.z) < (n >= 30 ? 6 : away)) continue;
       if (this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r + (type === 'boss' ? 1.5 : 0.8))) continue;
       return this.spawnEnemy(type, x, z, variant);
     }
@@ -2610,6 +2723,214 @@ export class GameEngine {
     this.reticle.renderOrder = 31;
     this.reticle.visible = false;
     this.scene.add(this.reticle);
+
+    // the lock's mark: four corners closing on the target
+    const lc = document.createElement('canvas');
+    lc.width = lc.height = 128;
+    const lx = lc.getContext('2d')!;
+    lx.strokeStyle = '#ff8a3c';
+    lx.lineWidth = 9;
+    lx.lineCap = 'round';
+    lx.shadowColor = 'rgba(0,0,0,0.85)';
+    lx.shadowBlur = 6;
+    for (const [sx, sy] of [[1, 1], [-1, 1], [-1, -1], [1, -1]]) {
+      lx.beginPath();
+      lx.moveTo(64 + sx * 50, 64 + sy * 22);
+      lx.lineTo(64 + sx * 50, 64 + sy * 50);
+      lx.lineTo(64 + sx * 22, 64 + sy * 50);
+      lx.stroke();
+    }
+    const lt = new THREE.CanvasTexture(lc);
+    lt.colorSpace = THREE.SRGBColorSpace;
+    this.lockMark = new THREE.Sprite(new THREE.SpriteMaterial({ map: lt, transparent: true, depthTest: false, depthWrite: false, fog: false, toneMapped: false, sizeAttenuation: false }));
+    this.lockMark.renderOrder = 31;
+    this.lockMark.visible = false;
+    this.scene.add(this.lockMark);
+  }
+
+  // ---------------------------------------------------------------- target lock
+  /** The lock button: on the foe the camera looks at, or off. */
+  public toggleLock() {
+    if (this.state !== 'play' || this.player.hp <= 0) return;
+    if (this.lockTarget) {
+      this.setLock(null);
+      return;
+    }
+    const t = this.pickLockTarget(24);
+    if (t) {
+      this.setLock(t);
+      sfx.swing();
+    } else this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.4, this.player.pos.z, 'Sem alvo', '#cfc6b4', 0.9);
+  }
+
+  private setLock(e: EnemyInstance | null) {
+    if (e === this.lockTarget) return;
+    const was = !!this.lockTarget;
+    this.lockTarget = e;
+    this.lockMarkT = 0;
+    if (!e) this.lockMark.visible = false;
+    if (was !== !!e) this.callbacks.onLock?.(!!e);
+  }
+  private lockMarkT = 0;
+
+  // the nearest foe to the middle of the camera's view (a little weight on distance too)
+  private pickLockTarget(maxD: number, not?: EnemyInstance): EnemyInstance | null {
+    const P = this.player.pos;
+    const fx = -Math.sin(this.camYaw);
+    const fz = -Math.cos(this.camYaw);
+    let best: EnemyInstance | null = null;
+    let bestScore = Infinity;
+    for (const e of this.enemies) {
+      if (e.dead || e.flee || e === not) continue;
+      const dx = e.pos.x - P.x;
+      const dz = e.pos.z - P.z;
+      const d = Math.hypot(dx, dz) || 0.001;
+      if (d > maxD) continue;
+      const off = Math.acos(clamp((fx * dx + fz * dz) / d, -1, 1));
+      const score = d + off * 7;
+      if (score < bestScore) {
+        bestScore = score;
+        best = e;
+      }
+    }
+    return best;
+  }
+
+  /** The locked foe, while it can still be fought */
+  private locked(): EnemyInstance | null {
+    const t = this.lockTarget;
+    return t && !t.dead && !t.flee ? t : null;
+  }
+
+  // The lock follows its target, passes to the next foe when it falls (or lets go if none is near)
+  private stepLock(dt: number) {
+    const t = this.lockTarget;
+    if (!t) return;
+    const P = this.player;
+    if (P.hp <= 0 || this.state !== 'play') {
+      this.setLock(null);
+      return;
+    }
+    if (t.dead || t.flee || !this.enemies.includes(t) || Math.hypot(t.pos.x - P.pos.x, t.pos.z - P.pos.z) > 30) {
+      this.setLock(this.pickLockTarget(15, t));
+      return;
+    }
+    this.lockMarkT = Math.min(1, this.lockMarkT + dt * 5);
+    this.lockMark.visible = !this.cine;
+    this.lockMark.position.set(t.pos.x, t.pos.y + t.h * 0.55 * this.sizeOf(t), t.pos.z);
+    const s = 2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2) * (0.085 - 0.03 * this.lockMarkT);
+    this.lockMark.scale.set(s, s, 1);
+    this.lockMark.material.rotation = (1 - this.lockMarkT) * 0.8;
+    this.lockMark.material.opacity = 0.55 + 0.45 * this.lockMarkT;
+  }
+
+  // ---------------------------------------------------------------- context moves (see moves.ts)
+  // The attack button out of a dodge or in the air. True when it became one of those moves.
+  private contextAttack(w: WeaponDef): boolean {
+    const P = this.player;
+    if (!P.rig.clip || (w.kind !== 'melee' && w.kind !== 'karate')) return false;
+    if (!P.grounded && P.pos.y > PLUNGE.minY) return this.startPlunge(w);
+    const m = DASH_MOVES[w.id];
+    if (m && (P.dash > 0 || this.time - this.lastDashT < 0.2 + DASH_ATTACK.window || this.time < this.counterUntil)) return this.startDashAttack(w, m);
+    return false;
+  }
+
+  private faceFoe(range: number) {
+    const P = this.player;
+    const t = this.locked();
+    if (t && Math.hypot(t.pos.x - P.pos.x, t.pos.z - P.pos.z) - t.r < range + 3) P.yaw = Math.atan2(t.pos.x - P.pos.x, t.pos.z - P.pos.z);
+    else this.autoFaceNearestEnemyForAttack(range);
+  }
+
+  private startDashAttack(w: WeaponDef, m: ClipMove): boolean {
+    const P = this.player;
+    if (P.st < m.stamina * 0.5) return false;
+    this.lastDashT = -9;
+    const counter = this.time < this.counterUntil;
+    this.counterUntil = -9;
+    this.faceFoe(m.range + 2.5);
+    const fx = Math.sin(P.yaw);
+    const fz = Math.cos(P.yaw);
+    const act = this.startAct('attack', m.clip, { speed: (m.speed ?? 1) * TUNE.attackSpeed, from: m.from, fadeIn: 0.08, chain: m.chain, cancel: m.cancel, end: m.end, turnUntil: m.hit[0] }, m);
+    if (!act) return false;
+    P.st = Math.max(0, P.st - m.stamina);
+    this.callbacks.onStaminaChange(P.st, P.maxSt);
+    P.combo = 0;
+    P.comboW = this.activeWeaponIdx;
+    P.comboT = 0;
+    this.ptMult = w.pointMult || 1;
+    this.actQueued = false;
+    P.atkCd = Math.max(0, P.atkCd) + 0.05;
+    // what is left of the dodge carries the lunge at the foe; past it, a push of its own
+    if (P.dash > 0) P.dashDir.set(fx, 0, fz);
+    else P.kb.set(fx * 8, 0, fz * 8);
+    for (const [t0, t1] of m.win ?? m.hit.map((h): [number, number] => [h - 0.08, h + 0.08])) {
+      act.windows.push({ t0, t1, dmg: m.dmg * (counter ? DASH_ATTACK.counter : 1), kb: m.kb, heavy: true, weapon: w, hits: new Set(), began: false, wide: m.wide ?? 0, ring: 0, ringDone: false, pierce: true });
+    }
+    const target = this.locked() ?? this.pickAttackTarget(m.range + 1.5, false);
+    if (target && Math.hypot(target.pos.x - P.pos.x, target.pos.z - P.pos.z) - target.r < m.range + 3) {
+      this.comboTarget = target;
+      act.target = target;
+      act.magnet = { reach: m.reach ?? 1.3, until: m.hit[0], k: 1 };
+    }
+    this.ghosts.spawn(P.rig.root, GHOST_DASH);
+    if (counter) {
+      this.callout('CONTRA-ATAQUE!', 'ember', '返');
+      this.triggerSlowmo(0.3, 0.35);
+    } else this.spawnLabel(P.pos.x, P.pos.y + 2.4, P.pos.z, 'INVESTIDA!', '#ffb347', 1);
+    return true;
+  }
+
+  private startPlunge(w: WeaponDef): boolean {
+    const P = this.player;
+    if (this.act && this.act.kind !== 'draw' && this.act.shot.t < this.act.cancelAt) return false;
+    if (P.st < PLUNGE.stamina * 0.5) return false;
+    this.faceFoe(5);
+    const act = this.startAct('attack', PLUNGE.clip, { speed: PLUNGE.speed, from: PLUNGE.from, fadeIn: 0.08, chain: 99, cancel: 99, end: 2.15, turnUntil: 0 });
+    if (!act) return false;
+    act.plunge = { w, done: false };
+    P.st = Math.max(0, P.st - PLUNGE.stamina);
+    this.callbacks.onStaminaChange(P.st, P.maxSt);
+    P.combo = 0;
+    P.comboT = 0;
+    this.ptMult = w.pointMult || 1;
+    this.actQueued = false;
+    P.atkCd = Math.max(0, P.atkCd) + 0.05;
+    P.vy = Math.min(P.vy, PLUNGE.fall);
+    P.vel.multiplyScalar(0.35);
+    sfx.swing();
+    return true;
+  }
+
+  // The feet touch down: everyone around takes the blow
+  private plungeLand(a: PlayerAct) {
+    const P = this.player;
+    const pl = a.plunge!;
+    pl.done = true;
+    const base = (COMBOS[pl.w.id]?.[0]?.dmg ?? pl.w.dmg[0]) * PLUNGE.dmg;
+    const was = this.spHit;
+    this.spHit = true;
+    let any = false;
+    for (const e of this.enemies.slice()) {
+      if (e.dead) continue;
+      const dx = e.pos.x - P.pos.x;
+      const dz = e.pos.z - P.pos.z;
+      const d = Math.hypot(dx, dz) || 0.001;
+      if (d - e.r > PLUNGE.radius) continue;
+      any = true;
+      this.hitPt.set(e.pos.x, e.pos.y + 1.1 * this.sizeOf(e), e.pos.z);
+      this.hitEnemy(e, base * (d - e.r < 1.3 ? 1 : 0.7), dx / d, dz / d, PLUNGE.kb, true, { point: this.hitPt, dirX: dx / d, dirZ: dz / d });
+    }
+    this.spHit = was;
+    this.puff(P.pos.x, P.pos.z, 16, 3.4);
+    this.impacts.spawn(this.tmpV.set(P.pos.x, 0.25, P.pos.z), IMPACT_HEAVY, any ? 3.2 : 2.2, 0.3, 'heavy');
+    this.shake = Math.max(this.shake, any ? 0.4 : 0.22);
+    this.world.props.slam(P.pos.x, P.pos.z, 2.0);
+    sfx.heavy();
+    if (this.act === a) {
+      a.cancelAt = a.shot.t + PLUNGE.recover * PLUNGE.speed;
+      a.endAt = a.cancelAt + 0.35;
+    }
   }
 
   private updateReticle(dt: number) {
@@ -2737,7 +3058,10 @@ export class GameEngine {
     } else {
       this.player.dashDir.set(Math.sin(this.player.yaw), 0, Math.cos(this.player.yaw));
     }
-    this.player.yaw = Math.atan2(this.player.dashDir.x, this.player.dashDir.z);
+    this.lastDashT = this.time;
+    // locked on, the dodge is a sidestep: the body stays turned to the foe
+    const lk = this.locked();
+    this.player.yaw = lk ? Math.atan2(lk.pos.x - this.player.pos.x, lk.pos.z - this.player.pos.z) : Math.atan2(this.player.dashDir.x, this.player.dashDir.z);
     this.fovKick = Math.max(this.fovKick, 7);
     this.ghosts.spawn(this.player.rig.root, GHOST_DASH);
     this.ghostT = 0.06;
@@ -2966,6 +3290,7 @@ export class GameEngine {
       return;
     }
     const w = this.weapons[this.activeWeaponIdx];
+    if (this.contextAttack(w)) return;
     const combo = COMBOS[w.id];
     if (!combo) return;
     const chaining = !!a && a.kind === 'attack' && this.player.comboW === this.activeWeaponIdx;
@@ -2980,7 +3305,7 @@ export class GameEngine {
     this.player.comboT = 0;
     this.ptMult = w.pointMult || 1;
     this.actQueued = false;
-    if (step === 0) this.autoFaceNearestEnemyForAttack(Math.max(2.5, w.kind === 'chain' ? HOOK.range : m.range));
+    if (step === 0) this.faceFoe(Math.max(2.5, w.kind === 'chain' ? HOOK.range : w.kind === 'proj' || w.kind === 'bomb' ? 18 : m.range));
     const sweepable = w.kind === 'melee' || w.kind === 'karate';
     const target = sweepable ? this.pickAttackTarget(m.range, chaining) : null;
 
@@ -3032,6 +3357,8 @@ export class GameEngine {
   private pickAttackTarget(range: number, keepPrev: boolean): EnemyInstance | null {
     const P = this.player;
     const maxD = range * 1.15;
+    const lk = this.locked();
+    if (lk && Math.hypot(lk.pos.x - P.pos.x, lk.pos.z - P.pos.z) - lk.r <= maxD * 1.5) return lk;
     const prev = this.comboTarget;
     if (keepPrev && prev && !prev.dead && Math.hypot(prev.pos.x - P.pos.x, prev.pos.z - P.pos.z) - prev.r <= maxD) return prev;
     const fx = Math.sin(P.yaw);
@@ -3194,7 +3521,11 @@ export class GameEngine {
     this.dbgHits.push({ p: this.hitPt.clone(), t: this.time });
     // a wide swing can cut several enemies, the third onward for less
     const mult = win.hits.size > 2 ? 0.7 : 1;
+    const was = this.spHit;
+    if (win.pierce) this.spHit = true;
     this.hitEnemy(e, win.dmg * mult, nx, nz, win.kb, win.heavy, { point: this.hitPt, dirX: kx, dirZ: kz });
+    this.spHit = was;
+    if (win.pierce && !e.dead) this.addEnemyPosture(e, e.maxPosture * DASH_ATTACK.posture * (e.type === 'boss' ? 0.25 : 1));
   }
 
   // Throwables leave the off hand
@@ -3847,7 +4178,7 @@ export class GameEngine {
       const a = want + off;
       const x = e.pos.x + Math.sin(a) * ring;
       const z = e.pos.z + Math.cos(a) * ring;
-      if (Math.hypot(x, z) > R_ARENA - 1) continue;
+      if (!this.world.inside(x, z, 1)) continue;
       if (this.solids.some((s) => s.h > 0.4 && Math.hypot(s.x - x, s.z - z) < s.r + 0.6)) continue;
       return a;
     }
@@ -5035,7 +5366,10 @@ export class GameEngine {
     if (this.player.inv > 0) {
       if (this.player.dashInv) {
         const perfect = this.player.dash > 0;
-        if (perfect) this.callout('ESQUIVA PERFEITA!', 'jade', '見切');
+        if (perfect) {
+          this.callout('ESQUIVA PERFEITA!', 'jade', '見切', 'Ataque agora: contra-ataque');
+          this.counterUntil = this.time + DASH_ATTACK.counterWindow;
+        }
         else this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'ESQUIVOU!', '#8fe0c8', 1.1);
         this.triggerSlowmo(perfect ? 0.5 : 0.22, perfect ? 0.22 : 0.42);
         this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.2, this.player.pos.z), IMPACT_DODGE, perfect ? 2.4 : 1.6, 0.3, 'dodge');
@@ -5442,11 +5776,7 @@ export class GameEngine {
         pos.z = s.z + (dz / d) * m;
       }
     }
-    const d = Math.hypot(pos.x, pos.z);
-    if (d > R_ARENA - r) {
-      pos.x *= (R_ARENA - r) / d;
-      pos.z *= (R_ARENA - r) / d;
-    }
+    this.world.confine(pos, r);
   }
 
   /* =========================================================================
@@ -5478,15 +5808,31 @@ export class GameEngine {
     const mz = fz * -iy + rz * ix;
     const amt = Math.min(1, Math.hypot(mx, mz));
 
+    // Target lock: the camera stays behind the player on the line to the foe (so the stick circles
+    // it), and the body squares up to it when standing or guarding
+    const lk = this.locked();
+    const lkAngle = lk ? Math.atan2(lk.pos.x - this.player.pos.x, lk.pos.z - this.player.pos.z) : 0;
+    if (lk && !this.cine) {
+      if (this.lookTouch.id === null) {
+        const dy = wrap(wrap(lkAngle + Math.PI) - this.camYaw);
+        // (a foe that blinks behind the player swings the camera round, never snaps it)
+        this.camYaw += clamp(dy * Math.min(1, dt * 5), -2.8 * dt, 2.8 * dt);
+      }
+      if (amt <= 0.05 || this.input.guardHeld) {
+        const turnK = this.player.rig.clip ? this.clipTurnSpeed() : TUNE.turnSpeedIdle;
+        this.player.yaw = turnTo(this.player.yaw, lkAngle, dt * turnK);
+      }
+    }
+
     if (amt > 0.05) {
       // 1. O PERSONAGEM VIRA NA DIREÇÃO DO MOVIMENTO (Acaba com andar de costas!)
-      const moveAngle = Math.atan2(mx, mz);
+      const moveAngle = lk && this.input.guardHeld ? lkAngle : Math.atan2(mx, mz);
       this.lastMove.set(mx, 0, mz);
       const turnK = this.player.rig.clip ? this.clipTurnSpeed() : this.player.anim ? TUNE.turnSpeedAttacking : TUNE.turnSpeedIdle;
       this.player.yaw = turnTo(this.player.yaw, moveAngle, dt * turnK);
 
       // 2. O DIRECIONAL GIRA A CÂMERA DINAMICAMENTE
-      if (this.settings.autoTurnWithStick) {
+      if (this.settings.autoTurnWithStick && !lk) {
         // Ao desviar para a esquerda/direita com o analógico, a câmera gira suavemente junto
         const steerSens = TUNE.camSteerSpeed * this.settings.cameraSensitivity;
         this.camYaw += -ix * steerSens * dt;
@@ -5509,7 +5855,7 @@ export class GameEngine {
       // to keep up with you" instead of "spinning" - a deliberate compromise, not a fix,
       // since disabling it while the stick is held (an earlier attempt) meant the camera
       // never adjusts during ordinary continuous play, which is worse.
-      if (this.settings.autoCamera && this.lookTouch.id === null) {
+      if (this.settings.autoCamera && this.lookTouch.id === null && !lk) {
         const camBehindPlayer = wrap(this.player.yaw - Math.PI);
         const autoSpeed = TUNE.camFollowSpeed * this.settings.cameraSensitivity;
         this.camYaw = turnTo(this.camYaw, camBehindPlayer, dt * autoSpeed);
@@ -5565,6 +5911,7 @@ export class GameEngine {
       }
       this.player.pos.y = 0;
       this.player.vy = 0;
+      if (!this.player.grounded && this.act?.plunge && !this.act.plunge.done) this.plungeLand(this.act);
       this.player.grounded = true;
       this.player.jumps = 0;
     }
@@ -5814,6 +6161,7 @@ export class GameEngine {
     this.camDist += (limit - this.camDist) * Math.min(1, dt * (limit < this.camDist ? 18 : 5));
 
     this.camera.position.copy(lookTarget).addScaledVector(camDir, this.camDist);
+    this.world.confineCam(this.camera.position); // a walled stage keeps the camera on its side of the wall
     if (this.shake > 0.001) {
       this.camera.position.x += (Math.random() - 0.5) * this.shake;
       this.camera.position.y += (Math.random() - 0.5) * this.shake;
@@ -6419,15 +6767,11 @@ export class GameEngine {
     if (e.bossT > 0) return;
     e.bossT = e.fury ? 3.4 : 5;
     const P = this.player;
-    const lim = R_ARENA - 2;
     for (let i = 0; i < (e.fury ? 4 : 3); i++) {
-      let x = i === 0 ? P.pos.x + P.vel.x * 0.4 : P.pos.x + rand(-5.5, 5.5);
-      let z = i === 0 ? P.pos.z + P.vel.z * 0.4 : P.pos.z + rand(-5.5, 5.5);
-      const d = Math.hypot(x, z);
-      if (d > lim) {
-        x *= lim / d;
-        z *= lim / d;
-      }
+      const pt = { x: i === 0 ? P.pos.x + P.vel.x * 0.4 : P.pos.x + rand(-5.5, 5.5), z: i === 0 ? P.pos.z + P.vel.z * 0.4 : P.pos.z + rand(-5.5, 5.5) };
+      this.world.confine(pt, 2);
+      const x = pt.x;
+      const z = pt.z;
       const ring = new THREE.Mesh(
         BOLT_RING,
         new THREE.MeshBasicMaterial({ color: new THREE.Color(0.6, 1.4, 3), transparent: true, opacity: 0.4, depthWrite: false, blending: THREE.AdditiveBlending, fog: false })
@@ -6511,7 +6855,7 @@ export class GameEngine {
       const a = toward + off;
       const x = P.pos.x + Math.sin(a) * dist;
       const z = P.pos.z + Math.cos(a) * dist;
-      if (Math.hypot(x, z) > R_ARENA - 2) continue;
+      if (!this.world.inside(x, z, 2)) continue;
       if (this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r + e.r + 0.3)) continue;
       e.pos.set(x, 0, z);
       placed = true;
@@ -6626,7 +6970,7 @@ export class GameEngine {
       const a = toward + off;
       const x = P.pos.x + Math.sin(a) * 4.6;
       const z = P.pos.z + Math.cos(a) * 4.6;
-      if (Math.hypot(x, z) > R_ARENA - 2) continue;
+      if (!this.world.inside(x, z, 2)) continue;
       if (this.solids.some((s) => Math.hypot(s.x - x, s.z - z) < s.r + e.r + 0.3)) continue;
       e.pos.set(x, 0, z);
       placed = true;
@@ -7251,7 +7595,7 @@ export class GameEngine {
     this.mmCtx.lineWidth = 2;
     const o = toS(0, 0);
     this.mmCtx.beginPath();
-    this.mmCtx.arc(o[0], o[1], R_ARENA * s, 0, TAU);
+    this.mmCtx.arc(o[0], o[1], this.world.stage.radius * s, 0, TAU);
     this.mmCtx.stroke();
 
     // Conquista posts: a diamond (red while hostile, jade once taken); a far one rides the rim
@@ -7324,11 +7668,13 @@ export class GameEngine {
     this.updatePickups(dt);
     this.updateScrolls(dt);
     this.updateReticle(dt);
+    this.stepLock(dt);
     this.stepGoal(dt);
     this.stepReinforcements(dt);
     if (this.mode === 'conquest') this.stepConquest(dt);
 
-    const alive = this.waveQueue.length > 0 || this.enemies.some((e) => !e.dead);
+    this.stepStageSwap(dt);
+    const alive = !!this.stageSwap || this.waveQueue.length > 0 || this.enemies.some((e) => !e.dead);
     // a Resistir wave is not over while the clock runs, even with the field empty
     // (Conquista: between posts there is nobody to beat, so nothing is "cleared" until a post is woken)
     const betweenPosts = this.mode === 'conquest' && this.conq.active < 0;
@@ -7360,7 +7706,7 @@ export class GameEngine {
       if (this.waveTimer > 2.5) {
         this.waveTimer = 0;
         if (this.mode === 'conquest') this.captureOutpost();
-        else this.nextWave();
+        else this.advance();
       }
     }
   }

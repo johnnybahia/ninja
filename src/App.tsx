@@ -8,7 +8,7 @@ import { initAudio } from './game/audio';
 import type { Quality, QualitySetting } from './game/postfx';
 import type { AtmosMode } from './game/atmosphere';
 import type { ThemeMode } from './game/theme';
-import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft, ChevronDown, ArrowUp, SlidersHorizontal, Gamepad2 } from 'lucide-react';
+import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft, ChevronDown, ArrowUp, SlidersHorizontal, Gamepad2, Crosshair } from 'lucide-react';
 import { TunePanel } from './TunePanel';
 import { TUNE, loadTune } from './game/tunables';
 import { getLoadProgress, onLoadProgress } from './game/models';
@@ -94,6 +94,7 @@ export default function App() {
   // the Ougi scroll (its sequence and time), whether a foe stands in front to use it on, and the title card
   const [ougi, setOugi] = useState<{ id: number; name: string; glyph: string; secs: number } | null>(null);
   const [ougiAim, setOugiAim] = useState(false);
+  const [lockOn, setLockOn] = useState(false);
   const [ougiTitle, setOugiTitle] = useState<{ name: string; glyph: string; sub: string } | null>(null);
   const [posture, setPosture] = useState(0);
   const [heals, setHeals] = useState(3);
@@ -263,6 +264,7 @@ export default function App() {
     }
   });
   const atmosRef = useRef(atmosMode);
+  const [stageCard, setStageCard] = useState<{ id: string; name: string; glyph: string; desc: string; n: number; key: number } | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     try {
       return localStorage.getItem('kage_theme') === 'off' ? 'off' : 'three';
@@ -405,6 +407,7 @@ export default function App() {
       },
       onOugiState: (o) => setOugi(o),
       onOugiAim: (a) => setOugiAim(a),
+      onLock: (on) => setLockOn(on),
       onOugiTitle: (t) => setOugiTitle(t),
       onPostureChange: (p, max) => setPosture(max > 0 ? p / max : 0),
       onHealsChange: (n) => setHeals(n),
@@ -415,6 +418,7 @@ export default function App() {
       onCardOffer: (offer) => setCardOffer(offer),
       onBossChange: (b) => setBossBar(b),
       onWaveMod: (m) => setWaveMod(m),
+      onStage: (st) => setStageCard(st ? { ...st, key: Date.now() } : null),
       onThreats: (t) => setThreats(t),
       onGameOver: (finalScore, wave, _level, _kills, _combo, summary) => {
         const prevBest = bestScoreRef.current;
@@ -694,6 +698,7 @@ export default function App() {
       if (e.code === 'KeyR' && !e.repeat) engineRef.current.heal();
       if (e.code === 'KeyX' && !e.repeat) engineRef.current.ougi();
       if (e.code === 'KeyC') engineRef.current.recenterCamera();
+      if (e.code === 'KeyT' && !e.repeat) engineRef.current.toggleLock();
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
@@ -977,6 +982,20 @@ export default function App() {
                 </span>
               </button>
 
+              {/* Target lock: the camera frames the foe, attacks and the guard turn to it; tap again to let go */}
+              <button
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  engineRef.current?.toggleLock();
+                }}
+                className={`absolute right-[186px] bottom-[124px] w-11 h-11 kg-btn flex flex-col items-center justify-center pointer-events-auto active:scale-95 transition-transform duration-75 ${lockOn ? 'kg-btn-ember' : ''}`}
+                aria-label={lockOn ? 'Soltar mira' : 'Travar mira'}
+                aria-pressed={lockOn}
+              >
+                <Crosshair className={`w-4 h-4 pointer-events-none ${lockOn ? 'text-[#fff0e0]' : 'text-[var(--paper)]'}`} />
+                <span className="text-[9px] font-bold text-[var(--paper)] leading-none mt-0.5 pointer-events-none">Mira</span>
+              </button>
+
               {/* Ougi: a button of its own, there while the scroll lasts (the ring is the time left; it glows when a
                   foe stands in front, and with none it only says so and keeps the charge) */}
               {ougi && (
@@ -1003,6 +1022,16 @@ export default function App() {
             </div>
           </div>
       </div>
+
+      {/* A new stage: the screen goes dark, the stage is swapped behind it, and its name is brushed on */}
+      {stageCard && (
+        <div key={stageCard.key} className="kg-stage-card fixed inset-0 z-30 flex flex-col items-center justify-center pointer-events-none" onAnimationEnd={() => setStageCard(null)}>
+          <div className="font-serif text-[min(34vh,30vw)] leading-none font-black text-[var(--ember)] opacity-90 [text-shadow:0_0_40px_rgba(255,120,40,0.35)]">{stageCard.glyph}</div>
+          <div className="mt-2 font-serif text-xs tracking-[0.5em] text-[var(--paper)] opacity-70">FASE {stageCard.n}</div>
+          <div className="font-serif text-3xl font-extrabold tracking-wide text-[var(--paper)]">{stageCard.name}</div>
+          <div className="mt-1 max-w-[80vw] text-center text-sm text-[var(--paper)] opacity-75">{stageCard.desc}</div>
+        </div>
+      )}
 
       {/* Deathblow cinematic: letterbox bars and a brushed 忍殺 */}
       <div className={`fixed inset-0 z-20 pointer-events-none transition-opacity duration-150 ${cinematic === 'full' || cinematic === 'duel' || cinematic === 'ougi' ? 'opacity-100' : 'opacity-0'}`}>
@@ -1123,6 +1152,12 @@ export default function App() {
                     </li>
                     <li>
                       <b>危 Perigo:</b> rasteira = pule; estocada = apare no tempo certo ou esquive.
+                    </li>
+                    <li>
+                      <b>Mira:</b> trava a câmera no inimigo à frente; ataques e defesa viram para ele e a esquiva vira passo lateral. Toque de novo para soltar.
+                    </li>
+                    <li>
+                      <b>Golpes de contexto:</b> <b>Esquiva + Ataque</b> = investida que fura o bloqueio; <b>Pulo + Ataque</b> = golpe aéreo em área; depois de uma <b>esquiva perfeita</b>, o ataque vira contra-ataque mais forte.
                     </li>
                     <li>
                       <b>奥義 Ougi:</b> o pergaminho (cai de elites, do chefe e de vez em quando dos outros) acende um botão dourado por alguns segundos. Com um inimigo à frente, toque nele: uma sequência automática com as suas armas, em câmeras diferentes, que termina com a morte do alvo (o Oni perde até um quarto da vida).
