@@ -34,7 +34,7 @@ import { MAT, makeWeapon, mesh } from './rigs';
 import { buildCharacter } from './characters';
 import { createClipRig, Grip, OneShot, PlayOptions } from './clipRig';
 import { loadCharacter, loadWeapons, loadLazyWeapons, weaponsReady, preloadModels, characterIfReady, CharacterTemplate, LAZY_CHARACTERS, type CharacterModel } from './models';
-import { COMBOS, ENEMY_STRIKES, BOSS_STRIKES, FINISHERS, FINISHER_CLIP_LEN, HOOK, Finisher, ClipMove } from './moves';
+import { COMBOS, ENEMY_STRIKES, BOSS_STRIKES, FINISHERS, FINISHER_CLIP_LEN, HOOK, Finisher, ClipMove, DASH_ATTACK, DASH_MOVES, PLUNGE } from './moves';
 import { BladeSeg, makeSeg, segSegDist, sweepVsCapsule, BLADE_SEG, MAGNET_REACH, HURT_BOTTOM, HURT_TOP } from './combat';
 import { DebugDraw } from './debugdraw';
 import { animateCharacter, animateDeath } from './animation';
@@ -311,6 +311,8 @@ export interface GameEngineCallbacks {
   onCallout?: (c: Callout) => void;
   // a hook just landed: the slot of the weapon that threw it (the HUD lights the other one), or null once the window closes
   onFollowUp?: (weaponIdx: number | null) => void;
+  /** the target lock went on or off */
+  onLock?: (on: boolean) => void;
   onDeathblowReady?: (ready: boolean) => void;
   onHealsChange?: (heals: number) => void;
   onCardOffer?: (offer: CardOffer[] | null) => void;
@@ -379,6 +381,8 @@ interface PlayerAct {
   windows: HitWindow[];
   target?: EnemyInstance;
   magnet?: { reach: number; until: number; k: number };
+  // golpe aéreo: the blow lands when the feet do
+  plunge?: { w: WeaponDef; done: boolean };
 }
 
 interface HitWindow {
@@ -393,6 +397,7 @@ interface HitWindow {
   wide: number; // extra contact radius (a broad shove)
   ring: number; // whirl: anyone this close is caught when the window is half through
   ringDone: boolean;
+  pierce?: boolean; // investida: no guard, parry or sidestep answers it
 }
 
 // Where a blow really landed: the contact point and the direction the blade was travelling
@@ -557,6 +562,11 @@ export class GameEngine {
   private labels: { sprite: THREE.Sprite; t: number; life: number; vy: number; base: number }[] = [];
   private reticle!: THREE.Sprite;
   private reticleTarget = new THREE.Vector3();
+  // target lock: the camera frames it, attacks and the guard turn to it
+  private lockTarget: EnemyInstance | null = null;
+  private lockMark!: THREE.Sprite;
+  private lastDashT = -9; // when the last dodge began
+  private counterUntil = -9; // a perfect dodge keeps a counter open until then
 
   public input = {
     jx: 0,
@@ -1098,6 +1108,9 @@ export class GameEngine {
   public reset() {
     this.stageSwap = null;
     this.callbacks.onStage?.(null);
+    this.setLock(null);
+    this.lastDashT = -9;
+    this.counterUntil = -9;
     this.enemies.forEach((e) => this.removeEnemy(e));
     this.enemies = [];
     while (this.projectiles.length) this.killProj(this.projectiles.length - 1);
@@ -2710,6 +2723,214 @@ export class GameEngine {
     this.reticle.renderOrder = 31;
     this.reticle.visible = false;
     this.scene.add(this.reticle);
+
+    // the lock's mark: four corners closing on the target
+    const lc = document.createElement('canvas');
+    lc.width = lc.height = 128;
+    const lx = lc.getContext('2d')!;
+    lx.strokeStyle = '#ff8a3c';
+    lx.lineWidth = 9;
+    lx.lineCap = 'round';
+    lx.shadowColor = 'rgba(0,0,0,0.85)';
+    lx.shadowBlur = 6;
+    for (const [sx, sy] of [[1, 1], [-1, 1], [-1, -1], [1, -1]]) {
+      lx.beginPath();
+      lx.moveTo(64 + sx * 50, 64 + sy * 22);
+      lx.lineTo(64 + sx * 50, 64 + sy * 50);
+      lx.lineTo(64 + sx * 22, 64 + sy * 50);
+      lx.stroke();
+    }
+    const lt = new THREE.CanvasTexture(lc);
+    lt.colorSpace = THREE.SRGBColorSpace;
+    this.lockMark = new THREE.Sprite(new THREE.SpriteMaterial({ map: lt, transparent: true, depthTest: false, depthWrite: false, fog: false, toneMapped: false, sizeAttenuation: false }));
+    this.lockMark.renderOrder = 31;
+    this.lockMark.visible = false;
+    this.scene.add(this.lockMark);
+  }
+
+  // ---------------------------------------------------------------- target lock
+  /** The lock button: on the foe the camera looks at, or off. */
+  public toggleLock() {
+    if (this.state !== 'play' || this.player.hp <= 0) return;
+    if (this.lockTarget) {
+      this.setLock(null);
+      return;
+    }
+    const t = this.pickLockTarget(24);
+    if (t) {
+      this.setLock(t);
+      sfx.swing();
+    } else this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.4, this.player.pos.z, 'Sem alvo', '#cfc6b4', 0.9);
+  }
+
+  private setLock(e: EnemyInstance | null) {
+    if (e === this.lockTarget) return;
+    const was = !!this.lockTarget;
+    this.lockTarget = e;
+    this.lockMarkT = 0;
+    if (!e) this.lockMark.visible = false;
+    if (was !== !!e) this.callbacks.onLock?.(!!e);
+  }
+  private lockMarkT = 0;
+
+  // the nearest foe to the middle of the camera's view (a little weight on distance too)
+  private pickLockTarget(maxD: number, not?: EnemyInstance): EnemyInstance | null {
+    const P = this.player.pos;
+    const fx = -Math.sin(this.camYaw);
+    const fz = -Math.cos(this.camYaw);
+    let best: EnemyInstance | null = null;
+    let bestScore = Infinity;
+    for (const e of this.enemies) {
+      if (e.dead || e.flee || e === not) continue;
+      const dx = e.pos.x - P.x;
+      const dz = e.pos.z - P.z;
+      const d = Math.hypot(dx, dz) || 0.001;
+      if (d > maxD) continue;
+      const off = Math.acos(clamp((fx * dx + fz * dz) / d, -1, 1));
+      const score = d + off * 7;
+      if (score < bestScore) {
+        bestScore = score;
+        best = e;
+      }
+    }
+    return best;
+  }
+
+  /** The locked foe, while it can still be fought */
+  private locked(): EnemyInstance | null {
+    const t = this.lockTarget;
+    return t && !t.dead && !t.flee ? t : null;
+  }
+
+  // The lock follows its target, passes to the next foe when it falls (or lets go if none is near)
+  private stepLock(dt: number) {
+    const t = this.lockTarget;
+    if (!t) return;
+    const P = this.player;
+    if (P.hp <= 0 || this.state !== 'play') {
+      this.setLock(null);
+      return;
+    }
+    if (t.dead || t.flee || !this.enemies.includes(t) || Math.hypot(t.pos.x - P.pos.x, t.pos.z - P.pos.z) > 30) {
+      this.setLock(this.pickLockTarget(15, t));
+      return;
+    }
+    this.lockMarkT = Math.min(1, this.lockMarkT + dt * 5);
+    this.lockMark.visible = !this.cine;
+    this.lockMark.position.set(t.pos.x, t.pos.y + t.h * 0.55 * this.sizeOf(t), t.pos.z);
+    const s = 2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2) * (0.085 - 0.03 * this.lockMarkT);
+    this.lockMark.scale.set(s, s, 1);
+    this.lockMark.material.rotation = (1 - this.lockMarkT) * 0.8;
+    this.lockMark.material.opacity = 0.55 + 0.45 * this.lockMarkT;
+  }
+
+  // ---------------------------------------------------------------- context moves (see moves.ts)
+  // The attack button out of a dodge or in the air. True when it became one of those moves.
+  private contextAttack(w: WeaponDef): boolean {
+    const P = this.player;
+    if (!P.rig.clip || (w.kind !== 'melee' && w.kind !== 'karate')) return false;
+    if (!P.grounded && P.pos.y > PLUNGE.minY) return this.startPlunge(w);
+    const m = DASH_MOVES[w.id];
+    if (m && (P.dash > 0 || this.time - this.lastDashT < 0.2 + DASH_ATTACK.window || this.time < this.counterUntil)) return this.startDashAttack(w, m);
+    return false;
+  }
+
+  private faceFoe(range: number) {
+    const P = this.player;
+    const t = this.locked();
+    if (t && Math.hypot(t.pos.x - P.pos.x, t.pos.z - P.pos.z) - t.r < range + 3) P.yaw = Math.atan2(t.pos.x - P.pos.x, t.pos.z - P.pos.z);
+    else this.autoFaceNearestEnemyForAttack(range);
+  }
+
+  private startDashAttack(w: WeaponDef, m: ClipMove): boolean {
+    const P = this.player;
+    if (P.st < m.stamina * 0.5) return false;
+    this.lastDashT = -9;
+    const counter = this.time < this.counterUntil;
+    this.counterUntil = -9;
+    this.faceFoe(m.range + 2.5);
+    const fx = Math.sin(P.yaw);
+    const fz = Math.cos(P.yaw);
+    const act = this.startAct('attack', m.clip, { speed: (m.speed ?? 1) * TUNE.attackSpeed, from: m.from, fadeIn: 0.08, chain: m.chain, cancel: m.cancel, end: m.end, turnUntil: m.hit[0] }, m);
+    if (!act) return false;
+    P.st = Math.max(0, P.st - m.stamina);
+    this.callbacks.onStaminaChange(P.st, P.maxSt);
+    P.combo = 0;
+    P.comboW = this.activeWeaponIdx;
+    P.comboT = 0;
+    this.ptMult = w.pointMult || 1;
+    this.actQueued = false;
+    P.atkCd = Math.max(0, P.atkCd) + 0.05;
+    // what is left of the dodge carries the lunge at the foe; past it, a push of its own
+    if (P.dash > 0) P.dashDir.set(fx, 0, fz);
+    else P.kb.set(fx * 8, 0, fz * 8);
+    for (const [t0, t1] of m.win ?? m.hit.map((h): [number, number] => [h - 0.08, h + 0.08])) {
+      act.windows.push({ t0, t1, dmg: m.dmg * (counter ? DASH_ATTACK.counter : 1), kb: m.kb, heavy: true, weapon: w, hits: new Set(), began: false, wide: m.wide ?? 0, ring: 0, ringDone: false, pierce: true });
+    }
+    const target = this.locked() ?? this.pickAttackTarget(m.range + 1.5, false);
+    if (target && Math.hypot(target.pos.x - P.pos.x, target.pos.z - P.pos.z) - target.r < m.range + 3) {
+      this.comboTarget = target;
+      act.target = target;
+      act.magnet = { reach: m.reach ?? 1.3, until: m.hit[0], k: 1 };
+    }
+    this.ghosts.spawn(P.rig.root, GHOST_DASH);
+    if (counter) {
+      this.callout('CONTRA-ATAQUE!', 'ember', '返');
+      this.triggerSlowmo(0.3, 0.35);
+    } else this.spawnLabel(P.pos.x, P.pos.y + 2.4, P.pos.z, 'INVESTIDA!', '#ffb347', 1);
+    return true;
+  }
+
+  private startPlunge(w: WeaponDef): boolean {
+    const P = this.player;
+    if (this.act && this.act.kind !== 'draw' && this.act.shot.t < this.act.cancelAt) return false;
+    if (P.st < PLUNGE.stamina * 0.5) return false;
+    this.faceFoe(5);
+    const act = this.startAct('attack', PLUNGE.clip, { speed: PLUNGE.speed, from: PLUNGE.from, fadeIn: 0.08, chain: 99, cancel: 99, end: 2.15, turnUntil: 0 });
+    if (!act) return false;
+    act.plunge = { w, done: false };
+    P.st = Math.max(0, P.st - PLUNGE.stamina);
+    this.callbacks.onStaminaChange(P.st, P.maxSt);
+    P.combo = 0;
+    P.comboT = 0;
+    this.ptMult = w.pointMult || 1;
+    this.actQueued = false;
+    P.atkCd = Math.max(0, P.atkCd) + 0.05;
+    P.vy = Math.min(P.vy, PLUNGE.fall);
+    P.vel.multiplyScalar(0.35);
+    sfx.swing();
+    return true;
+  }
+
+  // The feet touch down: everyone around takes the blow
+  private plungeLand(a: PlayerAct) {
+    const P = this.player;
+    const pl = a.plunge!;
+    pl.done = true;
+    const base = (COMBOS[pl.w.id]?.[0]?.dmg ?? pl.w.dmg[0]) * PLUNGE.dmg;
+    const was = this.spHit;
+    this.spHit = true;
+    let any = false;
+    for (const e of this.enemies.slice()) {
+      if (e.dead) continue;
+      const dx = e.pos.x - P.pos.x;
+      const dz = e.pos.z - P.pos.z;
+      const d = Math.hypot(dx, dz) || 0.001;
+      if (d - e.r > PLUNGE.radius) continue;
+      any = true;
+      this.hitPt.set(e.pos.x, e.pos.y + 1.1 * this.sizeOf(e), e.pos.z);
+      this.hitEnemy(e, base * (d - e.r < 1.3 ? 1 : 0.7), dx / d, dz / d, PLUNGE.kb, true, { point: this.hitPt, dirX: dx / d, dirZ: dz / d });
+    }
+    this.spHit = was;
+    this.puff(P.pos.x, P.pos.z, 16, 3.4);
+    this.impacts.spawn(this.tmpV.set(P.pos.x, 0.25, P.pos.z), IMPACT_HEAVY, any ? 3.2 : 2.2, 0.3, 'heavy');
+    this.shake = Math.max(this.shake, any ? 0.4 : 0.22);
+    this.world.props.slam(P.pos.x, P.pos.z, 2.0);
+    sfx.heavy();
+    if (this.act === a) {
+      a.cancelAt = a.shot.t + PLUNGE.recover * PLUNGE.speed;
+      a.endAt = a.cancelAt + 0.35;
+    }
   }
 
   private updateReticle(dt: number) {
@@ -2837,7 +3058,10 @@ export class GameEngine {
     } else {
       this.player.dashDir.set(Math.sin(this.player.yaw), 0, Math.cos(this.player.yaw));
     }
-    this.player.yaw = Math.atan2(this.player.dashDir.x, this.player.dashDir.z);
+    this.lastDashT = this.time;
+    // locked on, the dodge is a sidestep: the body stays turned to the foe
+    const lk = this.locked();
+    this.player.yaw = lk ? Math.atan2(lk.pos.x - this.player.pos.x, lk.pos.z - this.player.pos.z) : Math.atan2(this.player.dashDir.x, this.player.dashDir.z);
     this.fovKick = Math.max(this.fovKick, 7);
     this.ghosts.spawn(this.player.rig.root, GHOST_DASH);
     this.ghostT = 0.06;
@@ -3066,6 +3290,7 @@ export class GameEngine {
       return;
     }
     const w = this.weapons[this.activeWeaponIdx];
+    if (this.contextAttack(w)) return;
     const combo = COMBOS[w.id];
     if (!combo) return;
     const chaining = !!a && a.kind === 'attack' && this.player.comboW === this.activeWeaponIdx;
@@ -3080,7 +3305,7 @@ export class GameEngine {
     this.player.comboT = 0;
     this.ptMult = w.pointMult || 1;
     this.actQueued = false;
-    if (step === 0) this.autoFaceNearestEnemyForAttack(Math.max(2.5, w.kind === 'chain' ? HOOK.range : m.range));
+    if (step === 0) this.faceFoe(Math.max(2.5, w.kind === 'chain' ? HOOK.range : w.kind === 'proj' || w.kind === 'bomb' ? 18 : m.range));
     const sweepable = w.kind === 'melee' || w.kind === 'karate';
     const target = sweepable ? this.pickAttackTarget(m.range, chaining) : null;
 
@@ -3132,6 +3357,8 @@ export class GameEngine {
   private pickAttackTarget(range: number, keepPrev: boolean): EnemyInstance | null {
     const P = this.player;
     const maxD = range * 1.15;
+    const lk = this.locked();
+    if (lk && Math.hypot(lk.pos.x - P.pos.x, lk.pos.z - P.pos.z) - lk.r <= maxD * 1.5) return lk;
     const prev = this.comboTarget;
     if (keepPrev && prev && !prev.dead && Math.hypot(prev.pos.x - P.pos.x, prev.pos.z - P.pos.z) - prev.r <= maxD) return prev;
     const fx = Math.sin(P.yaw);
@@ -3294,7 +3521,11 @@ export class GameEngine {
     this.dbgHits.push({ p: this.hitPt.clone(), t: this.time });
     // a wide swing can cut several enemies, the third onward for less
     const mult = win.hits.size > 2 ? 0.7 : 1;
+    const was = this.spHit;
+    if (win.pierce) this.spHit = true;
     this.hitEnemy(e, win.dmg * mult, nx, nz, win.kb, win.heavy, { point: this.hitPt, dirX: kx, dirZ: kz });
+    this.spHit = was;
+    if (win.pierce && !e.dead) this.addEnemyPosture(e, e.maxPosture * DASH_ATTACK.posture * (e.type === 'boss' ? 0.25 : 1));
   }
 
   // Throwables leave the off hand
@@ -5135,7 +5366,10 @@ export class GameEngine {
     if (this.player.inv > 0) {
       if (this.player.dashInv) {
         const perfect = this.player.dash > 0;
-        if (perfect) this.callout('ESQUIVA PERFEITA!', 'jade', '見切');
+        if (perfect) {
+          this.callout('ESQUIVA PERFEITA!', 'jade', '見切', 'Ataque agora: contra-ataque');
+          this.counterUntil = this.time + DASH_ATTACK.counterWindow;
+        }
         else this.spawnLabel(this.player.pos.x, this.player.pos.y + 2.5, this.player.pos.z, 'ESQUIVOU!', '#8fe0c8', 1.1);
         this.triggerSlowmo(perfect ? 0.5 : 0.22, perfect ? 0.22 : 0.42);
         this.impacts.spawn(this.tmpV.set(this.player.pos.x, this.player.pos.y + 1.2, this.player.pos.z), IMPACT_DODGE, perfect ? 2.4 : 1.6, 0.3, 'dodge');
@@ -5574,15 +5808,31 @@ export class GameEngine {
     const mz = fz * -iy + rz * ix;
     const amt = Math.min(1, Math.hypot(mx, mz));
 
+    // Target lock: the camera stays behind the player on the line to the foe (so the stick circles
+    // it), and the body squares up to it when standing or guarding
+    const lk = this.locked();
+    const lkAngle = lk ? Math.atan2(lk.pos.x - this.player.pos.x, lk.pos.z - this.player.pos.z) : 0;
+    if (lk && !this.cine) {
+      if (this.lookTouch.id === null) {
+        const dy = wrap(wrap(lkAngle + Math.PI) - this.camYaw);
+        // (a foe that blinks behind the player swings the camera round, never snaps it)
+        this.camYaw += clamp(dy * Math.min(1, dt * 5), -2.8 * dt, 2.8 * dt);
+      }
+      if (amt <= 0.05 || this.input.guardHeld) {
+        const turnK = this.player.rig.clip ? this.clipTurnSpeed() : TUNE.turnSpeedIdle;
+        this.player.yaw = turnTo(this.player.yaw, lkAngle, dt * turnK);
+      }
+    }
+
     if (amt > 0.05) {
       // 1. O PERSONAGEM VIRA NA DIREÇÃO DO MOVIMENTO (Acaba com andar de costas!)
-      const moveAngle = Math.atan2(mx, mz);
+      const moveAngle = lk && this.input.guardHeld ? lkAngle : Math.atan2(mx, mz);
       this.lastMove.set(mx, 0, mz);
       const turnK = this.player.rig.clip ? this.clipTurnSpeed() : this.player.anim ? TUNE.turnSpeedAttacking : TUNE.turnSpeedIdle;
       this.player.yaw = turnTo(this.player.yaw, moveAngle, dt * turnK);
 
       // 2. O DIRECIONAL GIRA A CÂMERA DINAMICAMENTE
-      if (this.settings.autoTurnWithStick) {
+      if (this.settings.autoTurnWithStick && !lk) {
         // Ao desviar para a esquerda/direita com o analógico, a câmera gira suavemente junto
         const steerSens = TUNE.camSteerSpeed * this.settings.cameraSensitivity;
         this.camYaw += -ix * steerSens * dt;
@@ -5605,7 +5855,7 @@ export class GameEngine {
       // to keep up with you" instead of "spinning" - a deliberate compromise, not a fix,
       // since disabling it while the stick is held (an earlier attempt) meant the camera
       // never adjusts during ordinary continuous play, which is worse.
-      if (this.settings.autoCamera && this.lookTouch.id === null) {
+      if (this.settings.autoCamera && this.lookTouch.id === null && !lk) {
         const camBehindPlayer = wrap(this.player.yaw - Math.PI);
         const autoSpeed = TUNE.camFollowSpeed * this.settings.cameraSensitivity;
         this.camYaw = turnTo(this.camYaw, camBehindPlayer, dt * autoSpeed);
@@ -5661,6 +5911,7 @@ export class GameEngine {
       }
       this.player.pos.y = 0;
       this.player.vy = 0;
+      if (!this.player.grounded && this.act?.plunge && !this.act.plunge.done) this.plungeLand(this.act);
       this.player.grounded = true;
       this.player.jumps = 0;
     }
@@ -7417,6 +7668,7 @@ export class GameEngine {
     this.updatePickups(dt);
     this.updateScrolls(dt);
     this.updateReticle(dt);
+    this.stepLock(dt);
     this.stepGoal(dt);
     this.stepReinforcements(dt);
     if (this.mode === 'conquest') this.stepConquest(dt);

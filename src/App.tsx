@@ -8,7 +8,7 @@ import { initAudio } from './game/audio';
 import type { Quality, QualitySetting } from './game/postfx';
 import type { AtmosMode } from './game/atmosphere';
 import type { ThemeMode } from './game/theme';
-import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft, ChevronDown, ArrowUp, SlidersHorizontal, Gamepad2 } from 'lucide-react';
+import { Settings, RotateCcw, Shield, Compass, Swords, ChevronLeft, ChevronDown, ArrowUp, SlidersHorizontal, Gamepad2, Crosshair } from 'lucide-react';
 import { TunePanel } from './TunePanel';
 import { TUNE, loadTune } from './game/tunables';
 import { getLoadProgress, onLoadProgress } from './game/models';
@@ -94,6 +94,7 @@ export default function App() {
   // the Ougi scroll (its sequence and time), whether a foe stands in front to use it on, and the title card
   const [ougi, setOugi] = useState<{ id: number; name: string; glyph: string; secs: number } | null>(null);
   const [ougiAim, setOugiAim] = useState(false);
+  const [lockOn, setLockOn] = useState(false);
   const [ougiTitle, setOugiTitle] = useState<{ name: string; glyph: string; sub: string } | null>(null);
   const [posture, setPosture] = useState(0);
   const [heals, setHeals] = useState(3);
@@ -406,6 +407,7 @@ export default function App() {
       },
       onOugiState: (o) => setOugi(o),
       onOugiAim: (a) => setOugiAim(a),
+      onLock: (on) => setLockOn(on),
       onOugiTitle: (t) => setOugiTitle(t),
       onPostureChange: (p, max) => setPosture(max > 0 ? p / max : 0),
       onHealsChange: (n) => setHeals(n),
@@ -696,6 +698,7 @@ export default function App() {
       if (e.code === 'KeyR' && !e.repeat) engineRef.current.heal();
       if (e.code === 'KeyX' && !e.repeat) engineRef.current.ougi();
       if (e.code === 'KeyC') engineRef.current.recenterCamera();
+      if (e.code === 'KeyT' && !e.repeat) engineRef.current.toggleLock();
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
@@ -979,6 +982,20 @@ export default function App() {
                 </span>
               </button>
 
+              {/* Target lock: the camera frames the foe, attacks and the guard turn to it; tap again to let go */}
+              <button
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  engineRef.current?.toggleLock();
+                }}
+                className={`absolute right-[186px] bottom-[124px] w-11 h-11 kg-btn flex flex-col items-center justify-center pointer-events-auto active:scale-95 transition-transform duration-75 ${lockOn ? 'kg-btn-ember' : ''}`}
+                aria-label={lockOn ? 'Soltar mira' : 'Travar mira'}
+                aria-pressed={lockOn}
+              >
+                <Crosshair className={`w-4 h-4 pointer-events-none ${lockOn ? 'text-[#fff0e0]' : 'text-[var(--paper)]'}`} />
+                <span className="text-[9px] font-bold text-[var(--paper)] leading-none mt-0.5 pointer-events-none">Mira</span>
+              </button>
+
               {/* Ougi: a button of its own, there while the scroll lasts (the ring is the time left; it glows when a
                   foe stands in front, and with none it only says so and keeps the charge) */}
               {ougi && (
@@ -1135,6 +1152,12 @@ export default function App() {
                     </li>
                     <li>
                       <b>危 Perigo:</b> rasteira = pule; estocada = apare no tempo certo ou esquive.
+                    </li>
+                    <li>
+                      <b>Mira:</b> trava a câmera no inimigo à frente; ataques e defesa viram para ele e a esquiva vira passo lateral. Toque de novo para soltar.
+                    </li>
+                    <li>
+                      <b>Golpes de contexto:</b> <b>Esquiva + Ataque</b> = investida que fura o bloqueio; <b>Pulo + Ataque</b> = golpe aéreo em área; depois de uma <b>esquiva perfeita</b>, o ataque vira contra-ataque mais forte.
                     </li>
                     <li>
                       <b>奥義 Ougi:</b> o pergaminho (cai de elites, do chefe e de vez em quando dos outros) acende um botão dourado por alguns segundos. Com um inimigo à frente, toque nele: uma sequência automática com as suas armas, em câmeras diferentes, que termina com a morte do alvo (o Oni perde até um quarto da vida).

@@ -144,3 +144,36 @@ export const HOOK = {
   bonus: 1.25, // damage of the first hit of the follow-up
   comboWindow: 2.2 // the hit streak stays alive this long after the catch
 };
+
+// Context moves: the same attack button, pressed out of a dodge or in the air (no button of their own,
+// so they fit under a thumb).
+//
+// Investida: an attack pressed during a dodge, or within `window` seconds of its end, is a lunge that
+// no guard stops - it cannot be blocked, parried or sidestepped, and it shakes the foe's posture. After
+// a perfect dodge (the blow passed through the dodge itself) it is a counter: `counter` times the damage.
+export const DASH_MOVES: Record<string, ClipMove> = {
+  katana: { clip: 'slideAttack', hit: [1.43], win: [[1.26, 1.6]], reach: 1.4, chain: 99, cancel: 1.75, end: 2.05, from: 1.05, speed: 1.9, dmg: 34, range: 3.4, arc: 2.0, kb: 9, heavy: true, stamina: 14, wide: 0.45 },
+  bo: { clip: 'eSwordAttack', hit: [0.62], win: [[0.46, 0.78]], reach: 1.9, chain: 99, cancel: 0.9, end: 1.15, from: 0.3, speed: 2.0, dmg: 28, range: 3.8, arc: 1.4, kb: 16, heavy: true, stamina: 14, wide: 0.5 },
+  karate: { clip: 'kick2', hit: [0.75], eff: 'LF', win: [[0.58, 0.9]], reach: 1.0, chain: 99, cancel: 1.1, end: 1.45, from: 0.35, speed: 1.8, dmg: 32, range: 2.8, arc: 3.0, kb: 13, heavy: true, stamina: 14, wide: 0.4 }
+};
+export const DASH_ATTACK = {
+  window: 0.26, // seconds after the dodge ends in which the press still counts
+  posture: 0.3, // share of the foe's posture bar it takes (the Oni: a quarter of that)
+  counter: 1.6, // damage of the counter after a perfect dodge
+  counterWindow: 1.1 // seconds the counter stays open
+};
+
+// Golpe aéreo: an attack pressed in the air (blade, staff or fists) comes straight down and hits
+// everyone around the landing; it cannot be defended against either.
+export const PLUNGE = {
+  clip: 'jumpAttack',
+  from: 0.86,
+  speed: 1.3,
+  minY: 0.7, // how high the feet must be
+  fall: -21, // downward speed it takes on
+  radius: 3.1, // reach of the landing, edge to edge
+  dmg: 1.45, // of the weapon's first combo hit (70% of that away from the centre)
+  kb: 12,
+  stamina: 16,
+  recover: 0.4 // seconds on the ground before anything else
+};
