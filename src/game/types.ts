@@ -112,6 +112,8 @@ export interface EnemyInstance {
   rig: RigInstance;
   pos: THREE.Vector3;
   kb: THREE.Vector3;
+  chainT?: number; // when this foe last passed a blow on to another (knock.ts chain hits)
+  wallT?: number; // when it last slammed into a wall
   kbK?: number; // how fast the knockback dies away (knock.ts: a heavy blow stops sooner)
   yaw: number;
   state: string;

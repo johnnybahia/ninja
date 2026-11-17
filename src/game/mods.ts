@@ -46,7 +46,7 @@ export interface WaveGoal {
 export const WAVE_GOALS: WaveGoal[] = [
   { id: 'duelo', name: 'Duelo', glyph: '決', desc: 'Um só mestre samurai: vença o duelo', honor: 16 },
   { id: 'resistir', name: 'Resistir', glyph: '防', desc: 'Aguente até o amanhecer: os reforços não param', honor: 18 },
-  { id: 'capitao', name: 'Capitão', glyph: '将', desc: 'Derrote o capitão de aura vermelha: o bando foge', honor: 18 }
+  { id: 'capitao', name: 'Capitão', glyph: '将', desc: 'Derrote o capitão de aura vermelha: o bando hesita e você acaba com ele', honor: 18 }
 ];
 
 export const GOAL_MIN_WAVE = 3;
