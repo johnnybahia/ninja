@@ -28,6 +28,7 @@ import { World } from './world';
 import { ATMOSPHERES, AtmosMode, atmosphereForWave } from './atmosphere';
 import { THEMES, ThemeMode, themeForWave } from './theme';
 import { STAGES, stageForWave } from './stages';
+import { BladeContact, HIT_PAUSE, bladeContactFx, knockShape, massOf } from './knock';
 import { Afterimages, BladeTrail, DustPool, ImpactPool, InkDecals, StreakPool, softDotTexture, makeBladeGlow, makeLightning } from './vfx';
 import { PostFX, NINJA_LOOK, Quality, QualitySetting, QualityProfile, qualityProfile, detectQuality } from './postfx';
 import { MAT, makeWeapon, mesh } from './rigs';
@@ -405,6 +406,7 @@ interface HitInfo {
   point: THREE.Vector3;
   dirX: number;
   dirZ: number;
+  blade?: BladeContact; // the blade segment and its speed, for the sparks that come off it
 }
 
 export class GameEngine {
@@ -529,6 +531,9 @@ export class GameEngine {
   public camDistOverride: number | null = null;
   private shake = 0;
   private hitstop = 0;
+  private deathDustT = 0;
+  private pauseAcc = 0; // hit-pause spent over the last moments (see hitEnemy)
+  private pauseT = 0;
   private spHit = false;
   private ptMult = 1;
   private lastHS = 0;
@@ -3523,7 +3528,12 @@ export class GameEngine {
     const mult = win.hits.size > 2 ? 0.7 : 1;
     const was = this.spHit;
     if (win.pierce) this.spHit = true;
-    this.hitEnemy(e, win.dmg * mult, nx, nz, win.kb, win.heavy, { point: this.hitPt, dirX: kx, dirZ: kz });
+    let blade: BladeContact | undefined;
+    if (cur) {
+      const travel = prev ? Math.max(prev.a.distanceTo(cur.a), prev.b.distanceTo(cur.b)) : 0;
+      blade = { ax: cur.a.x, ay: cur.a.y, az: cur.a.z, bx: cur.b.x, by: cur.b.y, bz: cur.b.z, speed: travel * 60 };
+    }
+    this.hitEnemy(e, win.dmg * mult, nx, nz, win.kb, win.heavy, { point: this.hitPt, dirX: kx, dirZ: kz, blade });
     this.spHit = was;
     if (win.pierce && !e.dead) this.addEnemyPosture(e, e.maxPosture * DASH_ATTACK.posture * (e.type === 'boss' ? 0.25 : 1));
   }
@@ -4660,9 +4670,23 @@ export class GameEngine {
       labelColor,
       rolled.tier === 'crit' ? 1.4 : rolled.tier === 'weak' ? 0.85 : 1
     );
-    const res = e.type === 'boss' ? 0.2 : 1;
-    e.kb.x += (hit ? hit.dirX : nx) * kb * res;
-    e.kb.z += (hit ? hit.dirZ : nz) * kb * res;
+    // a blow is a punch (fast start, short tail) and weighs on a foe by its mass: the Oni barely moves
+    const shape = knockShape(e, kb, heavy);
+    e.kb.x += (hit ? hit.dirX : nx) * shape.v;
+    e.kb.z += (hit ? hit.dirZ : nz) * shape.v;
+    e.kbK = shape.k;
+    {
+      const sp = Math.hypot(e.kb.x, e.kb.z);
+      if (sp > 18) e.kb.multiplyScalar(18 / sp);
+    }
+    // the weapon's contact: sparks off the edge, chips off the staff, dust off a fist
+    const wid = this.weapons[this.activeWeaponIdx]?.id ?? 'katana';
+    if (hit?.blade && !this.spHit) bladeContactFx(this.sparks, wid, hit.point.x, hit.point.y, hit.point.z, hit.dirX, hit.dirZ, hit.blade, (heavy ? 1.5 : 1) * (rolled.tier === 'crit' ? 1.5 : 1), this.sparks.share());
+    // the swing's weight reaches the player too: a heavy blow that lands pushes the body back a hair
+    if (heavy && hit && this.player.dash <= 0 && !this.spHit) {
+      this.player.kb.x -= hit.dirX * 1.1;
+      this.player.kb.z -= hit.dirZ * 1.1;
+    }
     // heavy blows interrupt an ordinary samurai wind-up (the Oni and perilous moves shrug them off)
     if (heavy && e.type === 'archer' && e.rig.clip && e.hp > dmg) {
       // a heavy blow knocks the archer out of its shot or kick
@@ -4700,9 +4724,16 @@ export class GameEngine {
     if (hit && this.player.rig.clip) {
       // hit pause: only the two bodies involved hang for a beat, the rest of the world
       // keeps moving (a global slowdown is kept for the deathblow)
-      const beat = isComboFinisher ? 0.09 : isCombo ? 0.065 : 0.05;
-      this.player.rig.clip.pause(beat);
-      e.rig.clip?.pause(beat * 1.3);
+      // (by weapon - a staff sticks, a star does not - and a flurry of multi-hits is trimmed so it never locks up)
+      this.pauseAcc = Math.max(0, this.pauseAcc - (this.time - this.pauseT) * 0.8);
+      this.pauseT = this.time;
+      let beat = (isComboFinisher ? 0.09 : isCombo ? 0.065 : 0.05) * (HIT_PAUSE[wid] ?? 1) * (e.type === 'boss' || e.variant === 'brute' ? 1.15 : 1);
+      if (this.pauseAcc > 0.28) beat *= 0.4;
+      this.pauseAcc += beat;
+      if (beat > 0.004) {
+        this.player.rig.clip.pause(beat);
+        e.rig.clip?.pause(beat * 1.3);
+      }
     } else {
       const now = performance.now();
       if (now - this.lastHS > 90) {
@@ -4736,6 +4767,12 @@ export class GameEngine {
   private killEnemy(e: EnemyInstance) {
     e.dead = true;
     e.deathT = 0;
+    // the killing blow throws the body (the heavy ones fall where they stand)
+    if (massOf(e) < 2) e.kb.multiplyScalar(1.6);
+    else e.kb.multiplyScalar(0.4);
+    const ks = Math.hypot(e.kb.x, e.kb.z);
+    if (ks > 12) e.kb.multiplyScalar(12 / ks);
+    e.kbK = 4.2;
     e.bow = undefined;
     e.kick = undefined;
     this.updateBowFx(e);
@@ -6325,6 +6362,18 @@ export class GameEngine {
       }
       if (e.dead) {
         e.deathT += dt;
+        // the last blow carries the body: it slides on and settles
+        if (e.kb.lengthSq() > 0.02) {
+          e.pos.addScaledVector(e.kb, dt);
+          e.kb.multiplyScalar(Math.exp(-4.2 * dt));
+          this.collide(e.pos, e.r);
+          e.rig.root.position.x = e.pos.x;
+          e.rig.root.position.z = e.pos.z;
+          if (e.deathT < 0.5 && this.time - this.deathDustT > 0.06) {
+            this.deathDustT = this.time;
+            this.puff(e.pos.x, e.pos.z, 1, 0.9, -e.kb.x, -e.kb.z);
+          }
+        }
         if (e.rig.flash) e.rig.flash.value = Math.max(0, 0.6 - e.deathT * 2);
         if (e.dbMark) e.dbMark.visible = false;
         if (e.danger) e.danger.visible = false;
@@ -6667,7 +6716,7 @@ export class GameEngine {
       e.pos.x += mvx * spd * dt;
       e.pos.z += mvz * spd * dt;
       e.pos.addScaledVector(e.kb, dt);
-      e.kb.multiplyScalar(Math.exp(-6 * dt));
+      e.kb.multiplyScalar(Math.exp(-(e.kbK ?? 6) * dt));
       this.collide(e.pos, e.r);
       if (spd > 0.01 && (e.dodgeT ?? 0) <= 0) {
         // pushing against something and getting nowhere: take the other side for a moment

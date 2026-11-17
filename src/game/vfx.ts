@@ -708,6 +708,11 @@ export class StreakPool {
     scene.add(this.mesh);
   }
 
+  /** Share of the pool in use, 0..1 (what quality allows) */
+  share() {
+    return this.limit / this.n;
+  }
+
   /** How many of the pool's slots are in use (quality): the oldest are recycled past this. */
   setLimit(k: number) {
     this.limit = Math.max(1, Math.min(this.n, Math.round(k)));
