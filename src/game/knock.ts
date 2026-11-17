@@ -25,6 +25,17 @@ export function knockShape(e: EnemyInstance, kb: number, heavy: boolean): { v: n
   return heavy ? { v: kb * 1.3 * scale, k: 7.8 + m * 0.4 } : { v: kb * scale, k: 6 + m * 0.3 };
 }
 
+/** Thrown foes: what a collision costs and passes on (stepKnockImpacts in engine.ts) */
+export const KNOCK_HIT = {
+  speed: 7, // m/s a foe must be flying at for anything to happen
+  pass: 0.55, // share of its speed handed to the foe it hits
+  keep: 0.4, // what the thrown one keeps of its speed after hitting a foe
+  dmg: 6, // damage to the one that is hit...
+  dmgPerSpeed: 0.8, // ...plus this per m/s
+  bounce: 0.25, // share of its speed that comes back off a wall
+  wallDmg: 7 // damage a hard slam into a wall does (scaled by how hard)
+};
+
 /** The hang on contact by weapon (multiplies the usual 0.05-0.09 s): a staff or a heavy cut sticks, a thrown star does not. */
 export const HIT_PAUSE: Record<string, number> = { katana: 1, bo: 1.3, kama: 0.8, karate: 0.9, shuriken: 0.4, kunai: 0.6, bomb: 0 };
 

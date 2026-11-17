@@ -28,7 +28,7 @@ import { World } from './world';
 import { ATMOSPHERES, AtmosMode, atmosphereForWave } from './atmosphere';
 import { THEMES, ThemeMode, themeForWave } from './theme';
 import { STAGES, stageForWave } from './stages';
-import { BladeContact, HIT_PAUSE, bladeContactFx, knockShape, massOf } from './knock';
+import { BladeContact, HIT_PAUSE, KNOCK_HIT, bladeContactFx, knockShape, massOf } from './knock';
 import { Afterimages, BladeTrail, DustPool, ImpactPool, InkDecals, StreakPool, softDotTexture, makeBladeGlow, makeLightning } from './vfx';
 import { PostFX, NINJA_LOOK, Quality, QualitySetting, QualityProfile, qualityProfile, detectQuality } from './postfx';
 import { MAT, makeWeapon, mesh } from './rigs';
@@ -106,7 +106,7 @@ const POST_GLYPH: Record<PostKind, string> = { garrison: '将', powder: '火', d
 const POST_SHORT: Record<PostKind, string> = { garrison: 'Guarnição', powder: 'Pólvora', drum: 'Tambor', duel: 'Duelo', castle: 'Castelo' };
 const POST_TITLE: Record<PostKind, string> = { garrison: 'Guarnição', powder: 'Depósito de pólvora', drum: 'Tambor de guerra', duel: 'Duelo do General', castle: 'O Castelo' };
 const POST_DESC: Record<PostKind, string> = {
-  garrison: 'Derrote o capitão de aura vermelha: o bando foge',
+  garrison: 'Derrote o capitão de aura vermelha: o bando hesita e você acaba com ele',
   powder: 'Destrua os 3 depósitos de pólvora: leve o inimigo até as explosões',
   drum: 'Quebre o tambor de guerra: ele chama reforços sem parar',
   duel: 'Duelo contra o General: apare, e ele se enfurece na metade da vida',
@@ -1654,7 +1654,7 @@ export class GameEngine {
     if (!this.goal && !c.routed && this.bossKills > c.bossKills0) {
       c.routed = true;
       this.waveQueue = [];
-      this.routEnemies();
+      this.hesitate();
     }
     if (kind === 'drum' && !c.routed) {
       const drum = this.postObjectives(c.active).find((o) => !o.dead);
@@ -1874,9 +1874,9 @@ export class GameEngine {
     if (!left && !this.conq.routed) {
       this.conq.routed = true;
       this.waveQueue = [];
-      this.routEnemies();
-      this.callbacks.onWaveMod?.({ id: 'conquista', name: `${POST_TITLE[this.conq.kinds[this.conq.active] ?? 'powder']} ✓`, glyph: '✓', desc: 'Objetivo cumprido: o bando foge' });
-      this.callbacks.onWaveChange(this.wave, 'Objetivo cumprido', 'O bando foge');
+      this.hesitate();
+      this.callbacks.onWaveMod?.({ id: 'conquista', name: `${POST_TITLE[this.conq.kinds[this.conq.active] ?? 'powder']} ✓`, glyph: '✓', desc: 'Objetivo cumprido: o bando hesita' });
+      this.callbacks.onWaveChange(this.wave, 'Objetivo cumprido', 'O bando hesita: acabe com ele');
     }
   }
 
@@ -2004,7 +2004,25 @@ export class GameEngine {
     e.aura = this.makeAura(0xff2a18, 1.7);
   }
 
-  // The enemies still standing turn and run, then vanish (no Honra, no drops)
+  // The leader is down (or the objective done): no more reinforcements and the band is shaken - a moment
+  // of staggering and a posture bar most of the way full, so the next blows break it - but nobody runs:
+  // the wave ends when the last one is beaten, and every kill still counts
+  private hesitate() {
+    for (const e of this.enemies) {
+      if (e.dead || e.flee || e.patrol) continue;
+      this.cancelStrike(e);
+      e.token = false;
+      e.dodgeT = 0;
+      e.mode = 'recover';
+      e.modeT = 0;
+      e.staggerT = Math.max(e.staggerT, rand(0.9, 1.5));
+      if (e.brokenT <= 0) e.posture = Math.max(e.posture, e.maxPosture * 0.6);
+      this.enemyClip(e, this.reactionClip(e), { speed: 1, fadeIn: 0.08 });
+    }
+    this.callout('O BANDO HESITA!', 'steel', '怯');
+  }
+
+  // A patrol on the road breaks off when a post wakes (between posts, not a wave): it turns tail and vanishes
   private routEnemies(only?: (e: EnemyInstance) => boolean) {
     for (const e of this.enemies) {
       if (e.dead || e.flee || (only && !only(e))) continue;
@@ -2044,16 +2062,16 @@ export class GameEngine {
         this.spawnLabel(this.player.pos.x, this.player.pos.y + 3.2, this.player.pos.z, 'REFORÇOS!', '#ffd166', 1.2);
         sfx.wave();
       }
-      if (g.t >= g.dur) this.finishGoal(g, 'Amanheceu: o bando recua');
+      if (g.t >= g.dur) this.finishGoal(g, 'Amanheceu: acabe com os que restam');
     } else if (g.id === 'capitao' && g.captain && g.captain.dead) {
-      this.finishGoal(g, 'Capitão derrotado: o bando foge');
+      this.finishGoal(g, 'Capitão derrotado: o bando hesita');
     }
   }
 
   private finishGoal(g: NonNullable<GameEngine['goal']>, text: string) {
     g.done = true;
     this.waveQueue = [];
-    this.routEnemies();
+    this.hesitate();
     this.callbacks.onWaveMod?.({ id: g.id, name: `${g.name} ✓`, glyph: g.glyph, desc: text });
     this.callbacks.onWaveChange(this.wave, text, '');
     sfx.wave();
@@ -4764,6 +4782,73 @@ export class GameEngine {
     }
   }
 
+  // A foe thrown hard enough hits what is in its way: another foe takes the blow on (the thrown one loses most
+  // of it), a wall or a pillar stops it with a thud, a bounce and a daze. Weight and speed decide; the Oni
+  // and the Brutamontes never fly this far to begin with.
+  private stepKnockImpacts(e: EnemyInstance, bx: number, bz: number) {
+    const sp = Math.hypot(e.kb.x, e.kb.z);
+    if (sp < KNOCK_HIT.speed || this.state !== 'play') return;
+    const dx = e.kb.x / sp;
+    const dz = e.kb.z / sp;
+    // 1. the body behind it
+    if (this.time >= (e.chainT ?? 0)) {
+      for (const o of this.enemies) {
+        if (o === e || o.dead || o.flee || o.type === 'boss') continue;
+        const ox = o.pos.x - e.pos.x;
+        const oz = o.pos.z - e.pos.z;
+        const d = Math.hypot(ox, oz);
+        if (d > e.r + o.r + 0.15 || d < 1e-4 || (ox * dx + oz * dz) / d < 0.35) continue;
+        const j = sp * KNOCK_HIT.pass;
+        const k = knockShape(o, j, true);
+        o.kb.x += dx * k.v;
+        o.kb.z += dz * k.v;
+        o.kbK = k.k;
+        e.kb.multiplyScalar(KNOCK_HIT.keep);
+        e.chainT = this.time + 0.4;
+        o.chainT = this.time + 0.25;
+        const dmg = Math.round(KNOCK_HIT.dmg + sp * KNOCK_HIT.dmgPerSpeed);
+        const was = this.spHit;
+        this.spHit = true;
+        this.hitPt.set((e.pos.x + o.pos.x) / 2, e.pos.y + 1.1, (e.pos.z + o.pos.z) / 2);
+        this.hitEnemy(o, dmg, dx, dz, 0, false, { point: this.hitPt, dirX: dx, dirZ: dz });
+        this.spHit = was;
+        if (!e.dead) this.addEnemyPosture(e, e.maxPosture * 0.12);
+        this.callout('ATROPELO!', 'ember', '倒');
+        this.shake = Math.max(this.shake, 0.25);
+        break;
+      }
+    }
+    // 2. the wall: the collision pushed it back along some normal - what is left of its speed goes that way
+    if (this.time >= (e.wallT ?? 0) && massOf(e) < 2) {
+      const px = e.pos.x - bx;
+      const pz = e.pos.z - bz;
+      const pl = Math.hypot(px, pz);
+      if (pl > 0.015) {
+        const nx = px / pl;
+        const nz = pz / pl;
+        const vn = e.kb.x * nx + e.kb.z * nz;
+        if (vn < -KNOCK_HIT.speed * 0.55) {
+          e.kb.x -= (1 + KNOCK_HIT.bounce) * vn * nx;
+          e.kb.z -= (1 + KNOCK_HIT.bounce) * vn * nz;
+          e.wallT = this.time + 0.5;
+          const hard = Math.min(1.6, -vn / 12);
+          e.staggerT = Math.max(e.staggerT, 0.3 + 0.25 * hard);
+          this.cancelStrike(e);
+          e.token = false;
+          e.hp -= Math.round(KNOCK_HIT.wallDmg * hard);
+          this.hitPt.set(e.pos.x - nx * e.r, e.pos.y + 1.0, e.pos.z - nz * e.r);
+          this.impacts.spawn(this.hitPt, IMPACT_HEAVY, 1.3 + hard * 0.6, 0.2, 'heavy', { x: -nx, z: -nz });
+          this.emitParticles(this.hitPt.x, this.hitPt.y, this.hitPt.z, 8, 0xcfc6b4, 4 + 3 * hard, 1.5, 14, 0.4);
+          this.puff(e.pos.x - nx * e.r, e.pos.z - nz * e.r, 6, 1.6, nx, nz);
+          this.shake = Math.max(this.shake, 0.2 + 0.1 * hard);
+          sfx.thud(hard);
+          this.callout('CONTRA A PAREDE!', 'steel', '壁');
+          if (e.hp <= 0) this.killEnemy(e);
+        }
+      }
+    }
+  }
+
   private killEnemy(e: EnemyInstance) {
     e.dead = true;
     e.deathT = 0;
@@ -6717,7 +6802,10 @@ export class GameEngine {
       e.pos.z += mvz * spd * dt;
       e.pos.addScaledVector(e.kb, dt);
       e.kb.multiplyScalar(Math.exp(-(e.kbK ?? 6) * dt));
+      const kx0 = e.pos.x;
+      const kz0 = e.pos.z;
       this.collide(e.pos, e.r);
+      this.stepKnockImpacts(e, kx0, kz0);
       if (spd > 0.01 && (e.dodgeT ?? 0) <= 0) {
         // pushing against something and getting nowhere: take the other side for a moment
         if (Math.hypot(e.pos.x - px0, e.pos.z - pz0) < spd * dt * 0.25) {
