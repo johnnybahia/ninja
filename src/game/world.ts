@@ -716,6 +716,25 @@ export class World {
       torch: (x, z) => this.addTorch(b, x, z),
       banner: (x, z, ry) => this.addBanner(x, z, ry),
       rock: (x, z, sc, seed) => this.addRock(b, x, z, sc, seed),
+      stone: (x0, y0, z0, x1, y1, z1, r) => this.props.addStone(new THREE.Vector3(x0, y0, z0), new THREE.Vector3(x1, y1, z1), r),
+      wood: (x0, y0, z0, x1, y1, z1, r, red) => this.props.addWood(new THREE.Vector3(x0, y0, z0), new THREE.Vector3(x1, y1, z1), r, red),
+      post: (x, z, H, r, mat, extras, hp) => {
+        // a standing post of its own (not merged into the stage's mesh), so a blade can cut it down
+        const pole = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.85, r, H, 10), mat);
+        pole.position.set(x, H / 2, z);
+        pole.castShadow = true;
+        pole.receiveShadow = true;
+        this.root.add(pole);
+        const ex = (extras ?? []).map(([geo, m, ex, ey, ez]) => {
+          const me = new THREE.Mesh(geo, m);
+          me.position.set(x + ex, ey, z + ez);
+          me.castShadow = true;
+          this.root.add(me);
+          return me;
+        });
+        const solid = this.addSolid(x, z, r + 0.2, H);
+        this.props.addThin({ pole, H, base: new THREE.Vector3(x, 0, z), topGeo: (len) => new THREE.CylinderGeometry(r * 0.85, r * 0.9, len, 10), extras: ex, solid, dark: true }, hp ?? 2, r);
+      },
       halo: (x, y, z, size, k) => void this.haloSpots.push({ p: new THREE.Vector3(x, y, z), size, k, on: true }),
       ember: (x, y, z) => void this.emberSources.push(new THREE.Vector3(x, y, z))
     };
@@ -1328,6 +1347,7 @@ export class World {
       this.root.add(g);
       this.flames.push({ outer, inner, ph: rand(0, 10), light });
       this.addSolid(tx, tz, 0.35, 2.5);
+      this.props.addWood(new THREE.Vector3(tx, 0.1, tz), new THREE.Vector3(tx, 2.2, tz), 0.3);
       this.emberSources.push(new THREE.Vector3(tx, 2.6, tz));
       this.haloSpots.push({ p: new THREE.Vector3(tx, 2.75, tz), size: 4.2, k: 1.1, on: true });
     }

@@ -415,6 +415,16 @@ export class PropSystem {
     this.register({ kind: 'pillar', segs: [{ a: new THREE.Vector3(x, y0, z), b: new THREE.Vector3(x, y1, z), r }], red });
   }
 
+  /** Stonework of any shape (a wall, a statue, a footing): a capsule from a to b that throws sparks and chips */
+  addStone(a: THREE.Vector3, b: THREE.Vector3, r: number) {
+    this.register({ kind: 'rock', segs: [{ a: a.clone(), b: b.clone(), r }] });
+  }
+
+  /** Timber of any shape (a rail, a door, a beam): a capsule from a to b that splinters and keeps the gash */
+  addWood(a: THREE.Vector3, b: THREE.Vector3, r: number, red = false) {
+    this.register({ kind: 'pillar', segs: [{ a: a.clone(), b: b.clone(), r }], red });
+  }
+
   addStalk(foot: THREE.Vector3, crown: THREE.Vector3, parts: StalkParts) {
     const p = this.register({ kind: 'stalk', segs: [{ a: foot.clone(), b: crown.clone(), r: 0.085 }], stalk: parts });
     const base = new THREE.Matrix4();
