@@ -112,6 +112,7 @@ export interface EnemyInstance {
   rig: RigInstance;
   pos: THREE.Vector3;
   kb: THREE.Vector3;
+  kbK?: number; // how fast the knockback dies away (knock.ts: a heavy blow stops sooner)
   yaw: number;
   state: string;
   t: number;
