@@ -35,6 +35,12 @@ export interface StageCtx {
   torch(x: number, z: number): void;
   banner(x: number, z: number, ry: number): void;
   rock(x: number, z: number, s: number, seed: number): void;
+  /** stonework a blade strikes sparks from: a capsule between two points */
+  stone(x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, r: number): void;
+  /** timber a blade splinters and marks: a capsule between two points (red: lacquered) */
+  wood(x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, r: number, red?: boolean): void;
+  /** a standing post that can be cut down, with what it carries (geometry, material, offset from its foot) */
+  post(x: number, z: number, H: number, r: number, mat: THREE.Material, extras?: [THREE.BufferGeometry, THREE.Material, number, number, number][], hp?: number): void;
   halo(x: number, y: number, z: number, size: number, k: number): void;
   ember(x: number, y: number, z: number): void;
 }
@@ -125,6 +131,8 @@ function buildBamboo(c: StageCtx) {
   const per = 14; // leaf blades per stalk
   const wall = new THREE.InstancedMesh(kit.stalkG, kit.stalkM, N);
   const wallLeaves = new THREE.InstancedMesh(kit.leafG, kit.leafM, N * per);
+  const wallBase = new THREE.Vector3();
+  const wallTop = new THREE.Vector3();
   let li = 0;
   for (let i = 0; i < N; i++) {
     let x = 0;
@@ -142,6 +150,7 @@ function buildBamboo(c: StageCtx) {
     d.scale.set(R(1.1, 1.7), h, R(1.1, 1.7));
     d.updateMatrix();
     wall.setMatrixAt(i, d.matrix);
+    wallTop.set(0, 7, 0).applyMatrix4(d.matrix);
     for (let j = 0; j < per; j++) {
       d.position.set(x + R(-0.8, 0.8), 7 * h * R(0.45, 1.0), z + R(-0.8, 0.8));
       d.rotation.set(R(0.6, 1.4), R(0, TAU), R(-0.3, 0.3));
@@ -150,6 +159,8 @@ function buildBamboo(c: StageCtx) {
       wallLeaves.setMatrixAt(li, d.matrix);
       wallLeaves.setColorAt(li++, col.setHSL(0.25 + R(-0.03, 0.03), 0.5, R(0.26, 0.42)));
     }
+    // the front rows are within a blade's reach: they can be cut like the clumps
+    if (Math.hypot(x, z) < BAMBOO_R + 3.4) c.props.addStalk(wallBase.set(x, 0, z), wallTop, { mesh: wall, idx: i, h, leaves: wallLeaves, leafStart: i * per, leafCount: per, map: kit.tex });
   }
   wall.castShadow = true;
   c.group.add(wall, wallLeaves);
@@ -228,6 +239,8 @@ function buildBamboo(c: StageCtx) {
   c.b.add(curvedRoof(3.9, 3.3, 1.15, 0.85, 0.4), c.M.roof, mtx(0, 2.4, sz));
   c.b.add(box(2.0, 0.16, 0.2), c.M.dark, mtx(0, 3.56, sz));
   c.solid(0, sz, 2.1, 3.4);
+  c.stone(-1.5, 0.35, sz + 0.6, 1.5, 0.35, sz + 0.6, 0.95);
+  c.wood(0, 0.9, sz, 0, 2.5, sz, 1.15);
   c.halo(0, 1.6, sz + 1.0, 2.6, 0.7);
   torii(c, 0, -10.4, 0, 0.52);
   torii(c, 0, 17.2, 0, 0.8);
@@ -238,6 +251,7 @@ function buildBamboo(c: StageCtx) {
     c.b.add(new THREE.SphereGeometry(0.19 * js, 12, 9), c.M.stone, mtx(jx, 0.86 * js, jz));
     c.b.add(box(0.3 * js, 0.2 * js, 0.04), c.M.torii, mtx(jx, 0.6 * js, jz + 0.22 * js, 0.25));
     c.solid(jx, jz, 0.32, 1);
+    c.stone(jx, 0.05, jz, jx, 0.95 * js, jz, 0.26 * js);
   }
 
   const rocks: [number, number, number][] = [[-9.5, -10.5, 1.15], [15, 3.5, 1.0], [-15.5, 2, 0.9], [3.5, 13.5, 0.8], [-6.5, -16.5, 0.85]];
@@ -280,6 +294,16 @@ function buildCastle(c: StageCtx) {
     c.b.add(box(len, 1.25, 1.0), plaster, at(mtx(0, 2.7, 0)));
     for (const s of [-1, 1]) c.b.add(box(len + 0.3, 0.14, 1.15), c.M.roof, at(mtx(0, 3.62, s * 0.46, s * 0.52, 0, 0)));
     c.b.add(box(len + 0.3, 0.2, 0.24), c.M.dark, at(mtx(0, 3.98, 0)));
+    // a blade scraping along the wall: stone below, the black boards above
+    const n = Math.ceil(len / 8);
+    const dx = Math.cos(ry);
+    const dz = -Math.sin(ry);
+    for (let i = 0; i < n; i++) {
+      const t0 = -len / 2 + (len * i) / n;
+      const t1 = -len / 2 + (len * (i + 1)) / n;
+      c.stone(cx + dx * t0, 0.6, cz + dz * t0, cx + dx * t1, 0.6, cz + dz * t1, 0.9);
+      c.wood(cx + dx * t0, 1.75, cz + dz * t0, cx + dx * t1, 1.75, cz + dz * t1, 0.62);
+    }
   };
   const W = YARD + 0.85; // wall centre line
   const L = W * 2 + 1.7;
@@ -300,6 +324,9 @@ function buildCastle(c: StageCtx) {
     for (const y of [0.7, 2.1, 3.5]) c.b.add(box(2.9, 0.16, 0.26), c.M.dark, mtx(px, y, W - 0.1));
   }
   c.b.add(box(5.4, 0.3, 0.3), c.M.woodDark, mtx(0, 1.5, W - 0.32));
+  c.wood(-2.9, 1.2, W - 0.15, 2.9, 1.2, W - 0.15, 0.35);
+  c.wood(-2.9, 2.8, W - 0.15, 2.9, 2.8, W - 0.15, 0.35);
+  for (const px of [-3.3, 3.3]) c.wood(px, 0.1, W, px, 4.6, W, 0.5);
 
   // corner turrets on the north side
   for (const sx of [-1, 1]) {
@@ -340,6 +367,7 @@ function buildCastle(c: StageCtx) {
   }
   c.b.add(box(2.2, 0.14, 1.4), c.M.woodDark, mtx(0, 0.5, dz));
   c.solid(0, dz, 1.35, 3);
+  c.wood(0, 1.75, dz - 0.5, 0, 1.75, dz + 0.5, 1.05);
   c.banner(-4.2, dz, 0);
   c.banner(4.2, dz, 0);
 
@@ -360,12 +388,11 @@ function buildCastle(c: StageCtx) {
   }
 
   // straw-bound striking posts (makiwara) to cut at
-  for (const [px, pz] of [[-12.5, 5.5], [-12.5, 9.5], [12.5, 5.5], [12.5, 9.5]]) {
-    c.b.add(cyl(0.12, 0.15, 2.0, 10), c.M.woodDark, mtx(px, 1.0, pz));
-    c.b.add(cyl(0.24, 0.24, 0.8, 12), c.M.wood, mtx(px, 1.45, pz));
-    c.b.add(box(1.1, 0.1, 0.1), c.M.woodDark, mtx(px, 1.0, pz));
-    c.solid(px, pz, 0.36, 2.1);
-    c.props.addPillar(px, pz, 0, 2.0, 0.24, false);
+  // (posts of their own: three good cuts bring one down, straw and all)
+  const strawG = cyl(0.24, 0.24, 0.8, 12);
+  const armG = box(1.1, 0.1, 0.1);
+  for (const [px, pz] of [[-12.5, 5.5], [-12.5, 9.5], [12.5, 5.5], [12.5, 9.5], [-6, 13.5], [6, 13.5]]) {
+    c.post(px, pz, 2.0, 0.15, c.M.woodDark, [[strawG, c.M.wood, 0, 1.45, 0], [armG, c.M.woodDark, 0, 1.0, 0]], 3);
   }
 
   for (const z of [-7, 0, 7]) {
@@ -466,6 +493,7 @@ function buildLake(c: StageCtx) {
     const len = Math.hypot(x1 - x0, z1 - z0);
     const ry = Math.atan2(x1 - x0, z1 - z0);
     for (const y of [0.52, 0.98]) c.b.add(box(0.09, 0.09, len), c.M.torii, mtx((x0 + x1) / 2, y, (z0 + z1) / 2, 0, ry, 0));
+    c.wood(x0, 0.75, z0, x1, 0.75, z1, 0.3, true);
     const n = Math.max(1, Math.round(len / 2.1));
     for (let i = 0; i <= n; i++) {
       const t = i / n;
@@ -491,6 +519,7 @@ function buildLake(c: StageCtx) {
     for (const px of [-4.6, 4.6]) {
       c.b.add(cyl(0.3, 0.34, 5.6, 14), c.M.torii, mtx(px, 2.8, z));
       c.solid(px, s * (DECK_Z - 0.2), 0.6, 6);
+      c.props.addPillar(px, z, 0.2, 5.6, 0.34, true);
     }
     c.b.add(curvedBeam(12.6, 0.42, 0.85, 0.55), c.M.dark, mtx(0, 5.9, z));
     c.b.add(curvedBeam(11.4, 0.34, 0.6, 0.35), c.M.torii, mtx(0, 5.48, z));
@@ -498,6 +527,8 @@ function buildLake(c: StageCtx) {
     c.b.add(box(8.9, 0.16, 0.2), c.M.woodDark, mtx(0, 2.75, z));
     c.b.add(box(8.9, 0.16, 0.2), c.M.woodDark, mtx(0, 0.25, z));
     for (let x = -4.2; x <= 4.21; x += 0.6) c.b.add(box(0.1, 2.6, 0.1), c.M.woodDark, mtx(x, 1.5, z));
+    c.wood(-4.3, 0.9, z, 4.3, 0.9, z, 0.3);
+    c.wood(-4.3, 2.1, z, 4.3, 2.1, z, 0.3);
     for (const sx of [-1, 1]) for (let x = 5.2; x <= 8.5; x += 0.55) c.b.add(box(0.1, 1.5, 0.1), c.M.torii, mtx(sx * x, 0.75, z));
   }
 
@@ -535,6 +566,16 @@ function buildLake(c: StageCtx) {
     }
   }
 
+  // things on the deck to cut: banners at the mouths of the bridge and mooring posts on the stage
+  for (const sz of [-1, 1]) {
+    c.banner(-7.7, sz * 19.5, Math.PI / 2);
+    c.banner(7.7, sz * 19.5, -Math.PI / 2);
+  }
+  const capG = new THREE.ConeGeometry(0.2, 0.26, 8);
+  const ropeG = cyl(0.19, 0.19, 0.16, 10);
+  for (const [mx, mz] of [[-10.6, 4.5], [10.6, 4.5], [-10.6, -4.5], [10.6, -4.5]]) {
+    c.post(mx, mz, 1.5, 0.15, c.M.woodDark, [[capG, c.M.torii, 0, 1.63, 0], [ropeG, c.M.wood, 0, 1.1, 0]], 2);
+  }
   c.lantern(-7.4, 14.6, true);
   c.lantern(7.4, 14.6, true);
   c.lantern(-7.4, -14.6, true);
